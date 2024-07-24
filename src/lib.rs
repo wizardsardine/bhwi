@@ -1,14 +1,12 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+pub mod common;
+pub mod jade;
+pub mod ledger;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub trait Interpreter {
+    type Command;
+    type Transmit;
+    type Response;
+    fn start(&mut self, command: Self::Command) -> Result<Self::Transmit, ()>;
+    fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, ()>;
+    fn end(self) -> Result<Self::Response, ()>;
 }
