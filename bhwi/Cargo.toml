@@ -1,0 +1,16 @@
+[package]
+name = "bhwi"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = ["jade"]
+jade = ["serde", "serde_bytes", "serde_cbor"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_bytes = { version = "0.11.14", optional = true }
+serde_cbor = { version = "0.11", optional = true }
+bitcoin = "0.32.2"

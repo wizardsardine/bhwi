@@ -20,6 +20,10 @@ pub struct Transmit {
     pub payload: Vec<u8>,
 }
 
+pub enum Error {
+    NoErrorOrResult,
+}
+
 impl From<Command> for jade::JadeCommand {
     fn from(cmd: Command) -> Self {
         match cmd {
@@ -54,7 +58,16 @@ impl From<jade::JadeTransmit> for Transmit {
     }
 }
 
-pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response>;
+impl From<jade::JadeError> for Error {
+    fn from(error: jade::JadeError) -> Error {
+        match error {
+            jade::JadeError::NoErrorOrResult => Error::NoErrorOrResult,
+            jade::JadeError::Rpc(_) => Error::NoErrorOrResult,
+        }
+    }
+}
+
+pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Error>;
 
 impl From<Command> for ledger::LedgerCommand {
     fn from(cmd: Command) -> Self {
@@ -81,7 +94,15 @@ impl From<Vec<u8>> for Transmit {
     }
 }
 
-pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response>;
+impl From<ledger::LedgerError> for Error {
+    fn from(error: ledger::LedgerError) -> Error {
+        match error {
+            ledger::LedgerError::NoErrorOrResult => Error::NoErrorOrResult,
+        }
+    }
+}
+
+pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
 
 #[cfg(test)]
 mod tests {
@@ -96,6 +117,7 @@ mod tests {
                     Command = super::Command,
                     Transmit = super::Transmit,
                     Response = super::Response,
+                    Error = super::Error,
                 >,
             >,
         > = vec![

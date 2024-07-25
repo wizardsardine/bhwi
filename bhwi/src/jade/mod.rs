@@ -27,12 +27,12 @@ pub struct JadeTransmit {
     pub payload: Vec<u8>,
 }
 
-pub struct JadeInterpreter<C, T, R> {
+pub struct JadeInterpreter<C, T, R, E> {
     network: Network,
-    _marker: std::marker::PhantomData<(C, T, R)>,
+    _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
 
-impl<C, T, R> JadeInterpreter<C, T, R> {
+impl<C, T, R, E> JadeInterpreter<C, T, R, E> {
     pub fn new() -> Self {
         Self {
             network: Network::Bitcoin,
@@ -41,23 +41,25 @@ impl<C, T, R> JadeInterpreter<C, T, R> {
     }
 }
 
-impl<C, T, R> Interpreter for JadeInterpreter<C, T, R>
+impl<C, T, R, E> Interpreter for JadeInterpreter<C, T, R, E>
 where
     C: Into<JadeCommand>,
     T: From<JadeTransmit>,
     R: From<JadeResponse>,
+    E: From<JadeError>,
 {
     type Command = C;
     type Transmit = T;
     type Response = R;
+    type Error = E;
 
-    fn start(&mut self, command: Self::Command) -> Result<Self::Transmit, ()> {
-        Err(())
+    fn start(&mut self, command: Self::Command) -> Result<Self::Transmit, Self::Error> {
+        Err(JadeError::NoErrorOrResult.into())
     }
-    fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, ()> {
-        Err(())
+    fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, Self::Error> {
+        Err(JadeError::NoErrorOrResult.into())
     }
-    fn end(self) -> Result<Self::Response, ()> {
-        Err(())
+    fn end(self) -> Result<Self::Response, Self::Error> {
+        Err(JadeError::NoErrorOrResult.into())
     }
 }
