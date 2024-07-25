@@ -11,7 +11,7 @@ pub enum Response {
 }
 
 pub enum Recipient {
-    Local,
+    Device,
     PinServer { url: String },
 }
 
@@ -39,7 +39,7 @@ impl From<jade::JadeResponse> for Response {
 impl From<jade::JadeRecipient> for Recipient {
     fn from(recipient: jade::JadeRecipient) -> Recipient {
         match recipient {
-            jade::JadeRecipient::Local => Recipient::Local,
+            jade::JadeRecipient::Device => Recipient::Device,
             jade::JadeRecipient::PinServer { url } => Recipient::PinServer { url },
         }
     }
@@ -75,7 +75,7 @@ impl From<ledger::LedgerResponse> for Response {
 impl From<Vec<u8>> for Transmit {
     fn from(payload: Vec<u8>) -> Transmit {
         Transmit {
-            recipient: Recipient::Local,
+            recipient: Recipient::Device,
             payload,
         }
     }
@@ -89,7 +89,7 @@ mod tests {
     use crate::Interpreter;
 
     #[test]
-    fn common_interpreter_are_satisfied() {
+    fn common_interpreter_is_satisfied() {
         let interpreters: Vec<
             Box<
                 dyn Interpreter<

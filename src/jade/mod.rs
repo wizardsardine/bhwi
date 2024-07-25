@@ -18,7 +18,7 @@ pub enum JadeResponse {
 }
 
 pub enum JadeRecipient {
-    Local,
+    Device,
     PinServer { url: String },
 }
 
