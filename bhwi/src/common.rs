@@ -63,6 +63,8 @@ impl From<jade::JadeError> for Error {
         match error {
             jade::JadeError::NoErrorOrResult => Error::NoErrorOrResult,
             jade::JadeError::Rpc(_) => Error::NoErrorOrResult,
+            jade::JadeError::Request(_) => Error::NoErrorOrResult,
+            jade::JadeError::Unexpected(_) => Error::NoErrorOrResult,
         }
     }
 }
