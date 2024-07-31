@@ -7,6 +7,7 @@ pub enum Command {
 }
 
 pub enum Response {
+    TaskDone,
     MasterFingerprint(Fingerprint),
 }
 
@@ -35,6 +36,7 @@ impl From<Command> for jade::JadeCommand {
 impl From<jade::JadeResponse> for Response {
     fn from(res: jade::JadeResponse) -> Response {
         match res {
+            jade::JadeResponse::TaskDone => Response::TaskDone,
             jade::JadeResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
         }
     }
@@ -65,6 +67,7 @@ impl From<jade::JadeError> for Error {
             jade::JadeError::Rpc(_) => Error::NoErrorOrResult,
             jade::JadeError::Request(_) => Error::NoErrorOrResult,
             jade::JadeError::Unexpected(_) => Error::NoErrorOrResult,
+            jade::JadeError::HandshakeRefused => Error::NoErrorOrResult,
         }
     }
 }
