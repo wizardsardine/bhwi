@@ -63,6 +63,14 @@ impl<C, T, R, E> JadeInterpreter<C, T, R, E> {
             _marker: std::marker::PhantomData::default(),
         }
     }
+
+    pub fn with_network(mut self, network: Network) -> Self {
+        self.network = match network {
+            Network::Bitcoin => JADE_NETWORK_MAINNET,
+            _ => JADE_NETWORK_TESTNET,
+        };
+        self
+    }
 }
 
 fn request<S, T, E>(method: &str, params: Option<S>) -> Result<T, E>
