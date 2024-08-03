@@ -1,4 +1,14 @@
+mod command;
+mod interpreter;
+mod merkle;
+
+pub mod apdu;
+pub mod error;
+pub mod psbt;
+pub mod wallet;
+
 use bitcoin::{bip32::Fingerprint, Network};
+pub use wallet::{WalletPolicy, WalletPubKey};
 
 use crate::Interpreter;
 
