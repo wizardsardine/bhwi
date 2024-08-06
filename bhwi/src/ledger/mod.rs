@@ -1,6 +1,6 @@
 mod command;
-mod interpreter;
 mod merkle;
+mod store;
 
 pub mod apdu;
 pub mod error;
@@ -11,6 +11,7 @@ use bitcoin::{bip32::Fingerprint, Network};
 pub use wallet::{WalletPolicy, WalletPubKey};
 
 use crate::Interpreter;
+use store::DelegatedStore;
 
 pub enum LedgerError {
     NoErrorOrResult,
@@ -26,6 +27,7 @@ pub enum LedgerResponse {
 
 pub struct LedgerInterpreter<C, T, R, E> {
     network: Network,
+    store: Option<DelegatedStore>,
     _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
 
@@ -33,6 +35,7 @@ impl<C, T, R, E> LedgerInterpreter<C, T, R, E> {
     pub fn new() -> Self {
         Self {
             network: Network::Bitcoin,
+            store: None,
             _marker: std::marker::PhantomData::default(),
         }
     }

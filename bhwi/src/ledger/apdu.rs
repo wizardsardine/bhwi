@@ -80,12 +80,10 @@ pub enum StatusWord {
     OK = 0x9000,
     /// The command is interrupted, and requires the client's response
     InterruptedExecution = 0xE000,
-    /// Unknown
-    Unknown,
 }
 
 impl TryFrom<u16> for StatusWord {
-    type Error = ();
+    type Error = ApduError;
 
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
@@ -100,13 +98,13 @@ impl TryFrom<u16> for StatusWord {
             0xB008 => Ok(StatusWord::SignatureFail),
             0x9000 => Ok(StatusWord::OK),
             0xE000 => Ok(StatusWord::InterruptedExecution),
-            _ => Err(()),
+            _ => Err(ApduError::StatusWordUnknown),
         }
     }
 }
 
 #[derive(Clone)]
-pub struct APDUCommand {
+pub struct ApduCommand {
     pub cla: u8,
     pub ins: u8,
     pub p1: u8,
@@ -114,7 +112,7 @@ pub struct APDUCommand {
     pub data: Vec<u8>,
 }
 
-impl APDUCommand {
+impl ApduCommand {
     pub fn encode(&self) -> Vec<u8> {
         let mut vec = vec![self.cla, self.ins, self.p1, self.p2, self.data.len() as u8];
         vec.extend(self.data.iter());
@@ -122,7 +120,7 @@ impl APDUCommand {
     }
 }
 
-impl core::default::Default for APDUCommand {
+impl core::default::Default for ApduCommand {
     fn default() -> Self {
         Self {
             cla: Cla::Default as u8,
@@ -132,4 +130,30 @@ impl core::default::Default for APDUCommand {
             data: Vec::new(),
         }
     }
+}
+
+#[derive(Debug)]
+pub struct ApduResponse {
+    data: Vec<u8>,
+    status_word: StatusWord,
+}
+
+impl TryFrom<Vec<u8>> for ApduResponse {
+    type Error = ApduError;
+    fn try_from(res: Vec<u8>) -> Result<Self, Self::Error> {
+        if res.len() < 2 {
+            return Err(ApduError::ResponseTooShort);
+        }
+        let status_word = StatusWord::try_from(u16::from_be_bytes([res[0], res[1]]))?;
+
+        Ok(ApduResponse {
+            data: res[2..].to_vec(),
+            status_word,
+        })
+    }
+}
+
+pub enum ApduError {
+    StatusWordUnknown,
+    ResponseTooShort,
 }

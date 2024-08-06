@@ -8,7 +8,6 @@ use bitcoin::{
 
 use super::{apdu::ClientCommandCode, merkle::MerkleTree};
 
-/// Interpreter for the client-side commands.
 /// This struct keeps has methods to keep track of:
 ///   - known preimages
 ///   - known Merkle trees from lists of elements
@@ -20,14 +19,14 @@ use super::{apdu::ClientCommandCode, merkle::MerkleTree};
 ///     GET_MORE_ELEMENTS commands from the hardware wallet.
 /// Finally, it keeps track of the yielded values (that is, the values sent from the hardware
 /// wallet with a YIELD client command).
-pub struct ClientCommandInterpreter {
+pub struct DelegatedStore {
     yielded: Vec<Vec<u8>>,
     queue: Vec<Vec<u8>>,
     known_preimages: Vec<([u8; 32], Vec<u8>)>,
     trees: Vec<MerkleTree>,
 }
 
-impl ClientCommandInterpreter {
+impl DelegatedStore {
     pub fn new() -> Self {
         Self {
             yielded: Vec::new(),
@@ -92,9 +91,9 @@ impl ClientCommandInterpreter {
 
     // Interprets the client command requested by the hardware wallet, returns the appropriate
     // response to transmit back and updates interpreter internal states.
-    pub fn execute(&mut self, command: Vec<u8>) -> Result<Vec<u8>, InterpreterError> {
+    pub fn execute(&mut self, command: Vec<u8>) -> Result<Vec<u8>, StoreError> {
         if command.is_empty() {
-            return Err(InterpreterError::EmptyInput);
+            return Err(StoreError::EmptyInput);
         }
         match ClientCommandCode::try_from(command[0]) {
             Ok(ClientCommandCode::Yield) => {
@@ -111,7 +110,7 @@ impl ClientCommandInterpreter {
                 get_merkle_leaf_index(&self.trees, &command[1..])
             }
             Ok(ClientCommandCode::GetMoreElements) => get_more_elements(&mut self.queue),
-            Err(()) => Err(InterpreterError::UnknownCommand(command[0])),
+            Err(()) => Err(StoreError::UnknownCommand(command[0])),
         }
     }
 
@@ -125,9 +124,9 @@ fn get_preimage_command(
     queue: &mut Vec<Vec<u8>>,
     known_preimages: &[([u8; 32], Vec<u8>)],
     request: &[u8],
-) -> Result<Vec<u8>, InterpreterError> {
+) -> Result<Vec<u8>, StoreError> {
     if request.len() != 33 || request[0] != b'\0' {
-        return Err(InterpreterError::UnsupportedRequest(
+        return Err(StoreError::UnsupportedRequest(
             ClientCommandCode::GetPreimage as u8,
         ));
     };
@@ -135,7 +134,7 @@ fn get_preimage_command(
     let (_, preimage) = known_preimages
         .iter()
         .find(|(hash, _)| hash == &request[1..])
-        .ok_or(InterpreterError::UnknownHash)?;
+        .ok_or(StoreError::UnknownHash)?;
 
     let preimage_len_out = encode::serialize(&VarInt(preimage.len() as u64));
 
@@ -165,38 +164,35 @@ fn get_merkle_leaf_proof(
     queue: &mut Vec<Vec<u8>>,
     trees: &[MerkleTree],
     request: &[u8],
-) -> Result<Vec<u8>, InterpreterError> {
+) -> Result<Vec<u8>, StoreError> {
     if !queue.is_empty() {
-        return Err(InterpreterError::UnexpectedQueue);
+        return Err(StoreError::UnexpectedQueue);
     } else if request.len() < 34 {
-        return Err(InterpreterError::UnsupportedRequest(
+        return Err(StoreError::UnsupportedRequest(
             ClientCommandCode::GetMerkleLeafProof as u8,
         ));
     };
 
     let root = &request[0..32];
-    let (tree_size, read): (VarInt, usize) =
-        encode::deserialize_partial(&request[32..]).map_err(|_| {
-            InterpreterError::UnsupportedRequest(ClientCommandCode::GetMerkleLeafProof as u8)
-        })?;
+    let (tree_size, read): (VarInt, usize) = encode::deserialize_partial(&request[32..])
+        .map_err(|_| StoreError::UnsupportedRequest(ClientCommandCode::GetMerkleLeafProof as u8))?;
 
     // deserialize consumes the entire vector.
-    let leaf_index: VarInt = encode::deserialize(&request[32 + read..]).map_err(|_| {
-        InterpreterError::UnsupportedRequest(ClientCommandCode::GetMerkleLeafProof as u8)
-    })?;
+    let leaf_index: VarInt = encode::deserialize(&request[32 + read..])
+        .map_err(|_| StoreError::UnsupportedRequest(ClientCommandCode::GetMerkleLeafProof as u8))?;
 
     let tree = trees
         .iter()
         .find(|tree| tree.root_hash() == root)
-        .ok_or(InterpreterError::UnknownHash)?;
+        .ok_or(StoreError::UnknownHash)?;
 
     if leaf_index >= tree_size || tree_size.0 != tree.size() as u64 {
-        return Err(InterpreterError::InvalidIndexOrSize);
+        return Err(StoreError::InvalidIndexOrSize);
     }
 
     let proof = tree
         .get_leaf_proof(leaf_index.0 as usize)
-        .ok_or(InterpreterError::InvalidIndexOrSize)?;
+        .ok_or(StoreError::InvalidIndexOrSize)?;
 
     let len_proof = proof.len();
     let mut first_part_proof = Vec::new();
@@ -220,12 +216,9 @@ fn get_merkle_leaf_proof(
     Ok(response)
 }
 
-fn get_merkle_leaf_index(
-    trees: &[MerkleTree],
-    request: &[u8],
-) -> Result<Vec<u8>, InterpreterError> {
+fn get_merkle_leaf_index(trees: &[MerkleTree], request: &[u8]) -> Result<Vec<u8>, StoreError> {
     if request.len() < 64 {
-        return Err(InterpreterError::UnsupportedRequest(
+        return Err(StoreError::UnsupportedRequest(
             ClientCommandCode::GetMerkleLeafIndex as u8,
         ));
     }
@@ -235,26 +228,24 @@ fn get_merkle_leaf_index(
     let tree = trees
         .iter()
         .find(|tree| tree.root_hash() == root)
-        .ok_or(InterpreterError::UnknownHash)?;
+        .ok_or(StoreError::UnknownHash)?;
 
-    let leaf_index = tree
-        .get_leaf_index(hash)
-        .ok_or(InterpreterError::UnknownHash)?;
+    let leaf_index = tree.get_leaf_index(hash).ok_or(StoreError::UnknownHash)?;
 
     let mut response = 1_u8.to_be_bytes().to_vec();
     response.extend(encode::serialize(&VarInt(leaf_index as u64)));
     Ok(response)
 }
 
-fn get_more_elements(queue: &mut Vec<Vec<u8>>) -> Result<Vec<u8>, InterpreterError> {
+fn get_more_elements(queue: &mut Vec<Vec<u8>>) -> Result<Vec<u8>, StoreError> {
     if queue.is_empty() {
-        return Err(InterpreterError::UnexpectedQueue);
+        return Err(StoreError::UnexpectedQueue);
     }
 
     // The queue must contain only element of the same length.
     let element_length = queue[0].len();
     if queue.iter().any(|e| e.len() != element_length) {
-        return Err(InterpreterError::UnexpectedQueue);
+        return Err(StoreError::UnexpectedQueue);
     }
 
     let mut response_elements = Vec::new();
@@ -304,7 +295,7 @@ pub fn get_merkleized_map_commitment(mapping: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> 
 }
 
 #[derive(Debug)]
-pub enum InterpreterError {
+pub enum StoreError {
     EmptyInput,
     UnknownCommand(u8),
     UnsupportedRequest(u8),

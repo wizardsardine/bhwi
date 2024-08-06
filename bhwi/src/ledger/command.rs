@@ -7,13 +7,13 @@ use bitcoin::{
 use core::default::Default;
 
 use super::{
-    apdu::{self, APDUCommand},
+    apdu::{self, ApduCommand},
     wallet::WalletPolicy,
 };
 
 /// Creates the APDU Command to retrieve the app's name, version and state flags.
-pub fn get_version() -> APDUCommand {
-    APDUCommand {
+pub fn get_version() -> ApduCommand {
+    ApduCommand {
         ins: apdu::BitcoinCommandCode::GetVersion as u8,
         p2: 0x00,
         ..Default::default()
@@ -21,8 +21,8 @@ pub fn get_version() -> APDUCommand {
 }
 
 /// Creates the APDU Command to retrieve the master fingerprint.
-pub fn get_master_fingerprint() -> APDUCommand {
-    APDUCommand {
+pub fn get_master_fingerprint() -> ApduCommand {
+    ApduCommand {
         cla: apdu::Cla::Bitcoin as u8,
         ins: apdu::BitcoinCommandCode::GetMasterFingerprint as u8,
         ..Default::default()
@@ -30,7 +30,7 @@ pub fn get_master_fingerprint() -> APDUCommand {
 }
 
 /// Creates the APDU command required to get the extended pubkey with the given derivation path.
-pub fn get_extended_pubkey(path: &DerivationPath, display: bool) -> APDUCommand {
+pub fn get_extended_pubkey(path: &DerivationPath, display: bool) -> ApduCommand {
     let child_numbers: &[ChildNumber] = path.as_ref();
     let data: Vec<u8> = child_numbers.iter().fold(
         vec![
@@ -43,7 +43,7 @@ pub fn get_extended_pubkey(path: &DerivationPath, display: bool) -> APDUCommand 
         },
     );
 
-    APDUCommand {
+    ApduCommand {
         cla: apdu::Cla::Bitcoin as u8,
         ins: apdu::BitcoinCommandCode::GetExtendedPubkey as u8,
         data,
@@ -52,11 +52,11 @@ pub fn get_extended_pubkey(path: &DerivationPath, display: bool) -> APDUCommand 
 }
 
 /// Creates the APDU command required to register the given wallet policy.
-pub fn register_wallet(policy: &WalletPolicy) -> APDUCommand {
+pub fn register_wallet(policy: &WalletPolicy) -> ApduCommand {
     let bytes = policy.serialize();
     let mut data = encode::serialize(&VarInt(bytes.len() as u64));
     data.extend(bytes);
-    APDUCommand {
+    ApduCommand {
         cla: apdu::Cla::Bitcoin as u8,
         ins: apdu::BitcoinCommandCode::RegisterWallet as u8,
         data,
@@ -71,14 +71,14 @@ pub fn get_wallet_address(
     change: bool,
     address_index: u32,
     display: bool,
-) -> APDUCommand {
+) -> ApduCommand {
     let mut data: Vec<u8> = Vec::with_capacity(70);
     data.push(if display { 1_u8 } else { b'\0' });
     data.extend_from_slice(&policy.id());
     data.extend_from_slice(hmac.unwrap_or(&[b'\0'; 32]));
     data.push(if change { 1_u8 } else { b'\0' });
     data.extend_from_slice(&address_index.to_be_bytes());
-    APDUCommand {
+    ApduCommand {
         cla: apdu::Cla::Bitcoin as u8,
         ins: apdu::BitcoinCommandCode::GetWalletAddress as u8,
         data,
@@ -95,7 +95,7 @@ pub fn sign_psbt(
     output_commitments_root: &[u8; 32],
     policy: &WalletPolicy,
     hmac: Option<&[u8; 32]>,
-) -> APDUCommand {
+) -> ApduCommand {
     let mut data: Vec<u8> = Vec::new();
     data.extend_from_slice(global_mapping_commitment);
     data.extend(encode::serialize(&VarInt(inputs_number as u64)));
@@ -104,7 +104,7 @@ pub fn sign_psbt(
     data.extend_from_slice(output_commitments_root);
     data.extend_from_slice(&policy.id());
     data.extend_from_slice(hmac.unwrap_or(&[b'\0'; 32]));
-    APDUCommand {
+    ApduCommand {
         cla: apdu::Cla::Bitcoin as u8,
         ins: apdu::BitcoinCommandCode::SignPSBT as u8,
         data,
@@ -117,7 +117,7 @@ pub fn sign_message(
     message_length: usize,
     message_commitment_root: &[u8; 32],
     path: &DerivationPath,
-) -> APDUCommand {
+) -> ApduCommand {
     let child_numbers: &[ChildNumber] = path.as_ref();
     let mut data: Vec<u8> =
         child_numbers
@@ -129,7 +129,7 @@ pub fn sign_message(
     data.extend(encode::serialize(&VarInt(message_length as u64)));
     data.extend_from_slice(message_commitment_root);
 
-    APDUCommand {
+    ApduCommand {
         cla: apdu::Cla::Bitcoin as u8,
         ins: apdu::BitcoinCommandCode::SignMessage as u8,
         data,
@@ -138,8 +138,8 @@ pub fn sign_message(
 }
 
 /// Creates the APDU command to CONTINUE.
-pub fn continue_interrupted(data: Vec<u8>) -> APDUCommand {
-    APDUCommand {
+pub fn continue_interrupted(data: Vec<u8>) -> ApduCommand {
+    ApduCommand {
         cla: apdu::Cla::Framework as u8,
         ins: apdu::FrameworkCommandCode::ContinueInterrupted as u8,
         data,
