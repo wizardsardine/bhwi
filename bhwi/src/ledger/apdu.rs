@@ -134,8 +134,8 @@ impl core::default::Default for ApduCommand {
 
 #[derive(Debug)]
 pub struct ApduResponse {
-    data: Vec<u8>,
-    status_word: StatusWord,
+    pub data: Vec<u8>,
+    pub status_word: StatusWord,
 }
 
 impl TryFrom<Vec<u8>> for ApduResponse {

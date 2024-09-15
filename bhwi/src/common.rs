@@ -103,6 +103,7 @@ impl From<ledger::LedgerError> for Error {
     fn from(error: ledger::LedgerError) -> Error {
         match error {
             ledger::LedgerError::NoErrorOrResult => Error::NoErrorOrResult,
+            _ => Error::NoErrorOrResult,
         }
     }
 }
