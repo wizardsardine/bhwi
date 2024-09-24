@@ -7,7 +7,7 @@ pub mod error;
 pub mod psbt;
 pub mod wallet;
 
-use bitcoin::{bip32::Fingerprint, Network};
+use bitcoin::bip32::Fingerprint;
 pub use wallet::{WalletPolicy, WalletPubKey};
 
 use crate::Interpreter;
@@ -55,7 +55,6 @@ enum State {
 }
 
 pub struct LedgerInterpreter<C, T, R, E> {
-    network: Network,
     state: State,
     _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
@@ -63,7 +62,6 @@ pub struct LedgerInterpreter<C, T, R, E> {
 impl<C, T, R, E> LedgerInterpreter<C, T, R, E> {
     pub fn new() -> Self {
         Self {
-            network: Network::Bitcoin,
             state: State::New,
             _marker: std::marker::PhantomData::default(),
         }
