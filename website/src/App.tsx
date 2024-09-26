@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import './App.css'
 
 // Assuming the generated pkg folder is under src/pkg
-import initWasm, { WebHidDevice } from 'bhwi-wasm';
+import initWasm, { WebHidDevice, initialize_logging } from 'bhwi-wasm';
 
 const App: React.FC = () => {
     const [device, setDevice] = useState<WebHidDevice | undefined>(undefined);
@@ -14,6 +14,7 @@ const App: React.FC = () => {
         const initializeWasm = async () => {
             try {
                 await initWasm(); // Initialize the WebAssembly module
+                initialize_logging("debug");
             } catch (error) {
                 console.error("Error initializing WASM:", error);
             }

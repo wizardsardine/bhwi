@@ -48,6 +48,7 @@ impl WebHidDevice {
 
         let device = devices.get(0).dyn_into::<HidDevice>().unwrap();
 
+        log::info!("found hid device: {}", device.product_name());
         if !device.product_name().contains(name) {
             return None;
         }
