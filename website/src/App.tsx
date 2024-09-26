@@ -31,7 +31,7 @@ const App: React.FC = () => {
             };
 
             const webHidDevice = await WebHidDevice.get_webhid_device(
-                "coldcard",   // Replace with actual device name
+                "Coldcard",   // Replace with actual device name
                 vendorId,
                 productId,           // product_id
                 onCloseCallback // on_close_cb
