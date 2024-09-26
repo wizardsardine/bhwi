@@ -3,6 +3,9 @@ name = "bhwi-wasm"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 futures = "0.3"
 js-sys = "0.3.70"

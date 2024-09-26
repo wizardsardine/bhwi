@@ -1,35 +1,55 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
+import React, { useEffect, useState } from 'react'
 import './App.css'
 
-function App() {
-  const [count, setCount] = useState(0)
+// Assuming the generated pkg folder is under src/pkg
+import initWasm, { WebHidDevice } from 'bhwi-wasm';
 
-  return (
-    <>
-      <div>
-        <a href="https://vitejs.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
-}
+const App: React.FC = () => {
+    const [device, setDevice] = useState<WebHidDevice | undefined>(undefined);
+    const [vendorId] = useState(0xd13e);  // Vendor ID in hex
+    const [productId] = useState(0xcc10); // Product ID in hex
+
+    useEffect(() => {
+        // Initialize the WASM module
+        const initializeWasm = async () => {
+            try {
+                await initWasm(); // Initialize the WebAssembly module
+            } catch (error) {
+                console.error("Error initializing WASM:", error);
+            }
+        };
+
+        initializeWasm();
+    }, []);
+
+    const requestDevice = async () => {
+        try {
+            await initWasm(); // Initialize the WebAssembly module
+
+            const onCloseCallback = () => {
+                console.log('Device closed');
+            };
+
+            const webHidDevice = await WebHidDevice.get_webhid_device(
+                "coldcard",   // Replace with actual device name
+                vendorId,
+                productId,           // product_id
+                onCloseCallback // on_close_cb
+            );
+
+            setDevice(webHidDevice);
+        } catch (error) {
+            console.error("Error opening WebHID device:", error);
+        }
+    };
+
+    return (
+        <div>
+            <h1>WASM WebHID Device</h1>
+            <button onClick={requestDevice}>Request HID Device</button>
+            {device ? <p>Device connected !</p> : <p>No device connected</p>}
+        </div>
+    );
+};
 
 export default App

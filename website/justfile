@@ -1,0 +1,5 @@
+install:
+    npm install
+
+build:
+    wasm-pack build ../bhwi-wasm --out-dir ../website/pkg --target web
