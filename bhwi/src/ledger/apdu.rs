@@ -138,6 +138,14 @@ pub struct ApduResponse {
     pub status_word: StatusWord,
 }
 
+impl From<ApduResponse> for Vec<u8> {
+    fn from(res: ApduResponse) -> Vec<u8> {
+        let mut vec = (res.status_word as u16).to_be_bytes().to_vec();
+        vec.extend(res.data.iter());
+        vec
+    }
+}
+
 impl TryFrom<Vec<u8>> for ApduResponse {
     type Error = ApduError;
     fn try_from(res: Vec<u8>) -> Result<Self, Self::Error> {
@@ -153,6 +161,7 @@ impl TryFrom<Vec<u8>> for ApduResponse {
     }
 }
 
+#[derive(Debug)]
 pub enum ApduError {
     StatusWordUnknown,
     ResponseTooShort,

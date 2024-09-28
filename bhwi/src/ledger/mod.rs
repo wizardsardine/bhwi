@@ -12,9 +12,10 @@ pub use wallet::{WalletPolicy, WalletPubKey};
 
 use crate::Interpreter;
 
-use apdu::{ApduError, ApduResponse, StatusWord};
+use apdu::{ApduCommand, ApduError, ApduResponse, StatusWord};
 use store::{DelegatedStore, StoreError};
 
+#[derive(Debug)]
 pub enum LedgerError {
     NoErrorOrResult,
     Apdu(ApduError),
@@ -35,7 +36,7 @@ impl From<StoreError> for LedgerError {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LedgerCommand {
     GetMasterFingerprint,
     GetXpub,
@@ -71,7 +72,7 @@ impl<C, T, R, E> LedgerInterpreter<C, T, R, E> {
 impl<C, T, R, E> Interpreter for LedgerInterpreter<C, T, R, E>
 where
     C: Into<LedgerCommand>,
-    T: From<Vec<u8>>,
+    T: From<ApduCommand>,
     R: From<LedgerResponse>,
     E: From<LedgerError>,
 {
@@ -84,7 +85,7 @@ where
         let command: LedgerCommand = command.into();
         let (transmit, store) = match command {
             LedgerCommand::GetMasterFingerprint => (
-                Self::Transmit::from(command::get_master_fingerprint().encode()),
+                Self::Transmit::from(command::get_master_fingerprint()),
                 None,
             ),
             _ => unimplemented!(),
@@ -98,9 +99,9 @@ where
             if res.status_word == StatusWord::InterruptedExecution {
                 if let Some(store) = store {
                     let transmit = store.execute(res.data).map_err(LedgerError::from)?;
-                    return Ok(Some(Self::Transmit::from(
-                        command::continue_interrupted(transmit).encode(),
-                    )));
+                    return Ok(Some(Self::Transmit::from(command::continue_interrupted(
+                        transmit,
+                    ))));
                 } else {
                     return Err(LedgerError::Interrupted.into());
                 }

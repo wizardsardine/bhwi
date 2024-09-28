@@ -1,3 +1,5 @@
+pub use bitcoin;
+
 pub mod common;
 pub mod jade;
 pub mod ledger;
