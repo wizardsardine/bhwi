@@ -7,3 +7,6 @@ edition = "2021"
 
 [dependencies]
 bhwi = { path = "../bhwi", version = "0.1"}
+futures = "0.3"
+byteorder = "1.5"
+async-trait = "0.1"
