@@ -13,14 +13,17 @@
 *  See the License for the specific language governing permissions and
 *  limitations under the License.
 ********************************************************************************/
-use std::io::Cursor;
 use async_trait::async_trait;
-use futures::{io::{AsyncReadExt, AsyncWriteExt}, AsyncRead, AsyncWrite, lock::Mutex};
-use byteorder::{BigEndian, ReadBytesExt};
 use bhwi::ledger::apdu::{ApduCommand, ApduResponse};
+use byteorder::{BigEndian, ReadBytesExt};
+use futures::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    lock::Mutex,
+    AsyncRead, AsyncWrite,
+};
+use std::io::Cursor;
 
 use crate::ledger::LedgerTransport;
-
 
 const LEDGER_VID: u16 = 0x2c97;
 const LEDGER_USAGE_PAGE: u16 = 0xFFA0;
@@ -66,14 +69,16 @@ async fn write_apdu<D: AsyncWrite + Unpin>(
     {
         buffer[4] = ((sequence_idx >> 8) & 0xFF) as u8; // sequence_idx big endian
         buffer[5] = (sequence_idx & 0xFF) as u8; // sequence_idx big endian
-        buffer[6 .. 6 + chunk.len()].copy_from_slice(chunk);
+        buffer[6..6 + chunk.len()].copy_from_slice(chunk);
 
         match device.write(&buffer).await {
             Ok(size) => {
                 if size < buffer.len() {
-                    return Err(LedgerHIDError::Comm("USB write error. Could not send whole message"));
+                    return Err(LedgerHIDError::Comm(
+                        "USB write error. Could not send whole message",
+                    ));
                 }
-            },
+            }
             Err(e) => return Err(LedgerHIDError::Hid(e)),
         }
     }
@@ -121,7 +126,7 @@ async fn read_apdu<D: AsyncRead + Unpin>(
         let missing: usize = expected_apdu_len - apdu_answer.len();
         let end_p = rdr.position() as usize + std::cmp::min(available, missing);
 
-        let new_chunk = &buffer[rdr.position() as usize .. end_p];
+        let new_chunk = &buffer[rdr.position() as usize..end_p];
 
         apdu_answer.extend_from_slice(new_chunk);
 
@@ -133,24 +138,29 @@ async fn read_apdu<D: AsyncRead + Unpin>(
     }
 }
 
-pub struct LedgerTransportHID<D: AsyncRead + AsyncWrite + Unpin> {
-    device: Mutex<D>,
+pub struct LedgerTransportHID<C> {
+    channel: Mutex<C>,
+}
+
+impl<C> LedgerTransportHID<C> {
+    pub fn new(channel: C) -> Self {
+        Self {
+            channel: Mutex::new(channel),
+        }
+    }
 }
 
 #[async_trait]
-impl <D: AsyncRead + AsyncWrite + Send + Sync + Unpin>LedgerTransport for LedgerTransportHID<D> {
+impl<C: AsyncRead + AsyncWrite + Send + Sync + Unpin> LedgerTransport for LedgerTransportHID<C> {
     type Error = LedgerHIDError;
 
-    async fn exchange(&self, command: &ApduCommand) -> Result<ApduResponse, Self::Error>{
-        let mut device = self
-            .device
-            .lock().await;
+    async fn exchange(&self, command: &ApduCommand) -> Result<ApduResponse, Self::Error> {
+        let mut channel = self.channel.lock().await;
 
-        write_apdu(&mut *device, LEDGER_CHANNEL, &command.encode()).await?;
+        write_apdu(&mut *channel, LEDGER_CHANNEL, &command.encode()).await?;
         let mut answer: Vec<u8> = Vec::with_capacity(256);
-        read_apdu(&mut *device, LEDGER_CHANNEL, &mut answer).await?;
+        read_apdu(&mut *channel, LEDGER_CHANNEL, &mut answer).await?;
 
         ApduResponse::try_from(answer).map_err(|_| LedgerHIDError::Comm("response was too short"))
     }
 }
-
