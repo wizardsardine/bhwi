@@ -15,9 +15,9 @@ impl ReadWrite for WebHidDevice {
     }
     async fn read(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error> {
         if let Some(array) = self.read().await {
-            let length = array.length();
-            array.copy_to(data);
-            Ok(length as usize)
+            let length = array.len();
+            data.copy_from_slice(&array);
+            Ok(length)
         } else {
             Ok(0)
         }

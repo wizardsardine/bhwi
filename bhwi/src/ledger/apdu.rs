@@ -140,8 +140,8 @@ pub struct ApduResponse {
 
 impl From<ApduResponse> for Vec<u8> {
     fn from(res: ApduResponse) -> Vec<u8> {
-        let mut vec = (res.status_word as u16).to_be_bytes().to_vec();
-        vec.extend(res.data.iter());
+        let mut vec = res.data;
+        vec.extend((res.status_word as u16).to_be_bytes().to_vec().iter());
         vec
     }
 }
@@ -152,10 +152,12 @@ impl TryFrom<Vec<u8>> for ApduResponse {
         if res.len() < 2 {
             return Err(ApduError::ResponseTooShort);
         }
-        let status_word = StatusWord::try_from(u16::from_be_bytes([res[0], res[1]]))?;
+
+        let status_word =
+            StatusWord::try_from(u16::from_be_bytes([res[res.len() - 2], res[res.len() - 1]]))?;
 
         Ok(ApduResponse {
-            data: res[2..].to_vec(),
+            data: res[0..res.len() - 2].to_vec(),
             status_word,
         })
     }

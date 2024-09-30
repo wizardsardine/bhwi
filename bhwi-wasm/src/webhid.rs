@@ -1,4 +1,4 @@
-use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
 use js_sys::Uint8Array;
 use std::cell::RefCell;
@@ -11,8 +11,7 @@ use web_sys::{HidDevice, HidDeviceRequestOptions};
 pub struct WebHidDevice {
     device: HidDevice,
     on_close_cb: JsValue,
-    msg_queue: UnboundedReceiver<Uint8Array>,
-    write_tx: UnboundedSender<Uint8Array>,
+    msg_queue: UnboundedReceiver<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -67,8 +66,12 @@ impl WebHidDevice {
         let on_input_report_closure = {
             let tx = tx.clone();
             Closure::wrap(Box::new(move |event: web_sys::HidInputReportEvent| {
-                let data = Uint8Array::new(&event.data());
-                tx.unbounded_send(data).unwrap();
+                let data = event.data();
+                let length = data.byte_length();
+                let uint8_array = Uint8Array::new(&data.buffer());
+                let mut vec = vec![0u8; length];
+                uint8_array.copy_to(&mut vec[..]);
+                tx.unbounded_send(vec).unwrap();
             }) as Box<dyn FnMut(_)>)
         };
 
@@ -114,12 +117,11 @@ impl WebHidDevice {
             device,
             on_close_cb,
             msg_queue: rx,
-            write_tx: tx,
         })
     }
 
     #[wasm_bindgen]
-    pub async fn read(&mut self) -> Option<Uint8Array> {
+    pub async fn read(&mut self) -> Option<Vec<u8>> {
         self.msg_queue.next().await
     }
 
@@ -127,8 +129,8 @@ impl WebHidDevice {
     pub async fn write(&self, data: &mut [u8]) {
         if self.device.opened() {
             let promise = JsFuture::from(self.device.send_report_with_u8_array(0, data));
-            if promise.await.is_err() {
-                log::error!("Failed to send report");
+            if let Err(e) = promise.await {
+                log::error!("Failed to send report: {:?}", e);
             }
         } else {
             log::error!("attempted write to a closed HID connection");

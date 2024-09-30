@@ -30,7 +30,7 @@ pub const LEDGER_USAGE_PAGE: u16 = 0xFFA0;
 pub const LEDGER_CHANNEL: u16 = 0x0101;
 // for Windows compatability, we prepend the buffer with a 0x00
 // so the actual buffer is 64 bytes
-const LEDGER_PACKET_WRITE_SIZE: u8 = 65;
+const LEDGER_PACKET_WRITE_SIZE: u8 = 64;
 const LEDGER_PACKET_READ_SIZE: u8 = 64;
 
 #[derive(Debug)]
@@ -79,18 +79,18 @@ impl<C: ReadWrite> LedgerTransport for LedgerTransportHID<C> {
 
         let mut buffer = vec![0u8; LEDGER_PACKET_WRITE_SIZE as usize];
         // Windows platform requires 0x00 prefix and Linux/Mac tolerate this as well
-        buffer[0] = 0x00;
-        buffer[1] = ((LEDGER_CHANNEL >> 8) & 0xFF) as u8; // channel big endian
-        buffer[2] = (LEDGER_CHANNEL & 0xFF) as u8; // channel big endian
-        buffer[3] = 0x05u8;
+        // buffer[0] = 0x00;
+        buffer[0] = ((LEDGER_CHANNEL >> 8) & 0xFF) as u8; // channel big endian
+        buffer[1] = (LEDGER_CHANNEL & 0xFF) as u8; // channel big endian
+        buffer[2] = 0x05u8;
 
         for (sequence_idx, chunk) in in_data
-            .chunks((LEDGER_PACKET_WRITE_SIZE - 6) as usize)
+            .chunks((LEDGER_PACKET_WRITE_SIZE - 5) as usize)
             .enumerate()
         {
-            buffer[4] = ((sequence_idx >> 8) & 0xFF) as u8; // sequence_idx big endian
-            buffer[5] = (sequence_idx & 0xFF) as u8; // sequence_idx big endian
-            buffer[6..6 + chunk.len()].copy_from_slice(chunk);
+            buffer[3] = ((sequence_idx >> 8) & 0xFF) as u8; // sequence_idx big endian
+            buffer[4] = (sequence_idx & 0xFF) as u8; // sequence_idx big endian
+            buffer[5..5 + chunk.len()].copy_from_slice(chunk);
 
             match channel.write(&buffer).await {
                 Ok(size) => {
@@ -100,9 +100,12 @@ impl<C: ReadWrite> LedgerTransport for LedgerTransportHID<C> {
                         ));
                     }
                 }
-                Err(e) => return Err(LedgerHIDError::Hid(e)),
+                Err(e) => {
+                    return Err(LedgerHIDError::Hid(e));
+                }
             }
         }
+
         let mut apdu_answer: Vec<u8> = Vec::with_capacity(256);
         let mut buffer = vec![0u8; LEDGER_PACKET_READ_SIZE as usize];
         let mut sequence_idx = 0u16;
