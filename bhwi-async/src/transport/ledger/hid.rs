@@ -150,8 +150,8 @@ impl<C> LedgerTransportHID<C> {
     }
 }
 
-#[async_trait]
-impl<C: AsyncRead + AsyncWrite + Send + Sync + Unpin> LedgerTransport for LedgerTransportHID<C> {
+#[async_trait(?Send)]
+impl<C: AsyncRead + AsyncWrite + Unpin> LedgerTransport for LedgerTransportHID<C> {
     type Error = LedgerHIDError;
 
     async fn exchange(&self, command: &ApduCommand) -> Result<ApduResponse, Self::Error> {

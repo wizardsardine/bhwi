@@ -9,7 +9,7 @@ use bhwi::{
 };
 use std::fmt::Debug;
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait LedgerTransport {
     type Error: Debug;
     async fn exchange(&self, command: &ApduCommand) -> Result<ApduResponse, Self::Error>;
@@ -28,10 +28,13 @@ impl<E> From<InterpreterError> for LedgerError<E> {
 }
 
 pub struct Ledger<T> {
-    transport: T,
+    pub transport: T,
 }
 
 impl<T: LedgerTransport> Ledger<T> {
+    pub fn new(transport: T) -> Self {
+        Self { transport }
+    }
     async fn run_command<C, R>(&self, command: C) -> Result<R, LedgerError<T::Error>>
     where
         C: Into<LedgerCommand>,
