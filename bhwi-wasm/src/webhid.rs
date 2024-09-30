@@ -8,7 +8,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{HidDevice, HidDeviceRequestOptions};
 
 #[wasm_bindgen]
-struct WebHidDevice {
+pub struct WebHidDevice {
     device: HidDevice,
     on_close_cb: JsValue,
     msg_queue: UnboundedReceiver<Uint8Array>,
@@ -17,11 +17,10 @@ struct WebHidDevice {
 
 #[wasm_bindgen]
 impl WebHidDevice {
-    #[wasm_bindgen]
     pub async fn get_webhid_device(
         name: &str,
         vendor_id: u16,
-        product_id: u16,
+        product_id: Option<u16>,
         on_close_cb: JsValue,
     ) -> Option<WebHidDevice> {
         let navigator = web_sys::window()?.navigator();
@@ -30,7 +29,9 @@ impl WebHidDevice {
         let filters = js_sys::Array::new();
         let filter = js_sys::Object::new();
         js_sys::Reflect::set(&filter, &"vendorId".into(), &JsValue::from(vendor_id)).unwrap();
-        js_sys::Reflect::set(&filter, &"productId".into(), &JsValue::from(product_id)).unwrap();
+        if let Some(product_id) = product_id {
+            js_sys::Reflect::set(&filter, &"productId".into(), &JsValue::from(product_id)).unwrap();
+        }
         filters.push(&filter.into());
 
         let devices = match JsFuture::from(

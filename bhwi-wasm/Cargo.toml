@@ -7,6 +7,9 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+async-trait = "0.1"
+bitcoin = { version = "0.32", features = ["secp-lowmemory"] }
+bhwi-async = { path = "../bhwi-async", version = "0.1"}
 console_log = "0.2"
 futures = "0.3"
 js-sys = "0.3.70"

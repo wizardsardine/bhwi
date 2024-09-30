@@ -1,6 +1,6 @@
+pub mod ledger;
 pub mod webhid;
 
-use console_log;
 use log::Level;
 use std::str::FromStr;
 use wasm_bindgen::prelude::*;
