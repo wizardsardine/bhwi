@@ -1,6 +1,6 @@
 use bitcoin::bip32::Fingerprint;
 
-use crate::{jade, ledger};
+use crate::{jade, ledger, Interpreter};
 
 pub enum Command {
     GetMasterFingerprint,
@@ -21,6 +21,7 @@ pub struct Transmit {
     pub payload: Vec<u8>,
 }
 
+#[derive(Debug)]
 pub enum Error {
     NoErrorOrResult,
 }
@@ -99,6 +100,15 @@ impl From<Vec<u8>> for Transmit {
     }
 }
 
+impl From<ledger::apdu::ApduCommand> for Transmit {
+    fn from(payload: ledger::apdu::ApduCommand) -> Transmit {
+        Transmit {
+            recipient: Recipient::Device,
+            payload: payload.encode(),
+        }
+    }
+}
+
 impl From<ledger::LedgerError> for Error {
     fn from(error: ledger::LedgerError) -> Error {
         match error {
@@ -109,6 +119,9 @@ impl From<ledger::LedgerError> for Error {
 }
 
 pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
+
+pub type CommonInterpreter =
+    dyn Interpreter<Command = Command, Transmit = Transmit, Response = Response, Error = Error>;
 
 #[cfg(test)]
 mod tests {

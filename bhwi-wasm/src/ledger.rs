@@ -1,8 +1,9 @@
 use super::webhid::WebHidDevice;
 use async_trait::async_trait;
+use bhwi::ledger::LedgerInterpreter;
 use bhwi_async::{
-    ledger::Ledger,
     transport::ledger::hid::{LedgerTransportHID, ReadWrite, LEDGER_VID},
+    Device, HWI,
 };
 use wasm_bindgen::prelude::*;
 
@@ -29,7 +30,7 @@ pub async fn connect_ledger(on_close_cb: JsValue) {
     if let Some(device) =
         WebHidDevice::get_webhid_device("Ledger", LEDGER_VID, None, on_close_cb).await
     {
-        let l = Ledger::new(LedgerTransportHID::new(device));
+        let l = Device::new(LedgerTransportHID::new(device), LedgerInterpreter::new);
         let fg = l.get_master_fingerprint().await.unwrap();
         log::info!("master_fingerpring: {}", fg)
     }

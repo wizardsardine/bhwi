@@ -14,7 +14,6 @@
 *  limitations under the License.
 ********************************************************************************/
 use async_trait::async_trait;
-use bhwi::ledger::apdu::{ApduCommand, ApduResponse};
 use byteorder::{BigEndian, ReadBytesExt};
 use futures::{
     // TODO implements ReadWrite for T: AsyncReadExt + AsyncWriteExt
@@ -23,7 +22,7 @@ use futures::{
 };
 use std::io::Cursor;
 
-use crate::ledger::LedgerTransport;
+use crate::Transport;
 
 pub const LEDGER_VID: u16 = 0x2c97;
 pub const LEDGER_USAGE_PAGE: u16 = 0xFFA0;
@@ -64,18 +63,17 @@ pub trait ReadWrite {
 }
 
 #[async_trait(?Send)]
-impl<C: ReadWrite> LedgerTransport for LedgerTransportHID<C> {
+impl<C: ReadWrite> Transport for LedgerTransportHID<C> {
     type Error = LedgerHIDError;
 
-    async fn exchange(&self, command: &ApduCommand) -> Result<ApduResponse, Self::Error> {
+    async fn exchange(&self, apdu_command: &[u8]) -> Result<Vec<u8>, Self::Error> {
         let mut channel = self.channel.lock().await;
 
-        let apdu_command = command.encode();
         let command_length = apdu_command.len();
         let mut in_data = Vec::with_capacity(command_length + 2);
         in_data.push(((command_length >> 8) & 0xFF) as u8);
         in_data.push((command_length & 0xFF) as u8);
-        in_data.extend_from_slice(&apdu_command);
+        in_data.extend_from_slice(apdu_command);
 
         let mut buffer = vec![0u8; LEDGER_PACKET_WRITE_SIZE as usize];
         // Windows platform requires 0x00 prefix and Linux/Mac tolerate this as well
@@ -154,7 +152,6 @@ impl<C: ReadWrite> LedgerTransport for LedgerTransportHID<C> {
             sequence_idx += 1;
         }
 
-        ApduResponse::try_from(apdu_answer)
-            .map_err(|_| LedgerHIDError::Comm("response was too short"))
+        Ok(apdu_answer)
     }
 }
