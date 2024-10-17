@@ -120,9 +120,6 @@ impl From<ledger::LedgerError> for Error {
 
 pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
 
-pub type CommonInterpreter =
-    dyn Interpreter<Command = Command, Transmit = Transmit, Response = Response, Error = Error>;
-
 #[cfg(test)]
 mod tests {
     use super::*;

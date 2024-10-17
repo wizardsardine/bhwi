@@ -1,7 +1,11 @@
 pub mod transport;
 
 use async_trait::async_trait;
-use bhwi::{bitcoin::bip32::Fingerprint, common, Interpreter};
+use bhwi::{
+    bitcoin::bip32::Fingerprint,
+    common::{self},
+    DeviceApp, Interpreter,
+};
 use std::fmt::Debug;
 
 #[async_trait(?Send)]
@@ -11,9 +15,8 @@ pub trait Transport {
 }
 
 #[async_trait(?Send)]
-pub trait HWI {
-    type Error: Debug;
-    async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error>;
+pub trait HWI<E> {
+    async fn get_master_fingerprint(&self) -> Result<Fingerprint, E>;
 }
 
 #[derive(Debug)]
@@ -28,77 +31,98 @@ impl<E> From<common::Error> for Error<E> {
     }
 }
 
-pub struct Device<T, I> {
-    pub transport: T,
-    pub interpreter: Box<dyn Fn() -> I>,
-}
-
-impl<T, I> Device<T, I>
-where
-    T: Transport,
-    I: Interpreter<
-        Command = common::Command,
-        Transmit = common::Transmit,
-        Response = common::Response,
-        Error = common::Error,
-    >,
-{
-    pub fn new(transport: T, interpreter: impl Fn() -> I + 'static) -> Self {
-        Self {
-            transport,
-            interpreter: Box::new(interpreter),
-        }
-    }
-
-    async fn run_command(
-        &self,
-        command: common::Command,
-    ) -> Result<common::Response, Error<T::Error>> {
-        let mut intpr = (self.interpreter)();
-        let transmit = intpr.start(command)?;
-        let exchange = self
-            .transport
-            .exchange(&transmit.payload)
-            .await
-            .map_err(Error::Transport)?;
-        let mut transmit = intpr.exchange(exchange)?;
-        while let Some(t) = &transmit {
-            if matches!(t.recipient, common::Recipient::Device) {
-                let exchange = self
-                    .transport
-                    .exchange(&t.payload)
-                    .await
-                    .map_err(Error::Transport)?;
-                transmit = intpr.exchange(exchange)?;
-            } else {
-                break;
-            }
-        }
-        let res = intpr.end().unwrap();
-        Ok(res)
-    }
+pub trait Connected<E> {
+    fn transport(&self) -> &dyn Transport<Error = E>;
 }
 
 #[async_trait(?Send)]
-impl<T, I> HWI for Device<T, I>
+impl<E, I, D> HWI<Error<E>> for D
 where
-    T: Transport,
+    E: Debug,
     I: Interpreter<
         Command = common::Command,
         Transmit = common::Transmit,
         Response = common::Response,
         Error = common::Error,
     >,
+    D: DeviceApp<Interpreter = I> + Connected<E>,
 {
-    type Error = Error<T::Error>;
-    async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error> {
-        if let common::Response::MasterFingerprint(fg) = self
-            .run_command(common::Command::GetMasterFingerprint)
-            .await?
+    async fn get_master_fingerprint(&self) -> Result<Fingerprint, Error<E>> {
+        if let common::Response::MasterFingerprint(fg) = run_command(
+            self.transport(),
+            self.interpreter(),
+            common::Command::GetMasterFingerprint,
+        )
+        .await?
         {
             Ok(fg)
         } else {
             Err(common::Error::NoErrorOrResult.into())
         }
+    }
+}
+
+async fn run_command<T, I>(
+    transport: &T,
+    mut intpr: I,
+    command: common::Command,
+) -> Result<common::Response, Error<T::Error>>
+where
+    T: Transport + ?Sized,
+    I: Interpreter<
+        Command = common::Command,
+        Transmit = common::Transmit,
+        Response = common::Response,
+        Error = common::Error,
+    >,
+{
+    let transmit = intpr.start(command)?;
+    let exchange = transport
+        .exchange(&transmit.payload)
+        .await
+        .map_err(Error::Transport)?;
+    let mut transmit = intpr.exchange(exchange)?;
+    while let Some(t) = &transmit {
+        if matches!(t.recipient, common::Recipient::Device) {
+            let exchange = transport
+                .exchange(&t.payload)
+                .await
+                .map_err(Error::Transport)?;
+            transmit = intpr.exchange(exchange)?;
+        } else {
+            break;
+        }
+    }
+    let res = intpr.end().unwrap();
+    Ok(res)
+}
+
+pub struct Ledger<T, I> {
+    transport: T,
+    init: Box<dyn Fn() -> I>,
+}
+
+impl<E, T, I> Connected<E> for Ledger<T, I>
+where
+    T: Transport<Error = E>,
+{
+    fn transport(&self) -> &dyn Transport<Error = T::Error> {
+        &self.transport
+    }
+}
+
+impl<T, I> Ledger<T, I> {
+    pub fn new(transport: T, init: impl Fn() -> I + 'static) -> Self {
+        Self {
+            transport,
+            init: Box::new(init),
+        }
+    }
+}
+
+impl<T, I> DeviceApp for Ledger<T, I> {
+    type Interpreter = I;
+    fn interpreter(&self) -> Self::Interpreter {
+        (self.init)()
     }
 }

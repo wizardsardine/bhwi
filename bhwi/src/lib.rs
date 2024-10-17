@@ -13,3 +13,8 @@ pub trait Interpreter {
     fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, Self::Error>;
     fn end(self) -> Result<Self::Response, Self::Error>;
 }
+
+pub trait DeviceApp {
+    type Interpreter;
+    fn interpreter(&self) -> Self::Interpreter;
+}
