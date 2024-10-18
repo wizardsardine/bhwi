@@ -29,7 +29,7 @@ impl<T> Response<T> {
             return Err(JadeError::Rpc(e));
         }
 
-        self.result.ok_or_else(|| JadeError::NoErrorOrResult)
+        self.result.ok_or(JadeError::NoErrorOrResult)
     }
 }
 

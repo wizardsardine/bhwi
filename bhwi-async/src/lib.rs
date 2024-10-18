@@ -1,10 +1,11 @@
 pub mod transport;
 
 use async_trait::async_trait;
+pub use bhwi::ledger::Ledger;
 use bhwi::{
     bitcoin::bip32::Fingerprint,
     common::{self},
-    DeviceApp, Interpreter,
+    Client, Interpreter,
 };
 use std::fmt::Debug;
 
@@ -36,16 +37,10 @@ pub trait Connected<E> {
 }
 
 #[async_trait(?Send)]
-impl<E, I, D> HWI<Error<E>> for D
+impl<E, D> HWI<Error<E>> for D
 where
     E: Debug,
-    I: Interpreter<
-        Command = common::Command,
-        Transmit = common::Transmit,
-        Response = common::Response,
-        Error = common::Error,
-    >,
-    D: DeviceApp<Interpreter = I> + Connected<E>,
+    D: Client<common::Command, common::Transmit, common::Response, common::Error> + Connected<E>,
 {
     async fn get_master_fingerprint(&self) -> Result<Fingerprint, Error<E>> {
         if let common::Response::MasterFingerprint(fg) = run_command(
@@ -97,32 +92,11 @@ where
     Ok(res)
 }
 
-pub struct Ledger<T, I> {
-    transport: T,
-    init: Box<dyn Fn() -> I>,
-}
-
-impl<E, T, I> Connected<E> for Ledger<T, I>
+impl<E, T> Connected<E> for Ledger<T>
 where
     T: Transport<Error = E>,
 {
     fn transport(&self) -> &dyn Transport<Error = T::Error> {
         &self.transport
-    }
-}
-
-impl<T, I> Ledger<T, I> {
-    pub fn new(transport: T, init: impl Fn() -> I + 'static) -> Self {
-        Self {
-            transport,
-            init: Box::new(init),
-        }
-    }
-}
-
-impl<T, I> DeviceApp for Ledger<T, I> {
-    type Interpreter = I;
-    fn interpreter(&self) -> Self::Interpreter {
-        (self.init)()
     }
 }

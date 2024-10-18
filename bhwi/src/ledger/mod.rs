@@ -131,3 +131,25 @@ where
         }
     }
 }
+
+pub struct Ledger<T> {
+    pub transport: T,
+}
+
+impl<T> Ledger<T> {
+    pub fn new(transport: T) -> Self {
+        Self { transport }
+    }
+}
+
+impl<F, C, T, R, E> crate::Client<C, T, R, E> for Ledger<F>
+where
+    C: Into<LedgerCommand>,
+    T: From<apdu::ApduCommand>,
+    R: From<LedgerResponse>,
+    E: From<LedgerError>,
+{
+    fn interpreter(&self) -> impl Interpreter<Command = C, Transmit = T, Response = R, Error = E> {
+        LedgerInterpreter::new()
+    }
+}
