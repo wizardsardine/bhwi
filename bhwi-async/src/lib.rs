@@ -1,14 +1,13 @@
+pub mod jade;
+pub mod ledger;
 pub mod transport;
 
-use async_trait::async_trait;
-use bhwi::{
-    bitcoin::bip32::Fingerprint,
-    common::{self},
-    ledger::LedgerError,
-    Device, Interpreter,
-};
-pub use bhwi::{jade::Jade, ledger::Ledger};
 use std::fmt::Debug;
+
+use async_trait::async_trait;
+use bhwi::{bitcoin::bip32::Fingerprint, common, Device, Interpreter};
+pub use jade::Jade;
+pub use ledger::Ledger;
 
 #[async_trait(?Send)]
 pub trait Transport {
@@ -106,47 +105,4 @@ where
     }
     let res = intpr.end().unwrap();
     Ok(res)
-}
-
-#[async_trait(?Send)]
-impl<T, E> Transport for Ledger<T>
-where
-    E: Debug,
-    T: Transport<Error = E>,
-{
-    type Error = T::Error;
-    async fn exchange(&self, command: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        self.exchange(command).await
-    }
-}
-
-#[async_trait(?Send)]
-impl<T> HttpClient for Ledger<T> {
-    type Error = LedgerError;
-    async fn request(&self, _url: &str, _req: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        unreachable!("Ledger does not need http client")
-    }
-}
-
-#[async_trait(?Send)]
-impl<T, S, E> Transport for Jade<T, S>
-where
-    E: Debug,
-    T: Transport<Error = E>,
-{
-    type Error = T::Error;
-    async fn exchange(&self, command: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        self.exchange(command).await
-    }
-}
-
-#[async_trait(?Send)]
-impl<T, S> HttpClient for Jade<T, S>
-where
-    S: HttpClient,
-{
-    type Error = S::Error;
-    async fn request(&self, url: &str, req: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        self.request(url, req).await
-    }
 }

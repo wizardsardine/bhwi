@@ -191,29 +191,3 @@ where
             .ok_or(JadeError::NoErrorOrResult.into())
     }
 }
-
-pub struct Jade<T, S> {
-    pub transport: T,
-    pub pinserver: S,
-}
-
-impl<T, S> Jade<T, S> {
-    pub fn new(transport: T, pinserver: S) -> Self {
-        Self {
-            transport,
-            pinserver,
-        }
-    }
-}
-
-impl<F, S, C, T, R, E> crate::Device<C, T, R, E> for Jade<F, S>
-where
-    C: Into<JadeCommand>,
-    T: From<JadeTransmit>,
-    R: From<JadeResponse>,
-    E: From<JadeError>,
-{
-    fn interpreter(&self) -> impl Interpreter<Command = C, Transmit = T, Response = R, Error = E> {
-        JadeInterpreter::default()
-    }
-}
