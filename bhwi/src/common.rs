@@ -1,6 +1,6 @@
 use bitcoin::bip32::Fingerprint;
 
-use crate::{jade, ledger, Interpreter};
+use crate::{jade, ledger};
 
 pub enum Command {
     GetMasterFingerprint,
@@ -137,8 +137,8 @@ mod tests {
                 >,
             >,
         > = vec![
-            Box::new(LedgerInterpreter::new()),
-            Box::new(JadeInterpreter::new()),
+            Box::<LedgerInterpreter>::default(),
+            Box::<JadeInterpreter>::default(),
         ];
         assert_eq!(interpreters.len(), 2);
     }

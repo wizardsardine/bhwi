@@ -54,16 +54,18 @@ pub struct JadeInterpreter<C, T, R, E> {
     _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
 
-impl<C, T, R, E> JadeInterpreter<C, T, R, E> {
-    pub fn new() -> Self {
+impl<C, T, R, E> Default for JadeInterpreter<C, T, R, E> {
+    fn default() -> Self {
         Self {
             network: JADE_NETWORK_MAINNET,
             state: State::New,
             response: None,
-            _marker: std::marker::PhantomData::default(),
+            _marker: std::marker::PhantomData,
         }
     }
+}
 
+impl<C, T, R, E> JadeInterpreter<C, T, R, E> {
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = match network {
             Network::Bitcoin => JADE_NETWORK_MAINNET,
@@ -187,5 +189,31 @@ where
         self.response
             .map(Self::Response::from)
             .ok_or(JadeError::NoErrorOrResult.into())
+    }
+}
+
+pub struct Jade<T, S> {
+    pub transport: T,
+    pub pinserver: S,
+}
+
+impl<T, S> Jade<T, S> {
+    pub fn new(transport: T, pinserver: S) -> Self {
+        Self {
+            transport,
+            pinserver,
+        }
+    }
+}
+
+impl<F, S, C, T, R, E> crate::Device<C, T, R, E> for Jade<F, S>
+where
+    C: Into<JadeCommand>,
+    T: From<JadeTransmit>,
+    R: From<JadeResponse>,
+    E: From<JadeError>,
+{
+    fn interpreter(&self) -> impl Interpreter<Command = C, Transmit = T, Response = R, Error = E> {
+        JadeInterpreter::default()
     }
 }

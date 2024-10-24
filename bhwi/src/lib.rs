@@ -14,6 +14,6 @@ pub trait Interpreter {
     fn end(self) -> Result<Self::Response, Self::Error>;
 }
 
-pub trait Client<C, T, R, E> {
+pub trait Device<C, T, R, E> {
     fn interpreter(&self) -> impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>;
 }

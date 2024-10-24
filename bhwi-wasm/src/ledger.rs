@@ -1,6 +1,5 @@
 use super::webhid::WebHidDevice;
 use async_trait::async_trait;
-use bhwi::ledger::LedgerInterpreter;
 use bhwi_async::{
     transport::ledger::hid::{LedgerTransportHID, ReadWrite, LEDGER_VID},
     Ledger, HWI,

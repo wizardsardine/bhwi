@@ -46,7 +46,9 @@ pub enum LedgerResponse {
     MasterFingerprint(Fingerprint),
 }
 
+#[derive(Default)]
 enum State {
+    #[default]
     New,
     Running {
         command: LedgerCommand,
@@ -60,11 +62,11 @@ pub struct LedgerInterpreter<C, T, R, E> {
     _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
 
-impl<C, T, R, E> LedgerInterpreter<C, T, R, E> {
-    pub fn new() -> Self {
+impl<C, T, R, E> Default for LedgerInterpreter<C, T, R, E> {
+    fn default() -> Self {
         Self {
-            state: State::New,
-            _marker: std::marker::PhantomData::default(),
+            state: State::default(),
+            _marker: std::marker::PhantomData,
         }
     }
 }
@@ -142,7 +144,7 @@ impl<T> Ledger<T> {
     }
 }
 
-impl<F, C, T, R, E> crate::Client<C, T, R, E> for Ledger<F>
+impl<F, C, T, R, E> crate::Device<C, T, R, E> for Ledger<F>
 where
     C: Into<LedgerCommand>,
     T: From<apdu::ApduCommand>,
@@ -150,6 +152,6 @@ where
     E: From<LedgerError>,
 {
     fn interpreter(&self) -> impl Interpreter<Command = C, Transmit = T, Response = R, Error = E> {
-        LedgerInterpreter::new()
+        LedgerInterpreter::default()
     }
 }
