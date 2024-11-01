@@ -22,8 +22,9 @@ pub trait HttpClient {
 }
 
 #[async_trait(?Send)]
-pub trait HWI<E> {
-    async fn get_master_fingerprint(&self) -> Result<Fingerprint, E>;
+pub trait HWI {
+    type Error: Debug;
+    async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error>;
 }
 
 #[derive(Debug)]
@@ -40,14 +41,16 @@ impl<E, F> From<common::Error> for Error<E, F> {
 }
 
 #[async_trait(?Send)]
-impl<E, F, D> HWI<Error<E, F>> for D
+impl<E, F, D> HWI for D
 where
+    F: Debug,
     E: Debug,
     D: Device<common::Command, common::Transmit, common::Response, common::Error>
         + Transport<Error = E>
         + HttpClient<Error = F>,
 {
-    async fn get_master_fingerprint(&self) -> Result<Fingerprint, Error<E, F>> {
+    type Error = Error<E, F>;
+    async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error> {
         if let common::Response::MasterFingerprint(fg) = run_command(
             self,
             self,

@@ -41,7 +41,7 @@ where
 {
     type Error = T::Error;
     async fn exchange(&self, command: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        self.exchange(command).await
+        self.transport.exchange(command).await
     }
 }
 
@@ -52,6 +52,6 @@ where
 {
     type Error = S::Error;
     async fn request(&self, url: &str, req: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        self.request(url, req).await
+        self.pinserver.request(url, req).await
     }
 }

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import './App.css'
 
 // Assuming the generated pkg folder is under src/pkg
-import initWasm, { initialize_logging, connect_ledger } from 'bhwi-wasm';
+import initWasm, { initialize_logging, Client } from 'bhwi-wasm';
 
 const App: React.FC = () => {
     const [device, setDevice] = useState<boolean | undefined>(undefined);
@@ -30,9 +30,13 @@ const App: React.FC = () => {
                 console.log('Device closed');
             };
 
-            await connect_ledger(
-                onCloseCallback // on_close_cb
-            );
+
+            const client = new Client(); // Create instance synchronously
+            await client.connect_ledger(onCloseCallback); // Connect asynchronously
+
+            // Log the master fingerprint
+            const masterFingerprint = await client.get_master_fingerprint();
+            console.log("Master Fingerprint:", masterFingerprint);
 
             setDevice(true);
         } catch (error) {

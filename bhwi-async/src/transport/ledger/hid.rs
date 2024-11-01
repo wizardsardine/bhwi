@@ -16,7 +16,7 @@
 use async_trait::async_trait;
 use byteorder::{BigEndian, ReadBytesExt};
 use futures::{
-    // TODO implements ReadWrite for T: AsyncReadExt + AsyncWriteExt
+    // TODO implements Channel for T: AsyncReadExt + AsyncWriteExt
     // io::{AsyncReadExt, AsyncWriteExt},
     lock::Mutex,
 };
@@ -57,13 +57,13 @@ impl<C> LedgerTransportHID<C> {
 }
 
 #[async_trait(?Send)]
-pub trait ReadWrite {
-    async fn write(&self, data: &[u8]) -> Result<usize, std::io::Error>;
-    async fn read(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error>;
+pub trait Channel {
+    async fn send(&self, data: &[u8]) -> Result<usize, std::io::Error>;
+    async fn receive(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error>;
 }
 
 #[async_trait(?Send)]
-impl<C: ReadWrite> Transport for LedgerTransportHID<C> {
+impl<C: Channel> Transport for LedgerTransportHID<C> {
     type Error = LedgerHIDError;
 
     async fn exchange(&self, apdu_command: &[u8]) -> Result<Vec<u8>, Self::Error> {
@@ -90,7 +90,7 @@ impl<C: ReadWrite> Transport for LedgerTransportHID<C> {
             buffer[4] = (sequence_idx & 0xFF) as u8; // sequence_idx big endian
             buffer[5..5 + chunk.len()].copy_from_slice(chunk);
 
-            match channel.write(&buffer).await {
+            match channel.send(&buffer).await {
                 Ok(size) => {
                     if size < buffer.len() {
                         return Err(LedgerHIDError::Comm(
@@ -110,7 +110,7 @@ impl<C: ReadWrite> Transport for LedgerTransportHID<C> {
         let mut expected_apdu_len = 0usize;
 
         loop {
-            let res = channel.read(&mut buffer).await?;
+            let res = channel.receive(&mut buffer).await?;
 
             if (sequence_idx == 0 && res < 7) || res < 5 {
                 return Err(LedgerHIDError::Comm("Read error. Incomplete header"));
