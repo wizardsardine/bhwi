@@ -25,6 +25,14 @@ web-sys = { version = "0.3.70", features = [
     "HidInputReportEvent",
     "HidDeviceRequestOptions",
     "Navigator",
-    "Window"
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "Serial",
+    "SerialOptions",
+    "SerialPort",
+    "SerialPortRequestOptions",
+    "Window",
+    "WritableStream",
+    "WritableStreamDefaultWriter"
 ] }
 

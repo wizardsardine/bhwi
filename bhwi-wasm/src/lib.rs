@@ -1,5 +1,6 @@
 pub mod ledger;
 pub mod webhid;
+pub mod webserial;
 
 use std::str::FromStr;
 
