@@ -19,6 +19,11 @@ log = "0.4"
 wasm-bindgen = { version = "0.2.93" }
 wasm-bindgen-futures = { version ="0.4.43" }
 web-sys = { version = "0.3.70", features = [
+    "Headers",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
     "Hid",
     "HidDevice",
     "HidConnectionEvent",

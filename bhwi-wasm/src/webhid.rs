@@ -120,11 +120,13 @@ impl WebHidDevice {
         })
     }
 
+    // TODO: return error and maybe remove wasm_bindgen
     #[wasm_bindgen]
     pub async fn read(&mut self) -> Option<Vec<u8>> {
         self.msg_queue.next().await
     }
 
+    // TODO: return error and maybe remove wasm_bindgen
     #[wasm_bindgen]
     pub async fn write(&self, data: &mut [u8]) {
         if self.device.opened() {

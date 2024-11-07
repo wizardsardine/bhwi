@@ -1,8 +1,11 @@
-use futures::channel::mpsc::{unbounded, UnboundedReceiver};
-use futures::StreamExt;
-use js_sys::Uint8Array;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+use async_trait::async_trait;
+use bhwi_async::Transport;
+use futures::channel::mpsc::{unbounded, UnboundedReceiver};
+use futures::{lock::Mutex, StreamExt};
+use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{ReadableStreamDefaultReader, SerialOptions, SerialPort, SerialPortRequestOptions};
@@ -11,7 +14,7 @@ use web_sys::{ReadableStreamDefaultReader, SerialOptions, SerialPort, SerialPort
 pub struct WebSerialDevice {
     port: SerialPort,
     on_close_cb: JsValue,
-    msg_queue: UnboundedReceiver<Vec<u8>>,
+    msg_queue: Mutex<UnboundedReceiver<Vec<u8>>>,
 }
 
 #[wasm_bindgen]
@@ -103,13 +106,14 @@ impl WebSerialDevice {
         Some(Self {
             port,
             on_close_cb,
-            msg_queue: rx,
+            msg_queue: Mutex::new(rx),
         })
     }
 
     #[wasm_bindgen]
-    pub async fn read(&mut self) -> Option<Vec<u8>> {
-        self.msg_queue.next().await
+    pub async fn read(&self) -> Option<Vec<u8>> {
+        let mut queue = self.msg_queue.lock().await;
+        queue.next().await
     }
 
     #[wasm_bindgen]
@@ -138,5 +142,14 @@ impl WebSerialDevice {
                 }
             }
         });
+    }
+}
+
+#[async_trait(?Send)]
+impl Transport for WebSerialDevice {
+    type Error = JsValue;
+    async fn exchange(&self, command: &[u8]) -> Result<Vec<u8>, Self::Error> {
+        self.write(command).await?;
+        Ok(self.read().await.unwrap())
     }
 }

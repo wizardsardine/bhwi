@@ -1,4 +1,5 @@
 pub mod ledger;
+pub mod pinserver;
 pub mod webhid;
 pub mod webserial;
 
@@ -7,11 +8,13 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use bhwi_async::{
     transport::ledger::hid::{LedgerTransportHID, LEDGER_VID},
-    Ledger, HWI as AsyncHWI,
+    Jade, Ledger, HWI as AsyncHWI,
 };
 use log::Level;
+use pinserver::PinServer;
 use wasm_bindgen::prelude::*;
 use webhid::WebHidDevice;
+use webserial::WebSerialDevice;
 
 #[wasm_bindgen]
 pub fn initialize_logging(level: &str) {
@@ -39,12 +42,14 @@ impl<T: AsyncHWI> HWI for T {
 
 pub enum Device {
     Ledger(Ledger<LedgerTransportHID<webhid::WebHidDevice>>),
+    Jade(Jade<WebSerialDevice, PinServer>),
 }
 
 impl<'a> AsRef<dyn HWI + 'a> for Device {
     fn as_ref(&self) -> &(dyn HWI + 'a) {
         match self {
             Device::Ledger(l) => l,
+            Device::Jade(j) => j,
         }
     }
 }
