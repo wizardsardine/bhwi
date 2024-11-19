@@ -126,7 +126,7 @@ impl core::default::Default for ApduCommand {
             cla: Cla::Default as u8,
             ins: 0x00,
             p1: 0x00,
-            p2: CURRENT_PROTOCOL_VERSION as u8,
+            p2: CURRENT_PROTOCOL_VERSION,
             data: Vec::new(),
         }
     }

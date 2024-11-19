@@ -1,8 +1,9 @@
-use bitcoin::bip32::Fingerprint;
+use bitcoin::{bip32::Fingerprint, Network};
 
 use crate::{jade, ledger};
 
 pub enum Command {
+    Unlock(Network),
     GetMasterFingerprint,
 }
 
@@ -29,6 +30,7 @@ pub enum Error {
 impl From<Command> for jade::JadeCommand {
     fn from(cmd: Command) -> Self {
         match cmd {
+            Command::Unlock(..) => Self::Auth,
             Command::GetMasterFingerprint => Self::GetMasterFingerprint,
         }
     }
@@ -78,6 +80,7 @@ pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Er
 impl From<Command> for ledger::LedgerCommand {
     fn from(cmd: Command) -> Self {
         match cmd {
+            Command::Unlock(network) => Self::OpenApp(network),
             Command::GetMasterFingerprint => Self::GetMasterFingerprint,
         }
     }
@@ -87,6 +90,7 @@ impl From<ledger::LedgerResponse> for Response {
     fn from(res: ledger::LedgerResponse) -> Response {
         match res {
             ledger::LedgerResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
+            ledger::LedgerResponse::TaskDone => Response::TaskDone,
         }
     }
 }

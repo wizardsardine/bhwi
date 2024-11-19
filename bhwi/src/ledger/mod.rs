@@ -7,7 +7,7 @@ pub mod error;
 pub mod psbt;
 pub mod wallet;
 
-use bitcoin::bip32::Fingerprint;
+use bitcoin::{bip32::Fingerprint, Network};
 pub use wallet::{WalletPolicy, WalletPubKey};
 
 use crate::Interpreter;
@@ -22,6 +22,7 @@ pub enum LedgerError {
     Store(StoreError),
     Interrupted,
     UnexpectedResult(LedgerCommand, Vec<u8>),
+    FailedToOpenApp(Vec<u8>),
 }
 
 impl From<ApduError> for LedgerError {
@@ -38,11 +39,13 @@ impl From<StoreError> for LedgerError {
 
 #[derive(Clone, Debug)]
 pub enum LedgerCommand {
+    OpenApp(Network),
     GetMasterFingerprint,
     GetXpub,
 }
 
 pub enum LedgerResponse {
+    TaskDone,
     MasterFingerprint(Fingerprint),
 }
 
@@ -90,6 +93,9 @@ where
                 Self::Transmit::from(command::get_master_fingerprint()),
                 None,
             ),
+            LedgerCommand::OpenApp(network) => {
+                (Self::Transmit::from(command::open_app(network)), None)
+            }
             _ => unimplemented!(),
         };
         self.state = State::Running { command, store };
@@ -118,6 +124,15 @@ where
                         self.state = State::Finished(LedgerResponse::MasterFingerprint(
                             Fingerprint::from(fg),
                         ));
+                    }
+                }
+                LedgerCommand::OpenApp(..) => {
+                    if res.status_word != StatusWord::OK {
+                        return Err(LedgerError::UnexpectedResult(command.clone(), res.data).into());
+                    } else {
+                        let mut fg = [0x00; 4];
+                        fg.copy_from_slice(&res.data[0..4]);
+                        self.state = State::Finished(LedgerResponse::TaskDone);
                     }
                 }
                 _ => unimplemented!(),
