@@ -22,7 +22,7 @@ pub fn open_app(network: Network) -> ApduCommand {
         data: if network == Network::Bitcoin {
             b"Bitcoin".to_vec()
         } else {
-            b"Bitcoin Testnet".to_vec()
+            b"Bitcoin Test".to_vec()
         },
     }
 }

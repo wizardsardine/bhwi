@@ -5,7 +5,10 @@ pub mod transport;
 use std::fmt::Debug;
 
 use async_trait::async_trait;
-use bhwi::{bitcoin::bip32::Fingerprint, common, Device, Interpreter};
+use bhwi::{
+    bitcoin::{bip32::Fingerprint, Network},
+    common, Device, Interpreter,
+};
 pub use jade::Jade;
 pub use ledger::Ledger;
 
@@ -24,6 +27,7 @@ pub trait HttpClient {
 #[async_trait(?Send)]
 pub trait HWI {
     type Error: Debug;
+    async fn unlock(&self, network: Network) -> Result<(), Self::Error>;
     async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error>;
 }
 
@@ -50,6 +54,20 @@ where
         + HttpClient<Error = F>,
 {
     type Error = Error<E, F>;
+    async fn unlock(&self, network: Network) -> Result<(), Self::Error> {
+        if let common::Response::TaskDone = run_command(
+            self,
+            self,
+            self.interpreter(),
+            common::Command::Unlock(network),
+        )
+        .await?
+        {
+            Ok(())
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
     async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error> {
         if let common::Response::MasterFingerprint(fg) = run_command(
             self,
@@ -106,6 +124,5 @@ where
             }
         }
     }
-    let res = intpr.end().unwrap();
-    Ok(res)
+    intpr.end().map_err(|e| e.into())
 }

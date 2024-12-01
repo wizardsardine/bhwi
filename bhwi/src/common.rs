@@ -25,6 +25,7 @@ pub struct Transmit {
 #[derive(Debug)]
 pub enum Error {
     NoErrorOrResult,
+    UnexpectedResult(Vec<u8>),
 }
 
 impl From<Command> for jade::JadeCommand {
@@ -117,6 +118,8 @@ impl From<ledger::LedgerError> for Error {
     fn from(error: ledger::LedgerError) -> Error {
         match error {
             ledger::LedgerError::NoErrorOrResult => Error::NoErrorOrResult,
+            ledger::LedgerError::Apdu(data) => Error::UnexpectedResult(Vec::new()),
+            ledger::LedgerError::UnexpectedResult(_, data) => Error::UnexpectedResult(data),
             _ => Error::NoErrorOrResult,
         }
     }

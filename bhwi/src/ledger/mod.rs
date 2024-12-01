@@ -127,12 +127,13 @@ where
                     }
                 }
                 LedgerCommand::OpenApp(..) => {
-                    if res.status_word != StatusWord::OK {
-                        return Err(LedgerError::UnexpectedResult(command.clone(), res.data).into());
-                    } else {
-                        let mut fg = [0x00; 4];
-                        fg.copy_from_slice(&res.data[0..4]);
+                    if res.status_word == StatusWord::OK ||
+                    // An app is already open and the cla cannot be supported
+                    res.status_word == StatusWord::ClaNotSupported
+                    {
                         self.state = State::Finished(LedgerResponse::TaskDone);
+                    } else {
+                        return Err(LedgerError::UnexpectedResult(command.clone(), res.data).into());
                     }
                 }
                 _ => unimplemented!(),

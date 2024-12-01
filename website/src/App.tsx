@@ -34,6 +34,8 @@ const App: React.FC = () => {
             const client = new Client(); // Create instance synchronously
             await client.connect_ledger(onCloseCallback); // Connect asynchronously
 
+            await client.unlock("testnet");
+
             // Log the master fingerprint
             const masterFingerprint = await client.get_master_fingerprint();
             console.log("Master Fingerprint:", masterFingerprint);

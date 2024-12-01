@@ -15,3 +15,6 @@ serde_json = "1.0.121"
 serde_bytes = { version = "0.11.14", optional = true }
 serde_cbor = { version = "0.11", optional = true }
 bitcoin = "0.32.2"
+
+# TODO: remove me
+log = "0.4"
