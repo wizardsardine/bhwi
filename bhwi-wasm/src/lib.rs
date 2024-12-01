@@ -84,6 +84,20 @@ impl Client {
     }
 
     #[wasm_bindgen]
+    pub async fn connect_jade(
+        &mut self,
+        network: &str,
+        on_close_cb: JsValue,
+    ) -> Result<(), JsValue> {
+        let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let device = WebSerialDevice::get_webserial_device(115200, on_close_cb)
+            .await
+            .ok_or(JsValue::from_str("Failed to connect to jade"))?;
+        self.device = Some(Device::Jade(Jade::new(network, device, PinServer {})));
+        Ok(())
+    }
+
+    #[wasm_bindgen]
     pub async fn unlock(&self, network: &str) -> Result<(), JsValue> {
         match &self.device {
             Some(d) => d.as_ref().unlock(network).await,

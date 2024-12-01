@@ -46,10 +46,35 @@ const App: React.FC = () => {
         }
     };
 
+    const requestJade = async () => {
+        try {
+            await initWasm(); // Initialize the WebAssembly module
+
+            const onCloseCallback = () => {
+                console.log('Device closed');
+            };
+
+
+            const client = new Client(); // Create instance synchronously
+            await client.connect_jade("testnet", onCloseCallback); // Connect asynchronously
+
+            await client.unlock("testnet");
+
+            // Log the master fingerprint
+            const masterFingerprint = await client.get_master_fingerprint();
+            console.log("Master Fingerprint:", masterFingerprint);
+
+            setDevice(true);
+        } catch (error) {
+            console.error("Error opening WebSerial device:", error);
+        }
+    };
+
     return (
         <div>
             <h1>WASM WebHID Device</h1>
             <button onClick={requestDevice}>Request HID Device</button>
+            <button onClick={requestJade}>Request Jade Device</button>
             {device ? <p>Device connected !</p> : <p>No device connected</p>}
         </div>
     );

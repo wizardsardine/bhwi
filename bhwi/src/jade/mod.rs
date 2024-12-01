@@ -6,6 +6,7 @@ use bitcoin::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::Interpreter;
 
@@ -75,13 +76,20 @@ impl<C, T, R, E> JadeInterpreter<C, T, R, E> {
     }
 }
 
+// Initialize a static atomic counter
+static REQUEST_COUNTER: AtomicUsize = AtomicUsize::new(1);
+
+fn generate_request_id() -> usize {
+    REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 fn request<S, T, E>(method: &str, params: Option<S>) -> Result<T, E>
 where
     S: Serialize + Unpin,
     T: From<JadeTransmit>,
     E: From<JadeError>,
 {
-    let id = std::process::id();
+    let id = generate_request_id();
     let payload = serde_cbor::to_vec(&api::Request {
         id: &id.to_string(),
         method,

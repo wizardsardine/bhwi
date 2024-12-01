@@ -12,18 +12,18 @@ impl HttpClient for PinServer {
     type Error = JsValue;
     async fn request(&self, url: &str, body: &[u8]) -> Result<Vec<u8>, Self::Error> {
         // Set up request parameters
-        let mut opts = RequestInit::new();
-        opts.method("POST");
-        opts.mode(RequestMode::Cors); // Allows cross-origin requests
-        opts.body(Some(&js_sys::Uint8Array::from(body).into()));
+        let opts = RequestInit::new();
+        opts.set_method("POST");
+        opts.set_mode(RequestMode::Cors); // Allows cross-origin requests
+        opts.set_body(&js_sys::Uint8Array::from(body).into());
 
         // Create headers and set the Content-Type
         let headers = Headers::new()?;
         headers.set("Content-Type", "application/octet-stream")?;
-        opts.headers(&headers);
+        opts.set_headers(&headers);
 
         // Create a Request object
-        let request = Request::new_with_str_and_init(&url, &opts)?;
+        let request = Request::new_with_str_and_init(url, &opts)?;
 
         // Use the window's fetch API
         let window = web_sys::window().unwrap();

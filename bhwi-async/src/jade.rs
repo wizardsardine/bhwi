@@ -3,18 +3,21 @@ use std::fmt::Debug;
 use crate::{HttpClient, Transport};
 use async_trait::async_trait;
 use bhwi::{
+    bitcoin::Network,
     jade::{JadeCommand, JadeError, JadeInterpreter, JadeResponse, JadeTransmit},
     Interpreter,
 };
 
 pub struct Jade<T, S> {
+    pub network: Network,
     pub transport: T,
     pub pinserver: S,
 }
 
 impl<T, S> Jade<T, S> {
-    pub fn new(transport: T, pinserver: S) -> Self {
+    pub fn new(network: Network, transport: T, pinserver: S) -> Self {
         Self {
+            network,
             transport,
             pinserver,
         }
@@ -29,7 +32,7 @@ where
     E: From<JadeError>,
 {
     fn interpreter(&self) -> impl Interpreter<Command = C, Transmit = T, Response = R, Error = E> {
-        JadeInterpreter::default()
+        JadeInterpreter::default().with_network(self.network)
     }
 }
 
