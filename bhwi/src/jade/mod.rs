@@ -13,9 +13,11 @@ use crate::Interpreter;
 pub const JADE_NETWORK_MAINNET: &str = "mainnet";
 pub const JADE_NETWORK_TESTNET: &str = "testnet";
 
+#[derive(Debug)]
 pub enum JadeError {
     NoErrorOrResult,
     Rpc(api::Error),
+    Cbor,
     Request(&'static str),
     Unexpected(String),
     HandshakeRefused,
@@ -105,7 +107,7 @@ where
 }
 
 fn from_response<D: DeserializeOwned>(buffer: &[u8]) -> Result<api::Response<D>, JadeError> {
-    serde_cbor::from_slice(buffer).map_err(|_| JadeError::NoErrorOrResult)
+    serde_cbor::from_slice(buffer).map_err(|_| JadeError::Cbor)
 }
 
 impl<C, T, R, E> Interpreter for JadeInterpreter<C, T, R, E>
@@ -196,6 +198,6 @@ where
     fn end(self) -> Result<Self::Response, Self::Error> {
         self.response
             .map(Self::Response::from)
-            .ok_or(JadeError::NoErrorOrResult.into())
+            .ok_or_else(|| JadeError::NoErrorOrResult.into())
     }
 }

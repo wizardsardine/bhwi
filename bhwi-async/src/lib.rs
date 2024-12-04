@@ -100,14 +100,11 @@ where
         Error = common::Error,
     >,
 {
-    log::info!("starting command");
     let transmit = intpr.start(command)?;
-    log::info!("received first transmit");
     let exchange = transport
         .exchange(&transmit.payload)
         .await
         .map_err(Error::Transport)?;
-    log::info!("received first exchange");
     let mut transmit = intpr.exchange(exchange)?;
     while let Some(t) = &transmit {
         match &t.recipient {

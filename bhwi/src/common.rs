@@ -67,6 +67,7 @@ impl From<jade::JadeTransmit> for Transmit {
 impl From<jade::JadeError> for Error {
     fn from(error: jade::JadeError) -> Error {
         match error {
+            jade::JadeError::Cbor => Error::NoErrorOrResult,
             jade::JadeError::NoErrorOrResult => Error::NoErrorOrResult,
             jade::JadeError::Rpc(_) => Error::NoErrorOrResult,
             jade::JadeError::Request(_) => Error::NoErrorOrResult,

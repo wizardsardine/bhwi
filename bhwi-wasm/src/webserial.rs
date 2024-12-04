@@ -3,8 +3,7 @@ use std::rc::Rc;
 
 use async_trait::async_trait;
 use bhwi_async::Transport;
-use futures::channel::mpsc::{unbounded, UnboundedReceiver};
-use futures::{lock::Mutex, StreamExt};
+use futures::future::{select, Either};
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -14,7 +13,6 @@ use web_sys::{ReadableStreamDefaultReader, SerialOptions, SerialPort, SerialPort
 pub struct WebSerialDevice {
     port: SerialPort,
     on_close_cb: JsValue,
-    msg_queue: Mutex<UnboundedReceiver<Vec<u8>>>,
 }
 
 #[wasm_bindgen]
@@ -41,43 +39,6 @@ impl WebSerialDevice {
             return None;
         }
 
-        let (tx, rx) = unbounded();
-        let port_rc = Rc::new(RefCell::new(port.clone()));
-
-        // Continuously read data from the serial port
-        wasm_bindgen_futures::spawn_local({
-            let tx = tx.clone();
-            let port = port_rc.clone();
-            async move {
-                let reader = port.borrow().readable().get_reader();
-                let reader = reader
-                    .dyn_into::<ReadableStreamDefaultReader>()
-                    .expect("Failed to cast to ReadableStreamDefaultReader");
-                loop {
-                    // Attempt to read data
-                    match wasm_bindgen_futures::JsFuture::from(reader.read()).await {
-                        Ok(data) => {
-                            // Convert the data to Uint8Array and then to Vec<u8>
-                            let uint8_array = Uint8Array::new(&data);
-                            let mut vec = vec![0u8; uint8_array.length() as usize];
-                            uint8_array.copy_to(&mut vec[..]);
-
-                            // Send the data through the channel
-                            if tx.unbounded_send(vec).is_err() {
-                                log::error!("Failed to send data to the receiver.");
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            log::error!("Error while reading: {:?}", e);
-                            break;
-                        }
-                    }
-                }
-                reader.release_lock();
-            }
-        });
-
         // Add disconnect event listener
         let on_close_cb_rc = Rc::new(RefCell::new(on_close_cb.clone()));
         let on_disconnect_closure = {
@@ -103,17 +64,103 @@ impl WebSerialDevice {
         on_disconnect_closure.forget();
 
         // Return the WebSerialDevice
-        Some(Self {
-            port,
-            on_close_cb,
-            msg_queue: Mutex::new(rx),
-        })
+        Some(Self { port, on_close_cb })
     }
 
     #[wasm_bindgen]
     pub async fn read(&self) -> Option<Vec<u8>> {
-        let mut queue = self.msg_queue.lock().await;
-        queue.next().await
+        let reader = self.port.readable().get_reader();
+        let reader = reader
+            .dyn_into::<ReadableStreamDefaultReader>()
+            .expect("Failed to cast to ReadableStreamDefaultReader");
+        // Function to create a timeout future
+        fn create_timeout_future(timeout_ms: i32) -> JsFuture {
+            let promise = js_sys::Promise::new(&mut |resolve, _| {
+                let closure = Closure::wrap(Box::new(move || {
+                    resolve.call0(&JsValue::UNDEFINED).unwrap();
+                }) as Box<dyn FnMut()>);
+
+                web_sys::window()
+                    .unwrap()
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(
+                        closure.as_ref().unchecked_ref(),
+                        timeout_ms,
+                    )
+                    .unwrap();
+
+                closure.forget(); // Avoid dropping the closure prematurely
+            });
+            JsFuture::from(promise)
+        }
+
+        let mut res = Vec::new();
+
+        // Perform the first read without a timeout for the unlock;
+        match JsFuture::from(reader.read()).await {
+            Ok(chunk) => {
+                let chunk = js_sys::Reflect::get(&chunk, &JsValue::from_str("value"))
+                    .ok()
+                    .and_then(|value| value.dyn_into::<Uint8Array>().ok());
+
+                if let Some(uint8_array) = chunk {
+                    let mut vec = vec![0u8; uint8_array.length() as usize];
+                    uint8_array.copy_to(&mut vec[..]);
+
+                    if !vec.is_empty() {
+                        res.append(&mut vec);
+                    }
+                } else {
+                    log::warn!("No valid chunk received on first read");
+                    reader.release_lock();
+                    return Some(res);
+                }
+            }
+            Err(e) => {
+                log::error!("Error while reading on first attempt: {:?}", e);
+                reader.release_lock();
+                return None;
+            }
+        }
+
+        loop {
+            match select(
+                wasm_bindgen_futures::JsFuture::from(reader.read()),
+                create_timeout_future(500),
+            )
+            .await
+            {
+                Either::Left((read_result, _)) => match read_result {
+                    Ok(chunk) => {
+                        let chunk = js_sys::Reflect::get(&chunk, &JsValue::from_str("value"))
+                            .ok()
+                            .and_then(|value| value.dyn_into::<Uint8Array>().ok());
+
+                        if let Some(uint8_array) = chunk {
+                            let mut vec = vec![0u8; uint8_array.length() as usize];
+                            uint8_array.copy_to(&mut vec[..]);
+
+                            if !vec.is_empty() {
+                                res.append(&mut vec);
+                            }
+                        } else {
+                            log::warn!("No valid chunk received");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Error while reading: {:?}", e);
+                        break;
+                    }
+                },
+                Either::Right((_, _)) => {
+                    if !res.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        reader.release_lock();
+        Some(res)
     }
 
     #[wasm_bindgen]
