@@ -5,7 +5,7 @@ import './App.css'
 import initWasm, { initialize_logging, Client } from 'bhwi-wasm';
 
 const App: React.FC = () => {
-    const [device, setDevice] = useState<boolean | undefined>(undefined);
+    const [device, setDevice] = useState<Client | undefined>(undefined);
     // const [productId] = useState(0xcc10); // Product ID in hex
 
     useEffect(() => {
@@ -24,23 +24,32 @@ const App: React.FC = () => {
 
     const requestDevice = async () => {
         try {
-            await initWasm(); // Initialize the WebAssembly module
+            await initWasm();
 
-            const onCloseCallback = () => {
-                console.log('Device closed');
+            let client = new Client();
+
+            const retryCallback = async () => {
+                console.log('retrying');
+                client = new Client();
+                await client.connect_ledger(() => {
+                    console.log('Failed to retry');
+                });
+
+                const masterFingerprint = await client.get_master_fingerprint();
+                console.log("Master Fingerprint:", masterFingerprint);
+
+                setDevice(client);
             };
 
 
-            const client = new Client(); // Create instance synchronously
-            await client.connect_ledger(onCloseCallback); // Connect asynchronously
-
+            await client.connect_ledger(retryCallback);
             await client.unlock("testnet");
 
             // Log the master fingerprint
             const masterFingerprint = await client.get_master_fingerprint();
             console.log("Master Fingerprint:", masterFingerprint);
 
-            setDevice(true);
+            setDevice(client);
         } catch (error) {
             console.error("Error opening WebHID device:", error);
         }
@@ -64,7 +73,7 @@ const App: React.FC = () => {
             const masterFingerprint = await client.get_master_fingerprint();
             console.log("Master Fingerprint:", masterFingerprint);
 
-            setDevice(true);
+            setDevice(client);
         } catch (error) {
             console.error("Error opening WebSerial device:", error);
         }
