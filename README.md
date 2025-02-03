@@ -1,7 +1,7 @@
 # BHWI, the Bitcoin Hardware Wallet Interface
 
 This repository is a work in progress for a sans-io equivalent of HWI.
-The main idea is to implement for each hardware wallet a interface called
+The main idea is to implement for each hardware wallet an interface called
 the interpreter that takes care of encoding commands, decoding device responses
 and routing data to their recipients.
 
