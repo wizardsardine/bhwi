@@ -1,6 +1,6 @@
 [package]
 name = "bhwi-wasm"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 
 [lib]
@@ -9,8 +9,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 async-trait = "0.1"
 bitcoin = { version = "0.32", features = ["secp-lowmemory"] }
-bhwi = { path = "../bhwi", version = "0.1"}
-bhwi-async = { path = "../bhwi-async", version = "0.1"}
+bhwi = { path = "../bhwi", version = "0.0.1"}
+bhwi-async = { path = "../bhwi-async", version = "0.0.1"}
 console_log = "0.2"
 console_error_panic_hook = "0.1.7"
 futures = "0.3"
