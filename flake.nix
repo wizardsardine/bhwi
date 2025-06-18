@@ -23,7 +23,6 @@
           pkgs.zlib
           pkgs.gcc
           pkgs.pkg-config
-          pkgs.just
           pkgs.wasm-pack
           pkgs.wasm-bindgen-cli
           pkgs.binaryen
@@ -33,7 +32,8 @@
         ];
       in
       {
-        defaultPackage = pkgs.rustPlatform.buildRustPackage {
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+          name = "bhwi";
           src = ./.;
 
           cargoLock = {
@@ -44,7 +44,7 @@
         };
 
 
-        devShell = pkgs.mkShell {
+        devShells.default = pkgs.mkShell {
           packages = inputs;
           shellHook = ''
             export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
