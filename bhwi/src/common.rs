@@ -26,6 +26,11 @@ pub struct Transmit {
 pub enum Error {
     NoErrorOrResult,
     UnexpectedResult(Vec<u8>),
+    // Generic RPC/communication errors
+    Rpc(i32, Option<String>), // (code, message)
+    Serialization,
+    Request(&'static str),
+    AuthenticationRefused,
 }
 
 impl From<Command> for jade::JadeCommand {
@@ -67,12 +72,12 @@ impl From<jade::JadeTransmit> for Transmit {
 impl From<jade::JadeError> for Error {
     fn from(error: jade::JadeError) -> Error {
         match error {
-            jade::JadeError::Cbor => Error::NoErrorOrResult,
+            jade::JadeError::Cbor => Error::Serialization,
             jade::JadeError::NoErrorOrResult => Error::NoErrorOrResult,
-            jade::JadeError::Rpc(_) => Error::NoErrorOrResult,
-            jade::JadeError::Request(_) => Error::NoErrorOrResult,
-            jade::JadeError::Unexpected(_) => Error::NoErrorOrResult,
-            jade::JadeError::HandshakeRefused => Error::NoErrorOrResult,
+            jade::JadeError::Rpc(api_error) => Error::Rpc(api_error.code, api_error.message),
+            jade::JadeError::Serialization(_) => Error::Serialization,
+            jade::JadeError::UnexpectedResult(msg) => Error::UnexpectedResult(msg.into_bytes()),
+            jade::JadeError::HandshakeRefused => Error::AuthenticationRefused,
         }
     }
 }
@@ -119,9 +124,11 @@ impl From<ledger::LedgerError> for Error {
     fn from(error: ledger::LedgerError) -> Error {
         match error {
             ledger::LedgerError::NoErrorOrResult => Error::NoErrorOrResult,
-            ledger::LedgerError::Apdu(data) => Error::UnexpectedResult(Vec::new()),
+            ledger::LedgerError::Apdu(_) => Error::Serialization,
+            ledger::LedgerError::Store(_) => Error::Request("Store operation failed"),
+            ledger::LedgerError::Interrupted => Error::Request("Operation interrupted"),
             ledger::LedgerError::UnexpectedResult(_, data) => Error::UnexpectedResult(data),
-            _ => Error::NoErrorOrResult,
+            ledger::LedgerError::FailedToOpenApp(_) => Error::AuthenticationRefused,
         }
     }
 }

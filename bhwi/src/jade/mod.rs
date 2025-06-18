@@ -18,8 +18,8 @@ pub enum JadeError {
     NoErrorOrResult,
     Rpc(api::Error),
     Cbor,
-    Request(&'static str),
-    Unexpected(String),
+    Serialization(String),
+    UnexpectedResult(String),
     HandshakeRefused,
 }
 
@@ -97,7 +97,7 @@ where
         method,
         params,
     })
-    .map_err(|_| JadeError::Request("failed to serialize"))?;
+    .map_err(|_| JadeError::Serialization("failed to serialize".to_string()))?;
 
     Ok(JadeTransmit {
         payload,
@@ -154,7 +154,7 @@ where
                     let url = match &http_request.params.urls {
                         api::PinServerUrls::Array(urls) => urls
                             .first()
-                            .ok_or(JadeError::Unexpected("No url provided".to_string()))?,
+                            .ok_or(JadeError::UnexpectedResult("No url provided".to_string()))?,
                         api::PinServerUrls::Object { url, .. } => url,
                     };
                     Ok(Some(
@@ -163,7 +163,7 @@ where
                                 url: url.to_string(),
                             },
                             payload: serde_json::to_vec(&http_request.params.data)
-                                .map_err(|e| JadeError::Unexpected(e.to_string()))?,
+                                .map_err(|e| JadeError::Serialization(e.to_string()))?,
                         }
                         .into(),
                     ))
@@ -173,7 +173,7 @@ where
             }
             State::WaitingPinServer => {
                 let pin_params: api::PinParams = serde_json::from_slice(&data)
-                    .map_err(|_| JadeError::Request("Wrong response from pin server"))?;
+                    .map_err(|_| JadeError::Serialization("Wrong response from pin server".to_string()))?;
                 let transmit = request("pin", Some(pin_params))?;
                 self.state = State::WaitingFinalHandshake;
                 Ok(Some(transmit))
@@ -189,7 +189,7 @@ where
             }
             State::Running(JadeCommand::GetMasterFingerprint) => {
                 let s: String = from_response(&data)?.into_result()?;
-                let xpub = Xpub::from_str(&s).map_err(|e| JadeError::Unexpected(e.to_string()))?;
+                let xpub = Xpub::from_str(&s).map_err(|e| JadeError::Serialization(e.to_string()))?;
                 self.response = Some(JadeResponse::MasterFingerprint(xpub.fingerprint()));
                 Ok(None)
             }
