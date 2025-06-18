@@ -29,6 +29,7 @@
           pkgs.clang
           pkgs.corepack_20
           pkgs.nodejs_20
+          pkgs.just
         ];
       in
       {
