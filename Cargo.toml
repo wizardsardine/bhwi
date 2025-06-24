@@ -3,3 +3,4 @@ resolver = "2"
 members = [
     "bhwi", "bhwi-async", "bhwi-wasm",
 ]
+default-members = ["bhwi", "bhwi-async"]
