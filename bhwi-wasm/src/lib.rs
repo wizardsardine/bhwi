@@ -10,7 +10,7 @@ use bhwi_async::{
     transport::ledger::hid::{LedgerTransportHID, LEDGER_VID},
     Jade, Ledger, HWI as AsyncHWI,
 };
-use bitcoin::Network;
+use bitcoin::{bip32::DerivationPath, Network};
 use log::Level;
 use pinserver::PinServer;
 use wasm_bindgen::prelude::*;
@@ -30,6 +30,7 @@ pub fn initialize_logging(level: &str) {
 pub trait HWI {
     async fn unlock(&self, network: &str) -> Result<(), JsValue>;
     async fn get_master_fingerprint(&self) -> Result<String, JsValue>;
+    async fn get_extended_pubkey(&self, path: &str, display: bool) -> Result<String, JsValue>;
 }
 
 #[async_trait(?Send)]
@@ -44,6 +45,15 @@ impl<T: AsyncHWI> HWI for T {
         self.get_master_fingerprint()
             .await
             .map(|fp| fp.to_string())
+            .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))
+    }
+
+    async fn get_extended_pubkey(&self, path: &str, display: bool) -> Result<String, JsValue> {
+        let path = DerivationPath::from_str(path)
+            .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))?;
+        self.get_extended_pubkey(&path, display)
+            .await
+            .map(|xpub| xpub.to_string())
             .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))
     }
 }
@@ -109,6 +119,14 @@ impl Client {
     pub async fn get_master_fingerprint(&self) -> Result<String, JsValue> {
         match &self.device {
             Some(d) => d.as_ref().get_master_fingerprint().await,
+            None => Err(JsValue::from_str("Device not connected")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub async fn get_extended_pubkey(&self, path: &str, display: bool) -> Result<String, JsValue> {
+        match &self.device {
+            Some(d) => d.as_ref().get_extended_pubkey(path, display).await,
             None => Err(JsValue::from_str("Device not connected")),
         }
     }

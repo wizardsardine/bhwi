@@ -49,6 +49,9 @@ const App: React.FC = () => {
             const masterFingerprint = await client.get_master_fingerprint();
             console.log("Master Fingerprint:", masterFingerprint);
 
+            const xpub = await client.get_extended_pubkey("m/48'/1'/0'/2'", false);
+            console.log("xpub:", xpub);
+
             setDevice(client);
         } catch (error) {
             console.error("Error opening WebHID device:", error);
@@ -72,6 +75,9 @@ const App: React.FC = () => {
             // Log the master fingerprint
             const masterFingerprint = await client.get_master_fingerprint();
             console.log("Master Fingerprint:", masterFingerprint);
+
+            const xpub = await client.get_extended_pubkey("m/48'/1'/0'/2'", false);
+            console.log("xpub:", xpub);
 
             setDevice(client);
         } catch (error) {

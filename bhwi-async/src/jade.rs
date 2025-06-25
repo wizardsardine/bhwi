@@ -24,9 +24,9 @@ impl<T, S> Jade<T, S> {
     }
 }
 
-impl<F, S, C, T, R, E> crate::Device<C, T, R, E> for Jade<F, S>
+impl<'a, F, S, C, T, R, E> crate::Device<'a, C, T, R, E> for Jade<F, S>
 where
-    C: Into<JadeCommand>,
+    C: Into<JadeCommand<'a>>,
     T: From<JadeTransmit>,
     R: From<JadeResponse>,
     E: From<JadeError>,

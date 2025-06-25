@@ -23,14 +23,16 @@ pub enum JadeError {
     HandshakeRefused,
 }
 
-pub enum JadeCommand {
+pub enum JadeCommand<'a> {
     Auth,
     GetMasterFingerprint,
+    GetXpub(&'a DerivationPath),
 }
 
 pub enum JadeResponse {
     TaskDone,
     MasterFingerprint(Fingerprint),
+    Xpub(Xpub),
 }
 
 pub enum JadeRecipient {
@@ -43,21 +45,21 @@ pub struct JadeTransmit {
     pub payload: Vec<u8>,
 }
 
-enum State {
+enum State<'a> {
     New,
-    Running(JadeCommand),
+    Running(JadeCommand<'a>),
     WaitingPinServer,
     WaitingFinalHandshake,
 }
 
-pub struct JadeInterpreter<C, T, R, E> {
+pub struct JadeInterpreter<'a, C, T, R, E> {
     network: &'static str,
-    state: State,
+    state: State<'a>,
     response: Option<JadeResponse>,
     _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
 
-impl<C, T, R, E> Default for JadeInterpreter<C, T, R, E> {
+impl<'a, C, T, R, E> Default for JadeInterpreter<'a, C, T, R, E> {
     fn default() -> Self {
         Self {
             network: JADE_NETWORK_MAINNET,
@@ -68,7 +70,7 @@ impl<C, T, R, E> Default for JadeInterpreter<C, T, R, E> {
     }
 }
 
-impl<C, T, R, E> JadeInterpreter<C, T, R, E> {
+impl<'a, C, T, R, E> JadeInterpreter<'a, C, T, R, E> {
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = match network {
             Network::Bitcoin => JADE_NETWORK_MAINNET,
@@ -110,9 +112,9 @@ fn from_response<D: DeserializeOwned>(buffer: &[u8]) -> Result<api::Response<D>,
     serde_cbor::from_slice(buffer).map_err(|_| JadeError::Cbor)
 }
 
-impl<C, T, R, E> Interpreter for JadeInterpreter<C, T, R, E>
+impl<'a, C, T, R, E> Interpreter for JadeInterpreter<'a, C, T, R, E>
 where
-    C: Into<JadeCommand>,
+    C: Into<JadeCommand<'a>>,
     T: From<JadeTransmit>,
     R: From<JadeResponse>,
     E: From<JadeError>,
@@ -137,6 +139,13 @@ where
                 Some(api::GetXpubParams {
                     network: self.network,
                     path: DerivationPath::master().to_u32_vec(),
+                }),
+            ),
+            JadeCommand::GetXpub(path) => request(
+                "get_xpub",
+                Some(api::GetXpubParams {
+                    network: self.network,
+                    path: path.to_u32_vec(),
                 }),
             ),
         };
@@ -172,8 +181,9 @@ where
                 }
             }
             State::WaitingPinServer => {
-                let pin_params: api::PinParams = serde_json::from_slice(&data)
-                    .map_err(|_| JadeError::Serialization("Wrong response from pin server".to_string()))?;
+                let pin_params: api::PinParams = serde_json::from_slice(&data).map_err(|_| {
+                    JadeError::Serialization("Wrong response from pin server".to_string())
+                })?;
                 let transmit = request("pin", Some(pin_params))?;
                 self.state = State::WaitingFinalHandshake;
                 Ok(Some(transmit))
@@ -189,8 +199,16 @@ where
             }
             State::Running(JadeCommand::GetMasterFingerprint) => {
                 let s: String = from_response(&data)?.into_result()?;
-                let xpub = Xpub::from_str(&s).map_err(|e| JadeError::Serialization(e.to_string()))?;
+                let xpub =
+                    Xpub::from_str(&s).map_err(|e| JadeError::Serialization(e.to_string()))?;
                 self.response = Some(JadeResponse::MasterFingerprint(xpub.fingerprint()));
+                Ok(None)
+            }
+            State::Running(JadeCommand::GetXpub(..)) => {
+                let s: String = from_response(&data)?.into_result()?;
+                let xpub =
+                    Xpub::from_str(&s).map_err(|e| JadeError::Serialization(e.to_string()))?;
+                self.response = Some(JadeResponse::Xpub(xpub));
                 Ok(None)
             }
         }
