@@ -5,4 +5,4 @@ install-website: build-website
     cd website && npm install
 
 build-website:
-    wasm-pack build bhwi-wasm --out-dir website/pkg --target web
+    wasm-pack build bhwi-wasm --out-dir ../website/pkg --target web

@@ -6,7 +6,10 @@ use std::fmt::Debug;
 
 use async_trait::async_trait;
 use bhwi::{
-    bitcoin::{bip32::Fingerprint, Network},
+    bitcoin::{
+        bip32::{DerivationPath, Fingerprint, Xpub},
+        Network,
+    },
     common, Device, Interpreter,
 };
 pub use jade::Jade;
@@ -29,6 +32,11 @@ pub trait HWI {
     type Error: Debug;
     async fn unlock(&self, network: Network) -> Result<(), Self::Error>;
     async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error>;
+    async fn get_extended_pubkey<'a>(
+        &self,
+        path: &'a DerivationPath,
+        display: bool,
+    ) -> Result<Xpub, Self::Error>;
 }
 
 #[derive(Debug)]
@@ -49,7 +57,7 @@ impl<E, F, D> HWI for D
 where
     F: Debug,
     E: Debug,
-    D: Device<common::Command, common::Transmit, common::Response, common::Error>
+    D: for<'a> Device<'a, common::Command<'a>, common::Transmit, common::Response, common::Error>
         + Transport<Error = E>
         + HttpClient<Error = F>,
 {
@@ -82,25 +90,41 @@ where
             Err(common::Error::NoErrorOrResult.into())
         }
     }
+
+    async fn get_extended_pubkey<'a>(
+        &self,
+        path: &'a DerivationPath,
+        display: bool,
+    ) -> Result<Xpub, Self::Error> {
+        if let common::Response::Xpub(xpub) = run_command(
+            self,
+            self,
+            self.interpreter(),
+            common::Command::GetXpub { path, display },
+        )
+        .await?
+        {
+            Ok(xpub)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
 }
 
-async fn run_command<T, S, I>(
+async fn run_command<'a, T, S, I, C>(
     transport: &T,
     http_client: &S,
     mut intpr: I,
-    command: common::Command,
+    command: C,
 ) -> Result<common::Response, Error<T::Error, S::Error>>
 where
     T: Transport + ?Sized,
     S: HttpClient + ?Sized,
-    I: Interpreter<
-        Command = common::Command,
-        Transmit = common::Transmit,
-        Response = common::Response,
-        Error = common::Error,
-    >,
+    I: Interpreter<Transmit = common::Transmit, Response = common::Response, Error = common::Error>,
+    C: Into<I::Command>,
+    I::Command: From<common::Command<'a>>,
 {
-    let transmit = intpr.start(command)?;
+    let transmit = intpr.start(command.into())?;
     let exchange = transport
         .exchange(&transmit.payload)
         .await

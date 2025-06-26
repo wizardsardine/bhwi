@@ -1,15 +1,23 @@
-use bitcoin::{bip32::Fingerprint, Network};
+use bitcoin::{
+    bip32::{DerivationPath, Fingerprint, Xpub},
+    Network,
+};
 
 use crate::{jade, ledger};
 
-pub enum Command {
+pub enum Command<'a> {
     Unlock(Network),
     GetMasterFingerprint,
+    GetXpub {
+        path: &'a DerivationPath,
+        display: bool,
+    },
 }
 
 pub enum Response {
     TaskDone,
     MasterFingerprint(Fingerprint),
+    Xpub(Xpub),
 }
 
 pub enum Recipient {
@@ -33,11 +41,12 @@ pub enum Error {
     AuthenticationRefused,
 }
 
-impl From<Command> for jade::JadeCommand {
-    fn from(cmd: Command) -> Self {
+impl<'a> From<Command<'a>> for jade::JadeCommand<'a> {
+    fn from(cmd: Command<'a>) -> Self {
         match cmd {
             Command::Unlock(..) => Self::Auth,
             Command::GetMasterFingerprint => Self::GetMasterFingerprint,
+            Command::GetXpub { path, .. } => Self::GetXpub(path),
         }
     }
 }
@@ -47,6 +56,7 @@ impl From<jade::JadeResponse> for Response {
         match res {
             jade::JadeResponse::TaskDone => Response::TaskDone,
             jade::JadeResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
+            jade::JadeResponse::Xpub(xpub) => Response::Xpub(xpub),
         }
     }
 }
@@ -82,13 +92,14 @@ impl From<jade::JadeError> for Error {
     }
 }
 
-pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Error>;
+pub type JadeInterpreter<'a> = jade::JadeInterpreter<'a, Command<'a>, Transmit, Response, Error>;
 
-impl From<Command> for ledger::LedgerCommand {
-    fn from(cmd: Command) -> Self {
+impl<'a> From<Command<'a>> for ledger::LedgerCommand<'a> {
+    fn from(cmd: Command<'a>) -> Self {
         match cmd {
             Command::Unlock(network) => Self::OpenApp(network),
             Command::GetMasterFingerprint => Self::GetMasterFingerprint,
+            Command::GetXpub { path, display } => Self::GetXpub { path, display },
         }
     }
 }
@@ -98,6 +109,7 @@ impl From<ledger::LedgerResponse> for Response {
         match res {
             ledger::LedgerResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
             ledger::LedgerResponse::TaskDone => Response::TaskDone,
+            ledger::LedgerResponse::Xpub(xpub) => Response::Xpub(xpub),
         }
     }
 }
@@ -127,13 +139,14 @@ impl From<ledger::LedgerError> for Error {
             ledger::LedgerError::Apdu(_) => Error::Serialization,
             ledger::LedgerError::Store(_) => Error::Request("Store operation failed"),
             ledger::LedgerError::Interrupted => Error::Request("Operation interrupted"),
-            ledger::LedgerError::UnexpectedResult(_, data) => Error::UnexpectedResult(data),
+            ledger::LedgerError::UnexpectedResult(data) => Error::UnexpectedResult(data),
             ledger::LedgerError::FailedToOpenApp(_) => Error::AuthenticationRefused,
         }
     }
 }
 
-pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
+pub type LedgerInterpreter<'a> =
+    ledger::LedgerInterpreter<'a, Command<'a>, Transmit, Response, Error>;
 
 #[cfg(test)]
 mod tests {

@@ -17,9 +17,9 @@ impl<T> Ledger<T> {
     }
 }
 
-impl<F, C, T, R, E> crate::Device<C, T, R, E> for Ledger<F>
+impl<'a, F, C, T, R, E> crate::Device<'a, C, T, R, E> for Ledger<F>
 where
-    C: Into<LedgerCommand>,
+    C: Into<LedgerCommand<'a>>,
     T: From<ApduCommand>,
     R: From<LedgerResponse>,
     E: From<LedgerError>,
