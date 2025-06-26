@@ -30,7 +30,7 @@ pub trait HttpClient {
 #[async_trait(?Send)]
 pub trait HWI {
     type Error: Debug;
-    async fn unlock(&self, network: Network) -> Result<(), Self::Error>;
+    async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
     async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error>;
     async fn get_extended_pubkey<'a>(
         &self,
@@ -62,19 +62,16 @@ where
         + HttpClient<Error = F>,
 {
     type Error = Error<E, F>;
-    async fn unlock(&self, network: Network) -> Result<(), Self::Error> {
-        if let common::Response::TaskDone = run_command(
+    async fn unlock(&mut self, network: Network) -> Result<(), Self::Error> {
+        let res = run_command(
             self,
             self,
             self.interpreter(),
             common::Command::Unlock(network),
         )
-        .await?
-        {
-            Ok(())
-        } else {
-            Err(common::Error::NoErrorOrResult.into())
-        }
+        .await?;
+        self.on_unlock(res)?;
+        Ok(())
     }
     async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error> {
         if let common::Response::MasterFingerprint(fg) = run_command(

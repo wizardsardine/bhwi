@@ -28,19 +28,20 @@ pub fn initialize_logging(level: &str) {
 
 #[async_trait(?Send)]
 pub trait HWI {
-    async fn unlock(&self, network: &str) -> Result<(), JsValue>;
+    async fn unlock(&mut self, network: &str) -> Result<(), JsValue>;
     async fn get_master_fingerprint(&self) -> Result<String, JsValue>;
     async fn get_extended_pubkey(&self, path: &str, display: bool) -> Result<String, JsValue>;
 }
 
 #[async_trait(?Send)]
 impl<T: AsyncHWI> HWI for T {
-    async fn unlock(&self, network: &str) -> Result<(), JsValue> {
+    async fn unlock(&mut self, network: &str) -> Result<(), JsValue> {
         let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
         self.unlock(network)
             .await
             .map_err(|e| JsValue::from_str(&format!("Failed to unlock: {:?}", e)))
     }
+
     async fn get_master_fingerprint(&self) -> Result<String, JsValue> {
         self.get_master_fingerprint()
             .await
@@ -65,6 +66,15 @@ pub enum Device {
 
 impl<'a> AsRef<dyn HWI + 'a> for Device {
     fn as_ref(&self) -> &(dyn HWI + 'a) {
+        match self {
+            Device::Ledger(l) => l,
+            Device::Jade(j) => j,
+        }
+    }
+}
+
+impl<'a> AsMut<dyn HWI + 'a> for Device {
+    fn as_mut(&mut self) -> &mut (dyn HWI + 'a) {
         match self {
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
@@ -108,9 +118,9 @@ impl Client {
     }
 
     #[wasm_bindgen]
-    pub async fn unlock(&self, network: &str) -> Result<(), JsValue> {
-        match &self.device {
-            Some(d) => d.as_ref().unlock(network).await,
+    pub async fn unlock(&mut self, network: &str) -> Result<(), JsValue> {
+        match &mut self.device {
+            Some(d) => d.as_mut().unlock(network).await,
             None => Err(JsValue::from_str("Device not connected")),
         }
     }

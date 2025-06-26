@@ -16,4 +16,7 @@ pub trait Interpreter {
 
 pub trait Device<'a, C, T, R, E> {
     fn interpreter(&self) -> impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>;
+    fn on_unlock(&mut self, _response: R) -> Result<(), E> {
+        Ok(())
+    }
 }
