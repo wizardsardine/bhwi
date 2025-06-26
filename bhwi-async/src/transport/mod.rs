@@ -1,1 +1,1 @@
-pub mod ledger;
+pub mod ledger_hid;

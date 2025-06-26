@@ -195,7 +195,7 @@ impl WebSerialDevice {
 #[async_trait(?Send)]
 impl Transport for WebSerialDevice {
     type Error = JsValue;
-    async fn exchange(&self, command: &[u8]) -> Result<Vec<u8>, Self::Error> {
+    async fn exchange(&self, command: &[u8], _encrypted: bool) -> Result<Vec<u8>, Self::Error> {
         self.write(command).await?;
         Ok(self.read().await.unwrap())
     }

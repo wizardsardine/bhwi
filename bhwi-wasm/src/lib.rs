@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use bhwi_async::{
-    transport::ledger::hid::{LedgerTransportHID, LEDGER_VID},
+    transport::ledger_hid::{LedgerTransportHID, LEDGER_VID},
     Jade, Ledger, HWI as AsyncHWI,
 };
 use bitcoin::{bip32::DerivationPath, Network};
@@ -27,32 +27,32 @@ pub fn initialize_logging(level: &str) {
 }
 
 #[async_trait(?Send)]
-pub trait HWI {
-    async fn unlock(&mut self, network: &str) -> Result<(), JsValue>;
-    async fn get_master_fingerprint(&self) -> Result<String, JsValue>;
-    async fn get_extended_pubkey(&self, path: &str, display: bool) -> Result<String, JsValue>;
+pub trait HWI<'a> {
+    async fn unlock(&'a mut self, network: &str) -> Result<(), JsValue>;
+    async fn get_mfg(&'a mut self) -> Result<String, JsValue>;
+    async fn get_xpub(&'a mut self, path: &str, display: bool) -> Result<String, JsValue>;
 }
 
 #[async_trait(?Send)]
-impl<T: AsyncHWI> HWI for T {
-    async fn unlock(&mut self, network: &str) -> Result<(), JsValue> {
-        let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
-        self.unlock(network)
+impl<'a, T: AsyncHWI<'a>> HWI<'a> for T {
+    async fn unlock(&'a mut self, network: &str) -> Result<(), JsValue> {
+        let n = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.unlock(n)
             .await
             .map_err(|e| JsValue::from_str(&format!("Failed to unlock: {:?}", e)))
     }
 
-    async fn get_master_fingerprint(&self) -> Result<String, JsValue> {
+    async fn get_mfg(&'a mut self) -> Result<String, JsValue> {
         self.get_master_fingerprint()
             .await
             .map(|fp| fp.to_string())
             .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))
     }
 
-    async fn get_extended_pubkey(&self, path: &str, display: bool) -> Result<String, JsValue> {
-        let path = DerivationPath::from_str(path)
+    async fn get_xpub(&'a mut self, path: &str, display: bool) -> Result<String, JsValue> {
+        let p = DerivationPath::from_str(path)
             .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))?;
-        self.get_extended_pubkey(&path, display)
+        self.get_extended_pubkey(&p, display)
             .await
             .map(|xpub| xpub.to_string())
             .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))
@@ -73,8 +73,8 @@ impl<'a> AsRef<dyn HWI + 'a> for Device {
     }
 }
 
-impl<'a> AsMut<dyn HWI + 'a> for Device {
-    fn as_mut(&mut self) -> &mut (dyn HWI + 'a) {
+impl<'a> AsMut<dyn HWI<'a> + 'a> for Device {
+    fn as_mut(&mut self) -> &mut (dyn HWI<'a> + 'a) {
         match self {
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
@@ -128,7 +128,7 @@ impl Client {
     #[wasm_bindgen]
     pub async fn get_master_fingerprint(&self) -> Result<String, JsValue> {
         match &self.device {
-            Some(d) => d.as_ref().get_master_fingerprint().await,
+            Some(d) => d.as_ref().get_mfg().await,
             None => Err(JsValue::from_str("Device not connected")),
         }
     }
@@ -136,7 +136,7 @@ impl Client {
     #[wasm_bindgen]
     pub async fn get_extended_pubkey(&self, path: &str, display: bool) -> Result<String, JsValue> {
         match &self.device {
-            Some(d) => d.as_ref().get_extended_pubkey(path, display).await,
+            Some(d) => d.as_ref().get_xpub(path, display).await,
             None => Err(JsValue::from_str("Device not connected")),
         }
     }

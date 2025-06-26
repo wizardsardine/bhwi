@@ -1,30 +1,37 @@
 use crate::{HttpClient, Transport};
 use async_trait::async_trait;
 use bhwi::{
-    ledger::{apdu::ApduCommand, LedgerCommand, LedgerError, LedgerInterpreter, LedgerResponse},
+    coldcard::{
+        encrypt, ColdcardCommand, ColdcardError, ColdcardInterpreter, ColdcardResponse,
+        ColdcardTransmit,
+    },
     Interpreter,
 };
 
-pub struct Ledger<T> {
+pub struct Coldcard<T> {
     pub transport: T,
+    encryption: Option<encrypt::Engine>,
 }
 
-impl<T> Ledger<T> {
+impl<T> Coldcard<T> {
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            encryption: None,
+        }
     }
 }
 
-impl<'a, C, T, R, E, F> crate::Device<'a, C, T, R, E> for Ledger<F>
+impl<'a, C, T, R, E, F> crate::Device<'a, C, T, R, E> for Coldcard<F>
 where
-    C: Into<LedgerCommand<'a>>,
-    T: From<ApduCommand>,
-    R: From<LedgerResponse>,
-    E: From<LedgerError>,
+    C: Into<ColdcardCommand<'a>>,
+    T: From<ColdcardTransmit>,
+    R: From<ColdcardResponse>,
+    E: From<ColdcardError>,
     F: Transport,
 {
     type TransportError = F::Error;
-    type HttpClientError = LedgerError;
+    type HttpClientError = ColdcardError;
     fn components(
         &'a mut self,
     ) -> (
@@ -35,7 +42,7 @@ where
         (
             &self.transport,
             &DummyClient {},
-            LedgerInterpreter::default(),
+            ColdcardInterpreter::new(self.encryption.as_mut()),
         )
     }
 }
@@ -43,7 +50,7 @@ where
 pub struct DummyClient;
 #[async_trait(?Send)]
 impl HttpClient for DummyClient {
-    type Error = LedgerError;
+    type Error = ColdcardError;
     async fn request(&self, _url: &str, _req: &[u8]) -> Result<Vec<u8>, Self::Error> {
         unreachable!("Coldcard does not need http client")
     }

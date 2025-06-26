@@ -3,7 +3,7 @@ use bitcoin::{
     Network,
 };
 
-use crate::{jade, ledger};
+use crate::{coldcard, jade, ledger};
 
 pub enum Command<'a> {
     Unlock(Network),
@@ -28,6 +28,7 @@ pub enum Recipient {
 pub struct Transmit {
     pub recipient: Recipient,
     pub payload: Vec<u8>,
+    pub encrypted: bool,
 }
 
 #[derive(Debug)]
@@ -40,6 +41,47 @@ pub enum Error {
     Request(&'static str),
     AuthenticationRefused,
 }
+
+impl<'a> From<Command<'a>> for coldcard::ColdcardCommand<'a> {
+    fn from(cmd: Command<'a>) -> Self {
+        match cmd {
+            Command::Unlock(..) => Self::GetMasterFingerprint,
+            Command::GetMasterFingerprint => Self::GetMasterFingerprint,
+            Command::GetXpub { path, .. } => Self::GetXpub(path),
+        }
+    }
+}
+
+impl From<coldcard::ColdcardResponse> for Response {
+    fn from(res: coldcard::ColdcardResponse) -> Response {
+        match res {
+            coldcard::ColdcardResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
+            coldcard::ColdcardResponse::Xpub(xpub) => Response::Xpub(xpub),
+        }
+    }
+}
+
+impl From<coldcard::ColdcardTransmit> for Transmit {
+    fn from(transmit: coldcard::ColdcardTransmit) -> Transmit {
+        Transmit {
+            recipient: Recipient::Device,
+            payload: transmit.payload,
+            encrypted: false,
+        }
+    }
+}
+
+impl From<coldcard::ColdcardError> for Error {
+    fn from(error: coldcard::ColdcardError) -> Error {
+        match error {
+            coldcard::ColdcardError::NoErrorOrResult => Error::NoErrorOrResult,
+            coldcard::ColdcardError::Serialization(..) => Error::Serialization,
+        }
+    }
+}
+
+pub type ColdcardInterpreter<'a> =
+    coldcard::ColdcardInterpreter<'a, Command<'a>, Transmit, Response, Error>;
 
 impl<'a> From<Command<'a>> for jade::JadeCommand<'a> {
     fn from(cmd: Command<'a>) -> Self {
@@ -75,6 +117,7 @@ impl From<jade::JadeTransmit> for Transmit {
         Transmit {
             recipient: transmit.recipient.into(),
             payload: transmit.payload,
+            encrypted: false,
         }
     }
 }
@@ -119,6 +162,7 @@ impl From<Vec<u8>> for Transmit {
         Transmit {
             recipient: Recipient::Device,
             payload,
+            encrypted: false,
         }
     }
 }
@@ -128,6 +172,7 @@ impl From<ledger::apdu::ApduCommand> for Transmit {
         Transmit {
             recipient: Recipient::Device,
             payload: payload.encode(),
+            encrypted: false,
         }
     }
 }
@@ -167,7 +212,8 @@ mod tests {
         > = vec![
             Box::<LedgerInterpreter>::default(),
             Box::<JadeInterpreter>::default(),
+            Box::<ColdcardInterpreter>::default(),
         ];
-        assert_eq!(interpreters.len(), 2);
+        assert_eq!(interpreters.len(), 3);
     }
 }

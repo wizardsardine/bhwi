@@ -1,3 +1,4 @@
+pub mod coldcard;
 pub mod jade;
 pub mod ledger;
 pub mod transport;
@@ -10,7 +11,7 @@ use bhwi::{
         bip32::{DerivationPath, Fingerprint, Xpub},
         Network,
     },
-    common, Device, Interpreter,
+    common, Interpreter,
 };
 pub use jade::Jade;
 pub use ledger::Ledger;
@@ -18,7 +19,7 @@ pub use ledger::Ledger;
 #[async_trait(?Send)]
 pub trait Transport {
     type Error: Debug;
-    async fn exchange(&self, command: &[u8]) -> Result<Vec<u8>, Self::Error>;
+    async fn exchange(&self, command: &[u8], encrypted: bool) -> Result<Vec<u8>, Self::Error>;
 }
 
 #[async_trait(?Send)]
@@ -28,12 +29,12 @@ pub trait HttpClient {
 }
 
 #[async_trait(?Send)]
-pub trait HWI {
+pub trait HWI<'a> {
     type Error: Debug;
-    async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
-    async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error>;
-    async fn get_extended_pubkey<'a>(
-        &self,
+    async fn unlock(&'a mut self, network: Network) -> Result<(), Self::Error>;
+    async fn get_master_fingerprint(&'a mut self) -> Result<Fingerprint, Self::Error>;
+    async fn get_extended_pubkey(
+        &'a mut self,
         path: &'a DerivationPath,
         display: bool,
     ) -> Result<Xpub, Self::Error>;
@@ -53,34 +54,19 @@ impl<E, F> From<common::Error> for Error<E, F> {
 }
 
 #[async_trait(?Send)]
-impl<E, F, D> HWI for D
+impl<'a, D> HWI<'a> for D
 where
-    F: Debug,
-    E: Debug,
-    D: for<'a> Device<'a, common::Command<'a>, common::Transmit, common::Response, common::Error>
-        + Transport<Error = E>
-        + HttpClient<Error = F>,
+    D: Device<'a, common::Command<'a>, common::Transmit, common::Response, common::Error>,
 {
-    type Error = Error<E, F>;
-    async fn unlock(&mut self, network: Network) -> Result<(), Self::Error> {
-        let res = run_command(
-            self,
-            self,
-            self.interpreter(),
-            common::Command::Unlock(network),
-        )
-        .await?;
-        self.on_unlock(res)?;
+    type Error = Error<D::TransportError, D::HttpClientError>;
+    async fn unlock(&'a mut self, network: Network) -> Result<(), Self::Error> {
+        let res = run_command(self, common::Command::Unlock(network)).await?;
         Ok(())
     }
-    async fn get_master_fingerprint(&self) -> Result<Fingerprint, Self::Error> {
-        if let common::Response::MasterFingerprint(fg) = run_command(
-            self,
-            self,
-            self.interpreter(),
-            common::Command::GetMasterFingerprint,
-        )
-        .await?
+
+    async fn get_master_fingerprint(&'a mut self) -> Result<Fingerprint, Self::Error> {
+        if let common::Response::MasterFingerprint(fg) =
+            run_command(self, common::Command::GetMasterFingerprint).await?
         {
             Ok(fg)
         } else {
@@ -88,18 +74,13 @@ where
         }
     }
 
-    async fn get_extended_pubkey<'a>(
-        &self,
+    async fn get_extended_pubkey(
+        &'a mut self,
         path: &'a DerivationPath,
         display: bool,
     ) -> Result<Xpub, Self::Error> {
-        if let common::Response::Xpub(xpub) = run_command(
-            self,
-            self,
-            self.interpreter(),
-            common::Command::GetXpub { path, display },
-        )
-        .await?
+        if let common::Response::Xpub(xpub) =
+            run_command(self, common::Command::GetXpub { path, display }).await?
         {
             Ok(xpub)
         } else {
@@ -108,22 +89,40 @@ where
     }
 }
 
-async fn run_command<'a, T, S, I, C>(
-    transport: &T,
-    http_client: &S,
-    mut intpr: I,
+pub trait Device<'a, C, T, R, E> {
+    type TransportError: Debug;
+    type HttpClientError: Debug;
+    fn components(
+        &'a mut self,
+    ) -> (
+        &'a dyn Transport<Error = Self::TransportError>,
+        &'a dyn HttpClient<Error = Self::HttpClientError>,
+        impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
+    );
+}
+
+async fn run_command<'a, D, C, E, F>(
+    device: &'a mut D,
     command: C,
-) -> Result<common::Response, Error<T::Error, S::Error>>
+) -> Result<common::Response, Error<E, F>>
 where
-    T: Transport + ?Sized,
-    S: HttpClient + ?Sized,
-    I: Interpreter<Transmit = common::Transmit, Response = common::Response, Error = common::Error>,
-    C: Into<I::Command>,
-    I::Command: From<common::Command<'a>>,
+    E: std::fmt::Debug + 'a,
+    F: std::fmt::Debug + 'a,
+    D: Device<
+        'a,
+        common::Command<'a>,
+        common::Transmit,
+        common::Response,
+        common::Error,
+        TransportError = E,
+        HttpClientError = F,
+    >,
+    C: Into<common::Command<'a>>,
 {
+    let (transport, http_client, mut intpr) = device.components();
     let transmit = intpr.start(command.into())?;
     let exchange = transport
-        .exchange(&transmit.payload)
+        .exchange(&transmit.payload, transmit.encrypted)
         .await
         .map_err(Error::Transport)?;
     let mut transmit = intpr.exchange(exchange)?;
@@ -138,7 +137,7 @@ where
             }
             common::Recipient::Device => {
                 let exchange = transport
-                    .exchange(&t.payload)
+                    .exchange(&t.payload, t.encrypted)
                     .await
                     .map_err(Error::Transport)?;
                 transmit = intpr.exchange(exchange)?;

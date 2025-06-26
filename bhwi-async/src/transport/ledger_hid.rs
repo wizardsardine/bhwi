@@ -66,7 +66,11 @@ pub trait Channel {
 impl<C: Channel> Transport for LedgerTransportHID<C> {
     type Error = LedgerHIDError;
 
-    async fn exchange(&self, apdu_command: &[u8]) -> Result<Vec<u8>, Self::Error> {
+    async fn exchange(
+        &self,
+        apdu_command: &[u8],
+        _encrypted: bool,
+    ) -> Result<Vec<u8>, Self::Error> {
         let mut channel = self.channel.lock().await;
 
         let command_length = apdu_command.len();
