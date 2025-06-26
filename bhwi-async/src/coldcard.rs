@@ -24,7 +24,7 @@ impl<T> Coldcard<T> {
 
 impl<'a, C, T, R, E, F> crate::Device<'a, C, T, R, E> for Coldcard<F>
 where
-    C: Into<ColdcardCommand<'a>>,
+    C: Into<ColdcardCommand>,
     T: From<ColdcardTransmit>,
     R: From<ColdcardResponse>,
     E: From<ColdcardError>,

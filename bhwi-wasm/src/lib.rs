@@ -52,7 +52,7 @@ impl<'a, T: AsyncHWI<'a>> HWI<'a> for T {
     async fn get_xpub(&'a mut self, path: &str, display: bool) -> Result<String, JsValue> {
         let p = DerivationPath::from_str(path)
             .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))?;
-        self.get_extended_pubkey(&p, display)
+        self.get_extended_pubkey(p, display)
             .await
             .map(|xpub| xpub.to_string())
             .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))
@@ -64,8 +64,8 @@ pub enum Device {
     Jade(Jade<WebSerialDevice, PinServer>),
 }
 
-impl<'a> AsRef<dyn HWI + 'a> for Device {
-    fn as_ref(&self) -> &(dyn HWI + 'a) {
+impl<'a> AsRef<dyn HWI<'a> + 'a> for Device {
+    fn as_ref(&self) -> &(dyn HWI<'a> + 'a) {
         match self {
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
@@ -126,17 +126,21 @@ impl Client {
     }
 
     #[wasm_bindgen]
-    pub async fn get_master_fingerprint(&self) -> Result<String, JsValue> {
-        match &self.device {
-            Some(d) => d.as_ref().get_mfg().await,
+    pub async fn get_master_fingerprint(&mut self) -> Result<String, JsValue> {
+        match &mut self.device {
+            Some(d) => d.as_mut().get_mfg().await,
             None => Err(JsValue::from_str("Device not connected")),
         }
     }
 
     #[wasm_bindgen]
-    pub async fn get_extended_pubkey(&self, path: &str, display: bool) -> Result<String, JsValue> {
-        match &self.device {
-            Some(d) => d.as_ref().get_xpub(path, display).await,
+    pub async fn get_extended_pubkey(
+        &mut self,
+        path: &str,
+        display: bool,
+    ) -> Result<String, JsValue> {
+        match &mut self.device {
+            Some(d) => d.as_mut().get_xpub(path, display).await,
             None => Err(JsValue::from_str("Device not connected")),
         }
     }

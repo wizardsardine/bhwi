@@ -42,13 +42,10 @@ impl From<StoreError> for LedgerError {
 }
 
 #[derive(Clone, Debug)]
-pub enum LedgerCommand<'a> {
+pub enum LedgerCommand {
     OpenApp(Network),
     GetMasterFingerprint,
-    GetXpub {
-        path: &'a DerivationPath,
-        display: bool,
-    },
+    GetXpub { path: DerivationPath, display: bool },
 }
 
 pub enum LedgerResponse {
@@ -58,22 +55,22 @@ pub enum LedgerResponse {
 }
 
 #[derive(Default)]
-enum State<'a> {
+enum State {
     #[default]
     New,
     Running {
-        command: LedgerCommand<'a>,
+        command: LedgerCommand,
         store: Option<DelegatedStore>,
     },
     Finished(LedgerResponse),
 }
 
-pub struct LedgerInterpreter<'a, C, T, R, E> {
-    state: State<'a>,
+pub struct LedgerInterpreter<C, T, R, E> {
+    state: State,
     _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
 
-impl<'a, C, T, R, E> Default for LedgerInterpreter<'a, C, T, R, E> {
+impl<C, T, R, E> Default for LedgerInterpreter<C, T, R, E> {
     fn default() -> Self {
         Self {
             state: State::default(),
@@ -82,9 +79,9 @@ impl<'a, C, T, R, E> Default for LedgerInterpreter<'a, C, T, R, E> {
     }
 }
 
-impl<'a, C, T, R, E> Interpreter for LedgerInterpreter<'a, C, T, R, E>
+impl<C, T, R, E> Interpreter for LedgerInterpreter<C, T, R, E>
 where
-    C: Into<LedgerCommand<'a>>,
+    C: Into<LedgerCommand>,
     T: From<ApduCommand>,
     R: From<LedgerResponse>,
     E: From<LedgerError>,
@@ -101,7 +98,7 @@ where
                 Self::Transmit::from(command::get_master_fingerprint()),
                 None,
             ),
-            LedgerCommand::GetXpub { path, display } => (
+            LedgerCommand::GetXpub { ref path, display } => (
                 Self::Transmit::from(command::get_extended_pubkey(path, display)),
                 None,
             ),

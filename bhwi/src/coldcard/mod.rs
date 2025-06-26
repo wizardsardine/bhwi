@@ -11,9 +11,9 @@ pub enum ColdcardError {
     Serialization(String),
 }
 
-pub enum ColdcardCommand<'a> {
+pub enum ColdcardCommand {
     GetMasterFingerprint,
-    GetXpub(&'a DerivationPath),
+    GetXpub(DerivationPath),
 }
 
 pub enum ColdcardResponse {
@@ -26,14 +26,14 @@ pub struct ColdcardTransmit {
     pub encrypted: bool,
 }
 
-enum State<'a> {
+enum State {
     New,
-    Running(ColdcardCommand<'a>),
+    Running(ColdcardCommand),
     Finished(ColdcardResponse),
 }
 
 pub struct ColdcardInterpreter<'a, C, T, R, E> {
-    state: State<'a>,
+    state: State,
     encryption: Option<&'a mut encrypt::Engine>,
     _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
@@ -74,7 +74,7 @@ fn request(payload: Vec<u8>, encryption: Option<&mut encrypt::Engine>) -> Coldca
 
 impl<'a, C, T, R, E> Interpreter for ColdcardInterpreter<'a, C, T, R, E>
 where
-    C: Into<ColdcardCommand<'a>>,
+    C: Into<ColdcardCommand>,
     T: From<ColdcardTransmit>,
     R: From<ColdcardResponse>,
     E: From<ColdcardError>,

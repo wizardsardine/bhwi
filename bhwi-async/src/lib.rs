@@ -35,7 +35,7 @@ pub trait HWI<'a> {
     async fn get_master_fingerprint(&'a mut self) -> Result<Fingerprint, Self::Error>;
     async fn get_extended_pubkey(
         &'a mut self,
-        path: &'a DerivationPath,
+        path: DerivationPath,
         display: bool,
     ) -> Result<Xpub, Self::Error>;
 }
@@ -56,7 +56,7 @@ impl<E, F> From<common::Error> for Error<E, F> {
 #[async_trait(?Send)]
 impl<'a, D> HWI<'a> for D
 where
-    D: Device<'a, common::Command<'a>, common::Transmit, common::Response, common::Error>,
+    D: Device<'a, common::Command, common::Transmit, common::Response, common::Error>,
 {
     type Error = Error<D::TransportError, D::HttpClientError>;
     async fn unlock(&'a mut self, network: Network) -> Result<(), Self::Error> {
@@ -76,7 +76,7 @@ where
 
     async fn get_extended_pubkey(
         &'a mut self,
-        path: &'a DerivationPath,
+        path: DerivationPath,
         display: bool,
     ) -> Result<Xpub, Self::Error> {
         if let common::Response::Xpub(xpub) =
@@ -110,14 +110,14 @@ where
     F: std::fmt::Debug + 'a,
     D: Device<
         'a,
-        common::Command<'a>,
+        common::Command,
         common::Transmit,
         common::Response,
         common::Error,
         TransportError = E,
         HttpClientError = F,
     >,
-    C: Into<common::Command<'a>>,
+    C: Into<common::Command>,
 {
     let (transport, http_client, mut intpr) = device.components();
     let transmit = intpr.start(command.into())?;

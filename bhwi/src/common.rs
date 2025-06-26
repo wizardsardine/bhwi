@@ -5,13 +5,10 @@ use bitcoin::{
 
 use crate::{coldcard, jade, ledger};
 
-pub enum Command<'a> {
+pub enum Command {
     Unlock(Network),
     GetMasterFingerprint,
-    GetXpub {
-        path: &'a DerivationPath,
-        display: bool,
-    },
+    GetXpub { path: DerivationPath, display: bool },
 }
 
 pub enum Response {
@@ -42,8 +39,8 @@ pub enum Error {
     AuthenticationRefused,
 }
 
-impl<'a> From<Command<'a>> for coldcard::ColdcardCommand<'a> {
-    fn from(cmd: Command<'a>) -> Self {
+impl From<Command> for coldcard::ColdcardCommand {
+    fn from(cmd: Command) -> Self {
         match cmd {
             Command::Unlock(..) => Self::GetMasterFingerprint,
             Command::GetMasterFingerprint => Self::GetMasterFingerprint,
@@ -81,10 +78,10 @@ impl From<coldcard::ColdcardError> for Error {
 }
 
 pub type ColdcardInterpreter<'a> =
-    coldcard::ColdcardInterpreter<'a, Command<'a>, Transmit, Response, Error>;
+    coldcard::ColdcardInterpreter<'a, Command, Transmit, Response, Error>;
 
-impl<'a> From<Command<'a>> for jade::JadeCommand<'a> {
-    fn from(cmd: Command<'a>) -> Self {
+impl From<Command> for jade::JadeCommand {
+    fn from(cmd: Command) -> Self {
         match cmd {
             Command::Unlock(..) => Self::Auth,
             Command::GetMasterFingerprint => Self::GetMasterFingerprint,
@@ -135,10 +132,10 @@ impl From<jade::JadeError> for Error {
     }
 }
 
-pub type JadeInterpreter<'a> = jade::JadeInterpreter<'a, Command<'a>, Transmit, Response, Error>;
+pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Error>;
 
-impl<'a> From<Command<'a>> for ledger::LedgerCommand<'a> {
-    fn from(cmd: Command<'a>) -> Self {
+impl From<Command> for ledger::LedgerCommand {
+    fn from(cmd: Command) -> Self {
         match cmd {
             Command::Unlock(network) => Self::OpenApp(network),
             Command::GetMasterFingerprint => Self::GetMasterFingerprint,
@@ -190,8 +187,7 @@ impl From<ledger::LedgerError> for Error {
     }
 }
 
-pub type LedgerInterpreter<'a> =
-    ledger::LedgerInterpreter<'a, Command<'a>, Transmit, Response, Error>;
+pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
 
 #[cfg(test)]
 mod tests {
