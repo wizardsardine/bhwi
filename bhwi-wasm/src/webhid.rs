@@ -128,9 +128,14 @@ impl WebHidDevice {
 
     // TODO: return error and maybe remove wasm_bindgen
     #[wasm_bindgen]
-    pub async fn write(&self, data: &mut [u8]) {
+    pub async fn write(&self, data: &[u8]) {
         if self.device.opened() {
-            let promise = JsFuture::from(self.device.send_report_with_u8_array(0, data));
+            let uint8_array = js_sys::Uint8Array::from(data);
+            let promise = JsFuture::from(
+                self.device
+                    .send_report_with_u8_array(0, &uint8_array)
+                    .unwrap(),
+            );
             if let Err(e) = promise.await {
                 log::error!("Failed to send report: {:?}", e);
             }

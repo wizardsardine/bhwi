@@ -5,8 +5,7 @@ use bhwi_async::transport::ledger_hid::Channel;
 #[async_trait(?Send)]
 impl Channel for WebHidDevice {
     async fn send(&self, data: &[u8]) -> Result<usize, std::io::Error> {
-        let mut data = data.to_vec();
-        self.write(&mut data).await;
+        self.write(data).await;
         Ok(data.len())
     }
     async fn receive(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error> {

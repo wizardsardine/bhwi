@@ -21,9 +21,10 @@ console_error_panic_hook = "0.1.7"
 futures = "0.3"
 js-sys = "0.3.70"
 log = "0.4"
+getrandom = { version = "=0.2.16", features = ["js"]}
 wasm-bindgen = { version = "0.2.93" }
 wasm-bindgen-futures = { version ="0.4.43" }
-web-sys = { version = "0.3.70", features = [
+web-sys = { version = "0.3.77", features = [
     "Headers",
     "Request",
     "RequestInit",
@@ -45,4 +46,3 @@ web-sys = { version = "0.3.70", features = [
     "WritableStream",
     "WritableStreamDefaultWriter"
 ] }
-
