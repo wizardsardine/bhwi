@@ -105,6 +105,7 @@ dependencies = [
  "getrandom",
  "js-sys",
  "log",
+ "rand_core",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

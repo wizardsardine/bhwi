@@ -21,7 +21,7 @@ impl<T, S> Jade<T, S> {
     }
 }
 
-impl<'a, C, T, R, E, F, H> crate::Device<'a, C, T, R, E> for Jade<F, H>
+impl<C, T, R, E, F, H> crate::Device<C, T, R, E> for Jade<F, H>
 where
     C: Into<JadeCommand>,
     T: From<JadeTransmit>,
@@ -33,10 +33,10 @@ where
     type TransportError = F::Error;
     type HttpClientError = H::Error;
     fn components(
-        &'a mut self,
+        &mut self,
     ) -> (
-        &'a mut dyn Transport<Error = Self::TransportError>,
-        &'a dyn HttpClient<Error = Self::HttpClientError>,
+        &mut dyn Transport<Error = Self::TransportError>,
+        &dyn HttpClient<Error = Self::HttpClientError>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     ) {
         (
@@ -44,5 +44,11 @@ where
             &self.pinserver,
             JadeInterpreter::default().with_network(self.network),
         )
+    }
+}
+
+impl<T, S> crate::OnUnlock for Jade<T, S> {
+    fn on_unlock(&mut self, _response: bhwi::common::Response) -> Result<(), bhwi::common::Error> {
+        Ok(())
     }
 }

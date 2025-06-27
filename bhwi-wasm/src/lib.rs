@@ -7,6 +7,8 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use bhwi_async::{
+    coldcard::Coldcard,
+    transport::coldcard_hid::{ColdcardTransportHID, COLDCARD_VID},
     transport::ledger_hid::{LedgerTransportHID, LEDGER_VID},
     Jade, Ledger, HWI as AsyncHWI,
 };
@@ -27,29 +29,29 @@ pub fn initialize_logging(level: &str) {
 }
 
 #[async_trait(?Send)]
-pub trait HWI<'a> {
-    async fn unlock(&'a mut self, network: &str) -> Result<(), JsValue>;
-    async fn get_mfg(&'a mut self) -> Result<String, JsValue>;
-    async fn get_xpub(&'a mut self, path: &str, display: bool) -> Result<String, JsValue>;
+pub trait HWI {
+    async fn unlock(&mut self, network: &str) -> Result<(), JsValue>;
+    async fn get_mfg(&mut self) -> Result<String, JsValue>;
+    async fn get_xpub(&mut self, path: &str, display: bool) -> Result<String, JsValue>;
 }
 
 #[async_trait(?Send)]
-impl<'a, T: AsyncHWI<'a>> HWI<'a> for T {
-    async fn unlock(&'a mut self, network: &str) -> Result<(), JsValue> {
+impl<T: AsyncHWI> HWI for T {
+    async fn unlock(&mut self, network: &str) -> Result<(), JsValue> {
         let n = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
         self.unlock(n)
             .await
             .map_err(|e| JsValue::from_str(&format!("Failed to unlock: {:?}", e)))
     }
 
-    async fn get_mfg(&'a mut self) -> Result<String, JsValue> {
+    async fn get_mfg(&mut self) -> Result<String, JsValue> {
         self.get_master_fingerprint()
             .await
             .map(|fp| fp.to_string())
             .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))
     }
 
-    async fn get_xpub(&'a mut self, path: &str, display: bool) -> Result<String, JsValue> {
+    async fn get_xpub(&mut self, path: &str, display: bool) -> Result<String, JsValue> {
         let p = DerivationPath::from_str(path)
             .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))?;
         self.get_extended_pubkey(p, display)
@@ -61,21 +63,24 @@ impl<'a, T: AsyncHWI<'a>> HWI<'a> for T {
 
 pub enum Device {
     Ledger(Ledger<LedgerTransportHID<webhid::WebHidDevice>>),
+    Coldcard(Coldcard<ColdcardTransportHID<webhid::WebHidDevice>>),
     Jade(Jade<WebSerialDevice, PinServer>),
 }
 
-impl<'a> AsRef<dyn HWI<'a> + 'a> for Device {
-    fn as_ref(&self) -> &(dyn HWI<'a> + 'a) {
+impl<'a> AsRef<dyn HWI + 'a> for Device {
+    fn as_ref(&self) -> &(dyn HWI + 'a) {
         match self {
+            Device::Coldcard(l) => l,
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
         }
     }
 }
 
-impl<'a> AsMut<dyn HWI<'a> + 'a> for Device {
-    fn as_mut(&mut self) -> &mut (dyn HWI<'a> + 'a) {
+impl<'a> AsMut<dyn HWI + 'a> for Device {
+    fn as_mut(&mut self) -> &mut (dyn HWI + 'a) {
         match self {
+            Device::Coldcard(l) => l,
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
         }
@@ -92,6 +97,19 @@ impl Client {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Client {
         Client { device: None }
+    }
+
+    #[wasm_bindgen]
+    pub async fn connect_coldcard(&mut self, on_close_cb: JsValue) -> Result<(), JsValue> {
+        let device = WebHidDevice::get_webhid_device("Coldcard", COLDCARD_VID, None, on_close_cb)
+            .await
+            .ok_or(JsValue::from_str("Failed to connect to coldcard"))?;
+        let mut rng = rand_core::OsRng;
+        self.device = Some(Device::Coldcard(Coldcard::new(
+            ColdcardTransportHID::new(device),
+            &mut rng,
+        )));
+        Ok(())
     }
 
     #[wasm_bindgen]

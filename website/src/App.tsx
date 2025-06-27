@@ -22,6 +22,41 @@ const App: React.FC = () => {
         initializeWasm();
     }, []);
 
+    const requestColdcard = async () => {
+        try {
+            await initWasm();
+
+            let client = new Client();
+
+            const retryCallback = async () => {
+                console.log('retrying');
+                client = new Client();
+                await client.connect_coldcard(() => {
+                    console.log('Failed to retry');
+                });
+
+                setDevice(client);
+            };
+
+
+            await client.connect_coldcard(retryCallback);
+            await client.unlock("testnet");
+
+            // Log the master fingerprint
+            const masterFingerprint = await client.get_master_fingerprint();
+            console.log("Master Fingerprint:", masterFingerprint);
+
+            const xpub = await client.get_extended_pubkey("m/48'/1'/0'/2'", false);
+            console.log("xpub:", xpub);
+
+            setDevice(client);
+        } catch (error) {
+            console.error("Error opening WebHID device:", error);
+        }
+    };
+
+
+
     const requestDevice = async () => {
         try {
             await initWasm();
@@ -88,8 +123,9 @@ const App: React.FC = () => {
     return (
         <div>
             <h1>WASM WebHID Device</h1>
-            <button onClick={requestDevice}>Request HID Device</button>
-            <button onClick={requestJade}>Request Jade Device</button>
+            <button onClick={requestColdcard}>Coldcard</button>
+            <button onClick={requestDevice}>Ledger</button>
+            <button onClick={requestJade}>Jade</button>
             {device ? <p>Device connected !</p> : <p>No device connected</p>}
         </div>
     );

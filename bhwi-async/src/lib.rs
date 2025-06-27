@@ -29,12 +29,12 @@ pub trait HttpClient {
 }
 
 #[async_trait(?Send)]
-pub trait HWI<'a> {
+pub trait HWI {
     type Error: Debug;
-    async fn unlock(&'a mut self, network: Network) -> Result<(), Self::Error>;
-    async fn get_master_fingerprint(&'a mut self) -> Result<Fingerprint, Self::Error>;
+    async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
+    async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, Self::Error>;
     async fn get_extended_pubkey(
-        &'a mut self,
+        &mut self,
         path: DerivationPath,
         display: bool,
     ) -> Result<Xpub, Self::Error>;
@@ -54,17 +54,26 @@ impl<E, F> From<common::Error> for Error<E, F> {
 }
 
 #[async_trait(?Send)]
-impl<'a, D> HWI<'a> for D
+impl<D> HWI for D
 where
-    D: Device<'a, common::Command, common::Transmit, common::Response, common::Error>,
+    D: Device<common::Command, common::Transmit, common::Response, common::Error> + OnUnlock,
 {
     type Error = Error<D::TransportError, D::HttpClientError>;
-    async fn unlock(&'a mut self, network: Network) -> Result<(), Self::Error> {
-        let res = run_command(self, common::Command::Unlock(network)).await?;
+    async fn unlock(&mut self, network: Network) -> Result<(), Self::Error> {
+        let res = run_command(
+            self,
+            common::Command::Unlock {
+                options: common::UnlockOptions {
+                    network: Some(network),
+                },
+            },
+        )
+        .await?;
+        self.on_unlock(res)?;
         Ok(())
     }
 
-    async fn get_master_fingerprint(&'a mut self) -> Result<Fingerprint, Self::Error> {
+    async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, Self::Error> {
         if let common::Response::MasterFingerprint(fg) =
             run_command(self, common::Command::GetMasterFingerprint).await?
         {
@@ -75,7 +84,7 @@ where
     }
 
     async fn get_extended_pubkey(
-        &'a mut self,
+        &mut self,
         path: DerivationPath,
         display: bool,
     ) -> Result<Xpub, Self::Error> {
@@ -89,14 +98,18 @@ where
     }
 }
 
-pub trait Device<'a, C, T, R, E> {
+pub trait OnUnlock {
+    fn on_unlock(&mut self, _response: common::Response) -> Result<(), common::Error>;
+}
+
+pub trait Device<C, T, R, E> {
     type TransportError: Debug;
     type HttpClientError: Debug;
     fn components(
-        &'a mut self,
+        &mut self,
     ) -> (
-        &'a mut dyn Transport<Error = Self::TransportError>,
-        &'a dyn HttpClient<Error = Self::HttpClientError>,
+        &mut dyn Transport<Error = Self::TransportError>,
+        &dyn HttpClient<Error = Self::HttpClientError>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     );
 }
@@ -109,7 +122,6 @@ where
     E: std::fmt::Debug + 'a,
     F: std::fmt::Debug + 'a,
     D: Device<
-        'a,
         common::Command,
         common::Transmit,
         common::Response,

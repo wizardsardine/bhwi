@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::Cursor;
 
-use crate::Transport;
+use crate::{transport::Channel, Transport};
 
 pub const LEDGER_VID: u16 = 0x2c97;
 pub const LEDGER_USAGE_PAGE: u16 = 0xFFA0;
@@ -47,12 +47,6 @@ impl<C> LedgerTransportHID<C> {
     pub fn new(channel: C) -> Self {
         Self { channel }
     }
-}
-
-#[async_trait(?Send)]
-pub trait Channel {
-    async fn send(&self, data: &[u8]) -> Result<usize, std::io::Error>;
-    async fn receive(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error>;
 }
 
 #[async_trait(?Send)]

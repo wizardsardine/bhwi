@@ -21,6 +21,7 @@ use store::{DelegatedStore, StoreError};
 
 #[derive(Debug)]
 pub enum LedgerError {
+    MissingCommandInfo(&'static str),
     NoErrorOrResult,
     Apdu(ApduError),
     Store(StoreError),
@@ -81,7 +82,7 @@ impl<C, T, R, E> Default for LedgerInterpreter<C, T, R, E> {
 
 impl<C, T, R, E> Interpreter for LedgerInterpreter<C, T, R, E>
 where
-    C: Into<LedgerCommand>,
+    C: TryInto<LedgerCommand, Error = LedgerError>,
     T: From<ApduCommand>,
     R: From<LedgerResponse>,
     E: From<LedgerError>,
@@ -92,7 +93,7 @@ where
     type Error = E;
 
     fn start(&mut self, command: Self::Command) -> Result<Self::Transmit, Self::Error> {
-        let command: LedgerCommand = command.into();
+        let command: LedgerCommand = command.try_into()?;
         let (transmit, store) = match command {
             LedgerCommand::GetMasterFingerprint => (
                 Self::Transmit::from(command::get_master_fingerprint()),

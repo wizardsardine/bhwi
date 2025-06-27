@@ -22,6 +22,7 @@ futures = "0.3"
 js-sys = "0.3.70"
 log = "0.4"
 getrandom = { version = "=0.2.16", features = ["js"]}
+rand_core = { version = "0.6" }
 wasm-bindgen = { version = "0.2.93" }
 wasm-bindgen-futures = { version ="0.4.43" }
 web-sys = { version = "0.3.77", features = [
