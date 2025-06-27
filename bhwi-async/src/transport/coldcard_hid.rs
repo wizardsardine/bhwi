@@ -32,7 +32,7 @@ impl<C: Channel> Transport for ColdcardTransportHID<C> {
     type Error = ColdcardHIDError;
 
     async fn exchange(&mut self, request: &[u8], encrypted: bool) -> Result<Vec<u8>, Self::Error> {
-        let mut buffer = vec![0u8; COLDCARD_PACKET_WRITE_SIZE];
+        let mut buffer = vec![0u8; COLDCARD_PACKET_WRITE_SIZE + 2];
         let chunks = request.chunks(COLDCARD_PACKET_WRITE_SIZE);
         let n_chunks = chunks.len();
         for (i, chunk) in chunks.enumerate() {

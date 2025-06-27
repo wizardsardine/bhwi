@@ -50,9 +50,7 @@ where
 impl<T> crate::OnUnlock for Coldcard<T> {
     fn on_unlock(&mut self, response: bhwi::common::Response) -> Result<(), common::Error> {
         if let bhwi::common::Response::EncryptionKey(key) = response {
-            self.encryption
-                .ready(key)
-                .map_err(|_| common::Error::Encryption)?
+            self.encryption.ready(key)?;
         }
         Ok(())
     }

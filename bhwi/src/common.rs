@@ -36,7 +36,7 @@ pub struct Transmit {
 
 #[derive(Debug)]
 pub enum Error {
-    Encryption,
+    Encryption(&'static str),
     NoErrorOrResult,
     MissingCommandInfo(&'static str),
     UnexpectedResult(Vec<u8>),
@@ -83,7 +83,7 @@ impl From<coldcard::ColdcardTransmit> for Transmit {
 impl From<coldcard::ColdcardError> for Error {
     fn from(error: coldcard::ColdcardError) -> Error {
         match error {
-            coldcard::ColdcardError::NoEncryption => Error::Encryption,
+            coldcard::ColdcardError::Encryption(e) => Error::Encryption(e),
             coldcard::ColdcardError::MissingCommandInfo(e) => Error::MissingCommandInfo(e),
             coldcard::ColdcardError::NoErrorOrResult => Error::NoErrorOrResult,
             coldcard::ColdcardError::Serialization(..) => Error::Serialization,

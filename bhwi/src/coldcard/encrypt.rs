@@ -25,9 +25,9 @@ impl Engine {
             prefixed_pubkey[1..].copy_from_slice(&public_key);
 
             let public_key = k256::PublicKey::from_sec1_bytes(&prefixed_pubkey)
-                .map_err(|_| ColdcardError::NoEncryption)?;
-            let session_key =
-                session_key(secret_key, public_key).map_err(|_| ColdcardError::NoEncryption)?;
+                .map_err(|_| ColdcardError::Encryption("from_sec1_bytes"))?;
+            let session_key = session_key(secret_key, public_key)
+                .map_err(|_| ColdcardError::Encryption("session_key"))?;
             let key = GenericArray::from_slice(&session_key);
             let nonce = GenericArray::from_slice(&[0_u8; 16]);
             *self = Self::Ready {
@@ -36,17 +36,20 @@ impl Engine {
             };
             Ok(())
         } else {
-            Err(ColdcardError::NoEncryption)
+            Err(ColdcardError::Encryption("Engine is not New"))
         }
     }
 
     pub fn pub_key(&self) -> Result<[u8; 64], ColdcardError> {
         if let Engine::New(key) = self {
-            key.public_key().to_sec1_bytes()[1..]
+            key.public_key()
+                .as_affine()
+                .to_encoded_point(false)
+                .as_bytes()[1..]
                 .try_into()
-                .map_err(|_| ColdcardError::NoEncryption)
+                .map_err(|_| ColdcardError::Encryption("failed to create pubkey"))
         } else {
-            Err(ColdcardError::NoEncryption)
+            Err(ColdcardError::Encryption("Engine is not new"))
         }
     }
 
@@ -56,7 +59,7 @@ impl Engine {
                 encrypt.apply_keystream(&mut data);
                 Ok(data)
             }
-            Self::New(..) => Err(ColdcardError::NoEncryption),
+            Self::New(..) => Err(ColdcardError::Encryption("Engine not ready")),
         }
     }
 
@@ -66,7 +69,7 @@ impl Engine {
                 decrypt.apply_keystream(&mut data);
                 Ok(data)
             }
-            Self::New(..) => Err(ColdcardError::NoEncryption),
+            Self::New(..) => Err(ColdcardError::Encryption("Engine not ready")),
         }
     }
 }

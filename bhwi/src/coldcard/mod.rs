@@ -7,7 +7,7 @@ use crate::Interpreter;
 
 #[derive(Debug)]
 pub enum ColdcardError {
-    NoEncryption,
+    Encryption(&'static str),
     MissingCommandInfo(&'static str),
     NoErrorOrResult,
     Serialization(String),
