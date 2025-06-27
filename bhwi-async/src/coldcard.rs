@@ -2,29 +2,29 @@ use crate::{HttpClient, Transport};
 use async_trait::async_trait;
 use bhwi::{
     coldcard::{
-        encrypt, ColdcardCommand, ColdcardError, ColdcardInterpreter, ColdcardResponse,
-        ColdcardTransmit,
+        encrypt::{self, CryptoRngCore},
+        ColdcardCommand, ColdcardError, ColdcardInterpreter, ColdcardResponse, ColdcardTransmit,
     },
-    Interpreter,
+    common, Interpreter,
 };
 
 pub struct Coldcard<T> {
     pub transport: T,
-    encryption: Option<encrypt::Engine>,
+    encryption: encrypt::Engine,
 }
 
 impl<T> Coldcard<T> {
-    pub fn new(transport: T) -> Self {
+    pub fn new(transport: T, rng: &mut impl CryptoRngCore) -> Self {
         Self {
             transport,
-            encryption: None,
+            encryption: encrypt::Engine::new(rng),
         }
     }
 }
 
-impl<'a, C, T, R, E, F> crate::Device<'a, C, T, R, E> for Coldcard<F>
+impl<C, T, R, E, F> crate::Device<C, T, R, E> for Coldcard<F>
 where
-    C: Into<ColdcardCommand>,
+    C: TryInto<ColdcardCommand, Error = ColdcardError>,
     T: From<ColdcardTransmit>,
     R: From<ColdcardResponse>,
     E: From<ColdcardError>,
@@ -33,17 +33,26 @@ where
     type TransportError = F::Error;
     type HttpClientError = ColdcardError;
     fn components(
-        &'a mut self,
+        &mut self,
     ) -> (
-        &'a mut dyn Transport<Error = Self::TransportError>,
-        &'a dyn HttpClient<Error = Self::HttpClientError>,
+        &mut dyn Transport<Error = Self::TransportError>,
+        &dyn HttpClient<Error = Self::HttpClientError>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     ) {
         (
             &mut self.transport,
             &DummyClient {},
-            ColdcardInterpreter::new(self.encryption.as_mut()),
+            ColdcardInterpreter::new(&mut self.encryption),
         )
+    }
+}
+
+impl<T> crate::OnUnlock for Coldcard<T> {
+    fn on_unlock(&mut self, response: bhwi::common::Response) -> Result<(), common::Error> {
+        if let bhwi::common::Response::EncryptionKey(key) = response {
+            self.encryption.ready(key)?;
+        }
+        Ok(())
     }
 }
 

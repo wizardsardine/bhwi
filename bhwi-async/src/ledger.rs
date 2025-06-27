@@ -15,9 +15,9 @@ impl<T> Ledger<T> {
     }
 }
 
-impl<'a, C, T, R, E, F> crate::Device<'a, C, T, R, E> for Ledger<F>
+impl<C, T, R, E, F> crate::Device<C, T, R, E> for Ledger<F>
 where
-    C: Into<LedgerCommand>,
+    C: TryInto<LedgerCommand, Error = LedgerError>,
     T: From<ApduCommand>,
     R: From<LedgerResponse>,
     E: From<LedgerError>,
@@ -26,10 +26,10 @@ where
     type TransportError = F::Error;
     type HttpClientError = LedgerError;
     fn components(
-        &'a mut self,
+        &mut self,
     ) -> (
-        &'a mut dyn Transport<Error = Self::TransportError>,
-        &'a dyn HttpClient<Error = Self::HttpClientError>,
+        &mut dyn Transport<Error = Self::TransportError>,
+        &dyn HttpClient<Error = Self::HttpClientError>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     ) {
         (
@@ -37,6 +37,12 @@ where
             &DummyClient {},
             LedgerInterpreter::default(),
         )
+    }
+}
+
+impl<T> crate::OnUnlock for Ledger<T> {
+    fn on_unlock(&mut self, _response: bhwi::common::Response) -> Result<(), bhwi::common::Error> {
+        Ok(())
     }
 }
 

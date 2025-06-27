@@ -7,11 +7,14 @@ use crate::Interpreter;
 
 #[derive(Debug)]
 pub enum ColdcardError {
+    Encryption(&'static str),
+    MissingCommandInfo(&'static str),
     NoErrorOrResult,
     Serialization(String),
 }
 
 pub enum ColdcardCommand {
+    StartEncryption,
     GetMasterFingerprint,
     GetXpub(DerivationPath),
 }
@@ -19,6 +22,11 @@ pub enum ColdcardCommand {
 pub enum ColdcardResponse {
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
+    MyPub {
+        encryption_key: [u8; 64],
+        xpub_fingerprint: Fingerprint,
+        xpub: Option<Xpub>,
+    },
 }
 
 pub struct ColdcardTransmit {
@@ -34,12 +42,12 @@ enum State {
 
 pub struct ColdcardInterpreter<'a, C, T, R, E> {
     state: State,
-    encryption: Option<&'a mut encrypt::Engine>,
+    encryption: &'a mut encrypt::Engine,
     _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
 
 impl<'a, C, T, R, E> ColdcardInterpreter<'a, C, T, R, E> {
-    pub fn new(encryption: Option<&'a mut encrypt::Engine>) -> Self {
+    pub fn new(encryption: &'a mut encrypt::Engine) -> Self {
         Self {
             state: State::New,
             encryption,
@@ -48,33 +56,19 @@ impl<'a, C, T, R, E> ColdcardInterpreter<'a, C, T, R, E> {
     }
 }
 
-impl<'a, C, T, R, E> Default for ColdcardInterpreter<'a, C, T, R, E> {
-    fn default() -> Self {
-        Self {
-            state: State::New,
-            encryption: None,
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-fn request(payload: Vec<u8>, encryption: Option<&mut encrypt::Engine>) -> ColdcardTransmit {
-    if let Some(e) = encryption {
-        ColdcardTransmit {
-            payload: e.encrypt(payload),
-            encrypted: true,
-        }
-    } else {
-        ColdcardTransmit {
-            payload,
-            encrypted: false,
-        }
-    }
+fn request(
+    payload: Vec<u8>,
+    encryption: &mut encrypt::Engine,
+) -> Result<ColdcardTransmit, ColdcardError> {
+    Ok(ColdcardTransmit {
+        payload: encryption.encrypt(payload)?,
+        encrypted: true,
+    })
 }
 
 impl<'a, C, T, R, E> Interpreter for ColdcardInterpreter<'a, C, T, R, E>
 where
-    C: Into<ColdcardCommand>,
+    C: TryInto<ColdcardCommand, Error = ColdcardError>,
     T: From<ColdcardTransmit>,
     R: From<ColdcardResponse>,
     E: From<ColdcardError>,
@@ -85,14 +79,18 @@ where
     type Error = E;
 
     fn start(&mut self, command: Self::Command) -> Result<Self::Transmit, Self::Error> {
-        let command: ColdcardCommand = command.into();
+        let command: ColdcardCommand = command.try_into()?;
         let req = match &command {
+            ColdcardCommand::StartEncryption => ColdcardTransmit {
+                payload: api::request::start_encryption(None, &self.encryption.pub_key()?),
+                encrypted: false,
+            },
             ColdcardCommand::GetMasterFingerprint => request(
                 api::request::get_xpub(&DerivationPath::master()),
-                self.encryption.as_deref_mut(),
-            ),
+                self.encryption,
+            )?,
             ColdcardCommand::GetXpub(path) => {
-                request(api::request::get_xpub(path), self.encryption.as_deref_mut())
+                request(api::request::get_xpub(path), self.encryption)?
             }
         };
 
@@ -103,22 +101,21 @@ where
         match &self.state {
             State::New => Ok(None),
             State::Running(ColdcardCommand::GetMasterFingerprint) => {
-                let data = match &mut self.encryption {
-                    Some(e) => e.decrypt(data),
-                    None => data,
-                };
+                let data = self.encryption.decrypt(data)?;
                 let xpub = api::response::xpub(data)?;
                 self.state =
                     State::Finished(ColdcardResponse::MasterFingerprint(xpub.fingerprint()));
                 Ok(None)
             }
             State::Running(ColdcardCommand::GetXpub(..)) => {
-                let data = match &mut self.encryption {
-                    Some(e) => e.decrypt(data),
-                    None => data,
-                };
+                let data = self.encryption.decrypt(data)?;
                 let xpub = api::response::xpub(data)?;
                 self.state = State::Finished(ColdcardResponse::Xpub(xpub));
+                Ok(None)
+            }
+            State::Running(ColdcardCommand::StartEncryption) => {
+                let mypub = api::response::mypub(data)?;
+                self.state = State::Finished(mypub);
                 Ok(None)
             }
             State::Finished(..) => Ok(None),
