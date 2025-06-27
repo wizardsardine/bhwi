@@ -1,7 +1,4 @@
-use std::fmt::Debug;
-
 use crate::{HttpClient, Transport};
-use async_trait::async_trait;
 use bhwi::{
     bitcoin::Network,
     jade::{JadeCommand, JadeError, JadeInterpreter, JadeResponse, JadeTransmit},
@@ -38,12 +35,12 @@ where
     fn components(
         &'a mut self,
     ) -> (
-        &'a dyn Transport<Error = Self::TransportError>,
+        &'a mut dyn Transport<Error = Self::TransportError>,
         &'a dyn HttpClient<Error = Self::HttpClientError>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     ) {
         (
-            &self.transport,
+            &mut self.transport,
             &self.pinserver,
             JadeInterpreter::default().with_network(self.network),
         )

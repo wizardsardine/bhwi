@@ -35,12 +35,12 @@ where
     fn components(
         &'a mut self,
     ) -> (
-        &'a dyn Transport<Error = Self::TransportError>,
+        &'a mut dyn Transport<Error = Self::TransportError>,
         &'a dyn HttpClient<Error = Self::HttpClientError>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     ) {
         (
-            &self.transport,
+            &mut self.transport,
             &DummyClient {},
             ColdcardInterpreter::new(self.encryption.as_mut()),
         )

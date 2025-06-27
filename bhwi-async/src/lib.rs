@@ -19,7 +19,7 @@ pub use ledger::Ledger;
 #[async_trait(?Send)]
 pub trait Transport {
     type Error: Debug;
-    async fn exchange(&self, command: &[u8], encrypted: bool) -> Result<Vec<u8>, Self::Error>;
+    async fn exchange(&mut self, command: &[u8], encrypted: bool) -> Result<Vec<u8>, Self::Error>;
 }
 
 #[async_trait(?Send)]
@@ -95,7 +95,7 @@ pub trait Device<'a, C, T, R, E> {
     fn components(
         &'a mut self,
     ) -> (
-        &'a dyn Transport<Error = Self::TransportError>,
+        &'a mut dyn Transport<Error = Self::TransportError>,
         &'a dyn HttpClient<Error = Self::HttpClientError>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     );

@@ -15,11 +15,6 @@
 ********************************************************************************/
 use async_trait::async_trait;
 use byteorder::{BigEndian, ReadBytesExt};
-use futures::{
-    // TODO implements Channel for T: AsyncReadExt + AsyncWriteExt
-    // io::{AsyncReadExt, AsyncWriteExt},
-    lock::Mutex,
-};
 use std::io::Cursor;
 
 use crate::Transport;
@@ -45,14 +40,12 @@ impl From<std::io::Error> for LedgerHIDError {
 }
 
 pub struct LedgerTransportHID<C> {
-    channel: Mutex<C>,
+    channel: C,
 }
 
 impl<C> LedgerTransportHID<C> {
     pub fn new(channel: C) -> Self {
-        Self {
-            channel: Mutex::new(channel),
-        }
+        Self { channel }
     }
 }
 
@@ -67,12 +60,10 @@ impl<C: Channel> Transport for LedgerTransportHID<C> {
     type Error = LedgerHIDError;
 
     async fn exchange(
-        &self,
+        &mut self,
         apdu_command: &[u8],
         _encrypted: bool,
     ) -> Result<Vec<u8>, Self::Error> {
-        let mut channel = self.channel.lock().await;
-
         let command_length = apdu_command.len();
         let mut in_data = Vec::with_capacity(command_length + 2);
         in_data.push(((command_length >> 8) & 0xFF) as u8);
@@ -94,7 +85,7 @@ impl<C: Channel> Transport for LedgerTransportHID<C> {
             buffer[4] = (sequence_idx & 0xFF) as u8; // sequence_idx big endian
             buffer[5..5 + chunk.len()].copy_from_slice(chunk);
 
-            match channel.send(&buffer).await {
+            match self.channel.send(&buffer).await {
                 Ok(size) => {
                     if size < buffer.len() {
                         return Err(LedgerHIDError::Comm(
@@ -114,7 +105,7 @@ impl<C: Channel> Transport for LedgerTransportHID<C> {
         let mut expected_apdu_len = 0usize;
 
         loop {
-            let res = channel.receive(&mut buffer).await?;
+            let res = self.channel.receive(&mut buffer).await?;
 
             if (sequence_idx == 0 && res < 7) || res < 5 {
                 return Err(LedgerHIDError::Comm("Read error. Incomplete header"));
