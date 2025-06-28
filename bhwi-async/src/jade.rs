@@ -1,7 +1,4 @@
-use std::fmt::Debug;
-
 use crate::{HttpClient, Transport};
-use async_trait::async_trait;
 use bhwi::{
     bitcoin::Network,
     jade::{JadeCommand, JadeError, JadeInterpreter, JadeResponse, JadeTransmit},
@@ -24,37 +21,34 @@ impl<T, S> Jade<T, S> {
     }
 }
 
-impl<'a, F, S, C, T, R, E> crate::Device<'a, C, T, R, E> for Jade<F, S>
+impl<C, T, R, E, F, H> crate::Device<C, T, R, E> for Jade<F, H>
 where
-    C: Into<JadeCommand<'a>>,
+    C: Into<JadeCommand>,
     T: From<JadeTransmit>,
     R: From<JadeResponse>,
     E: From<JadeError>,
+    F: Transport,
+    H: HttpClient,
 {
-    fn interpreter(&self) -> impl Interpreter<Command = C, Transmit = T, Response = R, Error = E> {
-        JadeInterpreter::default().with_network(self.network)
+    type TransportError = F::Error;
+    type HttpClientError = H::Error;
+    fn components(
+        &mut self,
+    ) -> (
+        &mut dyn Transport<Error = Self::TransportError>,
+        &dyn HttpClient<Error = Self::HttpClientError>,
+        impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
+    ) {
+        (
+            &mut self.transport,
+            &self.pinserver,
+            JadeInterpreter::default().with_network(self.network),
+        )
     }
 }
 
-#[async_trait(?Send)]
-impl<T, S, E> Transport for Jade<T, S>
-where
-    E: Debug,
-    T: Transport<Error = E>,
-{
-    type Error = T::Error;
-    async fn exchange(&self, command: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        self.transport.exchange(command).await
-    }
-}
-
-#[async_trait(?Send)]
-impl<T, S> HttpClient for Jade<T, S>
-where
-    S: HttpClient,
-{
-    type Error = S::Error;
-    async fn request(&self, url: &str, req: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        self.pinserver.request(url, req).await
+impl<T, S> crate::OnUnlock for Jade<T, S> {
+    fn on_unlock(&mut self, _response: bhwi::common::Response) -> Result<(), bhwi::common::Error> {
+        Ok(())
     }
 }
