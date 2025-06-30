@@ -18,32 +18,46 @@ pub trait Interpreter {
 ```
 
 Once this trait implemented, it is up to the developer to take care of the IO according to the
-targeted plateform with or without `async/await`. The data and its
+targeted platform with or without `async/await`. The data and its
 recipient are provided in the `Transmit` structure.
 
 For example the code of `bhwi-async` to run a command from the common interpreter that currently
-manage commands for ledger and jade devices and the jade pin server:
+manage commands for coldcard, ledger and jade devices and the jade pin server:
 
 ```rust
-async fn run_command<T, S, I>(
-    transport: &T,
-    http_client: &S,
-    mut intpr: I,
-    command: common::Command,
-) -> Result<common::Response, Error<T::Error, S::Error>>
+pub trait Device<C, T, R, E> {
+    type TransportError: Debug;
+    type HttpClientError: Debug;
+    fn components(
+        &mut self,
+    ) -> (
+        &mut dyn Transport<Error = Self::TransportError>,
+        &dyn HttpClient<Error = Self::HttpClientError>,
+        impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
+    );
+}
+
+async fn run_command<'a, D, C, E, F>(
+    device: &'a mut D,
+    command: C,
+) -> Result<common::Response, Error<E, F>>
 where
-    T: Transport + ?Sized,
-    S: HttpClient + ?Sized,
-    I: Interpreter<
-        Command = common::Command,
-        Transmit = common::Transmit,
-        Response = common::Response,
-        Error = common::Error,
+    E: std::fmt::Debug + 'a,
+    F: std::fmt::Debug + 'a,
+    D: Device<
+        common::Command,
+        common::Transmit,
+        common::Response,
+        common::Error,
+        TransportError = E,
+        HttpClientError = F,
     >,
+    C: Into<common::Command>,
 {
-    let transmit = intpr.start(command)?;
+    let (transport, http_client, mut intpr) = device.components();
+    let transmit = intpr.start(command.into())?;
     let exchange = transport
-        .exchange(&transmit.payload)
+        .exchange(&transmit.payload, transmit.encrypted)
         .await
         .map_err(Error::Transport)?;
     let mut transmit = intpr.exchange(exchange)?;
@@ -58,7 +72,7 @@ where
             }
             common::Recipient::Device => {
                 let exchange = transport
-                    .exchange(&t.payload)
+                    .exchange(&t.payload, t.encrypted)
                     .await
                     .map_err(Error::Transport)?;
                 transmit = intpr.exchange(exchange)?;
