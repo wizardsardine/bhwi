@@ -23,10 +23,10 @@ pub enum JadeError {
     HandshakeRefused,
 }
 
-pub enum JadeCommand<'a> {
+pub enum JadeCommand {
     Auth,
     GetMasterFingerprint,
-    GetXpub(&'a DerivationPath),
+    GetXpub(DerivationPath),
 }
 
 pub enum JadeResponse {
@@ -45,21 +45,21 @@ pub struct JadeTransmit {
     pub payload: Vec<u8>,
 }
 
-enum State<'a> {
+enum State {
     New,
-    Running(JadeCommand<'a>),
+    Running(JadeCommand),
     WaitingPinServer,
     WaitingFinalHandshake,
 }
 
-pub struct JadeInterpreter<'a, C, T, R, E> {
+pub struct JadeInterpreter<C, T, R, E> {
     network: &'static str,
-    state: State<'a>,
+    state: State,
     response: Option<JadeResponse>,
     _marker: std::marker::PhantomData<(C, T, R, E)>,
 }
 
-impl<'a, C, T, R, E> Default for JadeInterpreter<'a, C, T, R, E> {
+impl<C, T, R, E> Default for JadeInterpreter<C, T, R, E> {
     fn default() -> Self {
         Self {
             network: JADE_NETWORK_MAINNET,
@@ -70,7 +70,7 @@ impl<'a, C, T, R, E> Default for JadeInterpreter<'a, C, T, R, E> {
     }
 }
 
-impl<'a, C, T, R, E> JadeInterpreter<'a, C, T, R, E> {
+impl<C, T, R, E> JadeInterpreter<C, T, R, E> {
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = match network {
             Network::Bitcoin => JADE_NETWORK_MAINNET,
@@ -112,9 +112,9 @@ fn from_response<D: DeserializeOwned>(buffer: &[u8]) -> Result<api::Response<D>,
     serde_cbor::from_slice(buffer).map_err(|_| JadeError::Cbor)
 }
 
-impl<'a, C, T, R, E> Interpreter for JadeInterpreter<'a, C, T, R, E>
+impl<C, T, R, E> Interpreter for JadeInterpreter<C, T, R, E>
 where
-    C: Into<JadeCommand<'a>>,
+    C: Into<JadeCommand>,
     T: From<JadeTransmit>,
     R: From<JadeResponse>,
     E: From<JadeError>,
