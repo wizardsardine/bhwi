@@ -22,7 +22,7 @@ impl<T> Coldcard<T> {
     }
 }
 
-impl<C, T, R, E, F> crate::Device<C, T, R, E> for Coldcard<F>
+impl<C, T, R, E, F> crate::CommonInterface<C, T, R, E> for Coldcard<F>
 where
     C: TryInto<ColdcardCommand, Error = ColdcardError>,
     T: From<ColdcardTransmit>,
