@@ -1,0 +1,20 @@
+[package]
+name = "bhwi-cli"
+version = "0.0.1"
+edition = "2021"
+authors = ["Edouard Paris <m@edouard.paris>"]
+repository = "https://github.com/wizardsardine/bhwi"
+license-file = "../LICENSE"
+keywords = ["bitcoin",  "miniscript"]
+description = "cli tool to talk to hardware wallet"
+
+[[bin]]
+name = "bhwi"
+path = "src/bin/bhwi.rs"
+
+[dependencies]
+clap = { version = "4.4.7", features = ["derive"] }
+bitcoin = "0.32"
+hex = "0.4"
+bhwi-async = { path = "../bhwi-async" }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync"] }
