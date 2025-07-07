@@ -15,7 +15,7 @@ impl<T> Ledger<T> {
     }
 }
 
-impl<C, T, R, E, F> crate::Device<C, T, R, E> for Ledger<F>
+impl<C, T, R, E, F> crate::CommonInterface<C, T, R, E> for Ledger<F>
 where
     C: TryInto<LedgerCommand, Error = LedgerError>,
     T: From<ApduCommand>,

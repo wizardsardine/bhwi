@@ -21,7 +21,7 @@ impl<T, S> Jade<T, S> {
     }
 }
 
-impl<C, T, R, E, F, H> crate::Device<C, T, R, E> for Jade<F, H>
+impl<C, T, R, E, F, H> crate::CommonInterface<C, T, R, E> for Jade<F, H>
 where
     C: Into<JadeCommand>,
     T: From<JadeTransmit>,

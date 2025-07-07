@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "bhwi", "bhwi-async", "bhwi-wasm",
+    "bhwi", "bhwi-async", "bhwi-wasm", "bhwi-cli"
 ]
-default-members = ["bhwi", "bhwi-async"]
+default-members = ["bhwi", "bhwi-async", "bhwi-cli"]

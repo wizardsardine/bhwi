@@ -56,7 +56,8 @@ impl<E, F> From<common::Error> for Error<E, F> {
 #[async_trait(?Send)]
 impl<D> HWI for D
 where
-    D: Device<common::Command, common::Transmit, common::Response, common::Error> + OnUnlock,
+    D: CommonInterface<common::Command, common::Transmit, common::Response, common::Error>
+        + OnUnlock,
 {
     type Error = Error<D::TransportError, D::HttpClientError>;
     async fn unlock(&mut self, network: Network) -> Result<(), Self::Error> {
@@ -102,7 +103,7 @@ pub trait OnUnlock {
     fn on_unlock(&mut self, _response: common::Response) -> Result<(), common::Error>;
 }
 
-pub trait Device<C, T, R, E> {
+pub trait CommonInterface<C, T, R, E> {
     type TransportError: Debug;
     type HttpClientError: Debug;
     fn components(
@@ -121,7 +122,7 @@ async fn run_command<'a, D, C, E, F>(
 where
     E: std::fmt::Debug + 'a,
     F: std::fmt::Debug + 'a,
-    D: Device<
+    D: CommonInterface<
         common::Command,
         common::Transmit,
         common::Response,
