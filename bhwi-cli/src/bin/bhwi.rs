@@ -50,16 +50,23 @@ async fn main() -> Result<(), Error> {
             if devices.is_empty() {
                 eprintln!("No devices found");
             } else {
-                for mut device in devices {
-                    eprint!("{}", device.get_master_fingerprint().await?);
-                    eprintln!();
+                for device in devices {
+                    println!(
+                        "{} at {} (VID:{:04x} PID:{:04x})",
+                        device.device_type,
+                        device.path,
+                        device.vid.unwrap_or(0),
+                        device.pid.unwrap_or(0)
+                    );
                 }
             }
         }
-        Commands::Xpub(XpubCommands::Get { path }) => {
-            if let Some(mut d) = get_device_with_fingerprint(args.network, args.fingerprint).await?
-            {
-                eprintln!("{}", d.get_extended_pubkey(path, false).await?);
+        Commands::Xpub(XpubCommands::Get { path: _ }) => {
+            eprintln!("Getting xpub requires device connection - not yet implemented in device enumeration mode");
+            if let Some(_device_info) = get_device_with_fingerprint(args.network, args.fingerprint).await? {
+                eprintln!("Device found but connection not implemented yet");
+            } else {
+                eprintln!("No device found");
             }
         }
     }

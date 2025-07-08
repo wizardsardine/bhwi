@@ -1,8 +1,9 @@
-use bhwi_async::{Error as HWIError, HWI, HttpClient};
+use bhwi_async::{Error as HWIError, HttpClient};
 use bitcoin::{bip32::Fingerprint, Network};
 use hidapi::HidApi;
 use serialport::{available_ports, SerialPortType};
 use async_trait::async_trait;
+use std::fmt;
 
 pub type Error = HWIError<(), ()>;
 
@@ -21,39 +22,73 @@ const JADE_DEVICE_IDS: [(u16, u16); 6] = [
 pub async fn get_device_with_fingerprint(
     network: Network,
     fingerprint: Option<Fingerprint>,
-) -> Result<Option<Box<dyn HWI<Error = Error>>>, Error> {
-    for mut device in list(network).await? {
-        if let Some(fingerprint) = fingerprint {
-            if fingerprint == device.get_master_fingerprint().await? {
-                return Ok(Some(device));
-            }
-        } else {
-            return Ok(Some(device));
-        }
+) -> Result<Option<DeviceInfo>, Error> {
+    let devices = list(network).await?;
+    if let Some(target_fingerprint) = fingerprint {
+        // For now, just return the first matching device type
+        // In a full implementation, we'd connect and check fingerprints
+        // For now, return None since we don't connect to devices to check fingerprints
+        Ok(None)
+    } else {
+        Ok(devices.into_iter().next())
     }
-    Ok(None)
 }
 
-pub async fn list(_network: Network) -> Result<Vec<Box<dyn HWI<Error = Error> + Send>>, Error> {
-    let devices: Vec<Box<dyn HWI<Error = Error> + Send>> = Vec::new();
-    
-    // For now, just enumerate what devices we find
-    // TODO: Implement actual device creation and initialization
-    // This requires proper transport layer implementation for each device type
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub device_type: DeviceType,
+    pub path: String,
+    pub vid: Option<u16>,
+    pub pid: Option<u16>,
+    pub fingerprint: Option<Fingerprint>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DeviceType {
+    Ledger,
+    Coldcard,
+    Jade,
+}
+
+impl fmt::Display for DeviceType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DeviceType::Ledger => write!(f, "Ledger"),
+            DeviceType::Coldcard => write!(f, "Coldcard"),
+            DeviceType::Jade => write!(f, "Jade"),
+        }
+    }
+}
+
+pub async fn list(_network: Network) -> Result<Vec<DeviceInfo>, Error> {
+    let mut devices = Vec::new();
     
     if let Ok(api) = HidApi::new() {
         // Enumerate HID devices
         for device_info in api.device_list() {
             let vid = device_info.vendor_id();
-            let _pid = device_info.product_id();
+            let pid = device_info.product_id();
             
-            // Check for supported devices
+            // Check for Ledger devices
             if vid == LEDGER_VID {
-                // TODO: Create and initialize Ledger device
+                devices.push(DeviceInfo {
+                    device_type: DeviceType::Ledger,
+                    path: device_info.path().to_string_lossy().to_string(),
+                    vid: Some(vid),
+                    pid: Some(pid),
+                    fingerprint: None, // Would need to connect to get fingerprint
+                });
             }
             
+            // Check for Coldcard devices  
             if vid == COLDCARD_VID {
-                // TODO: Create and initialize Coldcard device
+                devices.push(DeviceInfo {
+                    device_type: DeviceType::Coldcard,
+                    path: device_info.path().to_string_lossy().to_string(),
+                    vid: Some(vid),
+                    pid: Some(pid),
+                    fingerprint: None, // Would need to connect to get fingerprint
+                });
             }
         }
         
@@ -62,7 +97,13 @@ pub async fn list(_network: Network) -> Result<Vec<Box<dyn HWI<Error = Error> + 
             for port in ports {
                 if let SerialPortType::UsbPort(usb_info) = port.port_type {
                     if JADE_DEVICE_IDS.contains(&(usb_info.vid, usb_info.pid)) {
-                        // TODO: Create and initialize Jade device
+                        devices.push(DeviceInfo {
+                            device_type: DeviceType::Jade,
+                            path: port.port_name.clone(),
+                            vid: Some(usb_info.vid),
+                            pid: Some(usb_info.pid),
+                            fingerprint: None, // Would need to connect to get fingerprint
+                        });
                     }
                 }
             }
