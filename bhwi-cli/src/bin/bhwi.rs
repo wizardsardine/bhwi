@@ -46,14 +46,34 @@ async fn main() -> Result<(), Error> {
     let args = Args::parse();
     match args.command {
         Commands::Device(DeviceCommands::List) => {
-            for mut device in list(args.network).await? {
-                eprint!("{}", device.get_master_fingerprint().await?);
+            let devices = list(args.network).await?;
+            if devices.is_empty() {
+                eprintln!("No devices found");
+            } else {
+                for mut device in devices {
+                    match device.get_master_fingerprint().await {
+                        Ok(fingerprint) => {
+                            println!("{}", fingerprint);
+                        }
+                        Err(e) => {
+                            eprintln!("Error accessing device: {:?}", e);
+                        }
+                    }
+                }
             }
         }
         Commands::Xpub(XpubCommands::Get { path }) => {
-            if let Some(mut d) = get_device_with_fingerprint(args.network, args.fingerprint).await?
-            {
-                eprintln!("{}", d.get_extended_pubkey(path, false).await?);
+            if let Some(mut device) = get_device_with_fingerprint(args.network, args.fingerprint).await? {
+                match device.get_extended_pubkey(path, false).await {
+                    Ok(xpub) => {
+                        println!("{}", xpub);
+                    }
+                    Err(e) => {
+                        eprintln!("Error getting xpub: {:?}", e);
+                    }
+                }
+            } else {
+                eprintln!("No device found");
             }
         }
     }
