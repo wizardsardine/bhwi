@@ -1,2 +1,7 @@
 [build]
 rustflags = ["--cfg=web_sys_unstable_apis"]
+
+[env]
+CC_wasm32_unknown_unknown = "clang"
+CFLAGS = "-target wasm32-unknown-unknown -nostdlibinc"
+C_INCLUDE_PATH = { value = "", force = true }
