@@ -8,6 +8,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::common::{Command, Error, Recipient, Response, Transmit};
 use crate::Interpreter;
 
 pub const JADE_NETWORK_MAINNET: &str = "mainnet";
@@ -217,5 +218,57 @@ where
         self.response
             .map(Self::Response::from)
             .ok_or_else(|| JadeError::NoErrorOrResult.into())
+    }
+}
+
+impl From<Command> for JadeCommand {
+    fn from(cmd: Command) -> Self {
+        match cmd {
+            Command::Unlock { .. } => Self::Auth,
+            Command::GetMasterFingerprint => Self::GetMasterFingerprint,
+            Command::GetXpub { path, .. } => Self::GetXpub(path),
+        }
+    }
+}
+
+impl From<JadeResponse> for Response {
+    fn from(res: JadeResponse) -> Response {
+        match res {
+            JadeResponse::TaskDone => Response::TaskDone,
+            JadeResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
+            JadeResponse::Xpub(xpub) => Response::Xpub(xpub),
+        }
+    }
+}
+
+impl From<JadeRecipient> for Recipient {
+    fn from(recipient: JadeRecipient) -> Recipient {
+        match recipient {
+            JadeRecipient::Device => Recipient::Device,
+            JadeRecipient::PinServer { url } => Recipient::PinServer { url },
+        }
+    }
+}
+
+impl From<JadeTransmit> for Transmit {
+    fn from(transmit: JadeTransmit) -> Transmit {
+        Transmit {
+            recipient: transmit.recipient.into(),
+            payload: transmit.payload,
+            encrypted: false,
+        }
+    }
+}
+
+impl From<JadeError> for Error {
+    fn from(error: JadeError) -> Error {
+        match error {
+            JadeError::Cbor => Error::Serialization("cbor".to_string()),
+            JadeError::NoErrorOrResult => Error::NoErrorOrResult,
+            JadeError::Rpc(api_error) => Error::Rpc(api_error.code, api_error.message),
+            JadeError::Serialization(s) => Error::Serialization(s),
+            JadeError::UnexpectedResult(msg) => Error::UnexpectedResult(msg.into_bytes()),
+            JadeError::HandshakeRefused => Error::AuthenticationRefused,
+        }
     }
 }

@@ -14,6 +14,7 @@ use bitcoin::{
 use std::str::FromStr;
 pub use wallet::{WalletPolicy, WalletPubKey};
 
+use crate::common::{Command, Error, Response};
 use crate::Interpreter;
 
 use apdu::{ApduCommand, ApduError, ApduResponse, StatusWord};
@@ -159,6 +160,44 @@ where
             Ok(Self::Response::from(res))
         } else {
             Err(LedgerError::NoErrorOrResult.into())
+        }
+    }
+}
+
+impl TryFrom<Command> for LedgerCommand {
+    type Error = LedgerError;
+    fn try_from(cmd: Command) -> Result<Self, Self::Error> {
+        match cmd {
+            Command::Unlock { options } => options
+                .network
+                .map(Self::OpenApp)
+                .ok_or(LedgerError::MissingCommandInfo("network")),
+            Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
+            Command::GetXpub { path, display } => Ok(Self::GetXpub { path, display }),
+        }
+    }
+}
+
+impl From<LedgerResponse> for Response {
+    fn from(res: LedgerResponse) -> Response {
+        match res {
+            LedgerResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
+            LedgerResponse::TaskDone => Response::TaskDone,
+            LedgerResponse::Xpub(xpub) => Response::Xpub(xpub),
+        }
+    }
+}
+
+impl From<LedgerError> for Error {
+    fn from(error: LedgerError) -> Error {
+        match error {
+            LedgerError::MissingCommandInfo(e) => Error::MissingCommandInfo(e),
+            LedgerError::NoErrorOrResult => Error::NoErrorOrResult,
+            LedgerError::Apdu(e) => Error::Serialization(format!("{:?}", e)),
+            LedgerError::Store(_) => Error::Request("Store operation failed"),
+            LedgerError::Interrupted => Error::Request("Operation interrupted"),
+            LedgerError::UnexpectedResult(data) => Error::UnexpectedResult(data),
+            LedgerError::FailedToOpenApp(_) => Error::AuthenticationRefused,
         }
     }
 }

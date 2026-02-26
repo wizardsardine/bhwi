@@ -3,6 +3,7 @@ pub mod encrypt;
 
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 
+use crate::common::{Command, Error, Recipient, Response, Transmit};
 use crate::Interpreter;
 
 #[derive(Debug)]
@@ -126,6 +127,50 @@ where
             Ok(Self::Response::from(res))
         } else {
             Err(ColdcardError::NoErrorOrResult.into())
+        }
+    }
+}
+
+impl TryFrom<Command> for ColdcardCommand {
+    type Error = ColdcardError;
+    fn try_from(cmd: Command) -> Result<Self, Self::Error> {
+        match cmd {
+            Command::Unlock { .. } => Ok(Self::StartEncryption),
+            Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
+            Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),
+        }
+    }
+}
+
+impl From<ColdcardResponse> for Response {
+    fn from(res: ColdcardResponse) -> Response {
+        match res {
+            ColdcardResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
+            ColdcardResponse::Xpub(xpub) => Response::Xpub(xpub),
+            ColdcardResponse::MyPub { encryption_key, .. } => {
+                Response::EncryptionKey(encryption_key)
+            }
+        }
+    }
+}
+
+impl From<ColdcardTransmit> for Transmit {
+    fn from(transmit: ColdcardTransmit) -> Transmit {
+        Transmit {
+            recipient: Recipient::Device,
+            payload: transmit.payload,
+            encrypted: transmit.encrypted,
+        }
+    }
+}
+
+impl From<ColdcardError> for Error {
+    fn from(error: ColdcardError) -> Error {
+        match error {
+            ColdcardError::Encryption(e) => Error::Encryption(e),
+            ColdcardError::MissingCommandInfo(e) => Error::MissingCommandInfo(e),
+            ColdcardError::NoErrorOrResult => Error::NoErrorOrResult,
+            ColdcardError::Serialization(s) => Error::Serialization(s),
         }
     }
 }
