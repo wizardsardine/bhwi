@@ -223,6 +223,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bhwi-e2e-coldcard"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64ct",
+ "bhwi-async",
+ "bitcoin",
+ "rand_core 0.6.4",
+ "tokio",
+]
+
+[[package]]
 name = "bhwi-e2e-ledger"
 version = "0.1.0"
 dependencies = [
