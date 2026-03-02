@@ -1,4 +1,4 @@
-use crate::{transport::Channel, Transport};
+use crate::{Transport, transport::Channel};
 use async_trait::async_trait;
 
 pub const COLDCARD_VID: u16 = 0xd13e;

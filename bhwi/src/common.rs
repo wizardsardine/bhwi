@@ -1,6 +1,6 @@
 use bitcoin::{
-    bip32::{DerivationPath, Fingerprint, Xpub},
     Network,
+    bip32::{DerivationPath, Fingerprint, Xpub},
 };
 
 use crate::{coldcard, jade, ledger};
@@ -218,11 +218,11 @@ mod tests {
         let interpreters: Vec<
             Box<
                 dyn Interpreter<
-                    Command = super::Command,
-                    Transmit = super::Transmit,
-                    Response = super::Response,
-                    Error = super::Error,
-                >,
+                        Command = super::Command,
+                        Transmit = super::Transmit,
+                        Response = super::Response,
+                        Error = super::Error,
+                    >,
             >,
         > = vec![
             Box::<LedgerInterpreter>::default(),

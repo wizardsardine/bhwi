@@ -8,8 +8,8 @@ pub mod psbt;
 pub mod wallet;
 
 use bitcoin::{
-    bip32::{DerivationPath, Fingerprint, Xpub},
     Network,
+    bip32::{DerivationPath, Fingerprint, Xpub},
 };
 use std::str::FromStr;
 pub use wallet::{WalletPolicy, WalletPubKey};

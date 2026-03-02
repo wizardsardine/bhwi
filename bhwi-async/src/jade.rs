@@ -1,8 +1,8 @@
 use crate::{HttpClient, Transport};
 use bhwi::{
+    Interpreter,
     bitcoin::Network,
     jade::{JadeCommand, JadeError, JadeInterpreter, JadeResponse, JadeTransmit},
-    Interpreter,
 };
 
 pub struct Jade<T, S> {

@@ -4,16 +4,16 @@
 /// Note: Only psbt V2 is supported by the ledger bitcoin app.
 /// rust-bitcoin currently support V0.
 use bitcoin::{
+    PublicKey,
     blockdata::transaction::{TxIn, TxOut},
-    consensus::encode::{deserialize, serialize, VarInt},
+    consensus::encode::{VarInt, deserialize, serialize},
     ecdsa,
     hashes::Hash,
     key::FromSliceError as KeyError,
-    psbt::{raw, Input, Output, Psbt},
+    psbt::{Input, Output, Psbt, raw},
     secp256k1::{self, XOnlyPublicKey},
     taproot,
     taproot::TapLeafHash,
-    PublicKey,
 };
 
 use serialize::Serialize;
@@ -443,21 +443,21 @@ mod serialize {
     use core::convert::{TryFrom, TryInto};
 
     use bitcoin::{
+        VarInt,
         bip32::{ChildNumber, Fingerprint, KeySource},
         blockdata::{
             script::ScriptBuf,
             transaction::{Transaction, TxOut},
             witness::Witness,
         },
-        consensus::encode::{self, deserialize_partial, serialize, Decodable, Encodable},
+        consensus::encode::{self, Decodable, Encodable, deserialize_partial, serialize},
         ecdsa,
-        hashes::{hash160, ripemd160, sha256, sha256d, Hash},
+        hashes::{Hash, hash160, ripemd160, sha256, sha256d},
         key::PublicKey,
         psbt::{Error, PsbtSighashType},
         secp256k1::{self, XOnlyPublicKey},
         taproot,
         taproot::{ControlBlock, LeafVersion, TapLeafHash, TapNodeHash, TapTree, TaprootBuilder},
-        VarInt,
     };
 
     macro_rules! impl_psbt_de_serialize {

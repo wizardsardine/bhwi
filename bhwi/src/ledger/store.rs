@@ -3,7 +3,7 @@ use core::fmt::Debug;
 
 use bitcoin::{
     consensus::encode::{self, VarInt},
-    hashes::{sha256, Hash, HashEngine},
+    hashes::{Hash, HashEngine, sha256},
 };
 
 use super::{apdu::ClientCommandCode, merkle::MerkleTree};

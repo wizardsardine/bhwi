@@ -5,7 +5,7 @@ use core::str::FromStr;
 use bitcoin::{
     bip32::{DerivationPath, Error, Fingerprint, KeySource, Xpub},
     consensus::encode::{self, VarInt},
-    hashes::{sha256, Hash, HashEngine},
+    hashes::{Hash, HashEngine, sha256},
 };
 
 use super::merkle::MerkleTree;
@@ -357,8 +357,14 @@ mod tests {
             ],
         );
 
-        assert_eq!(wallet.get_descriptor(false).unwrap(), "wsh(sortedmulti(2,[76223a6e/48'/1'/0'/2']tpubDE7NQymr4AFtewpAsWtnreyq9ghkzQBXpCZjWLFVRAvnbf7vya2eMTvT2fPapNqL8SuVvLQdbUbMfWLVDCZKnsEBqp6UK93QEzL8Ck23AwF/0/*,[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK/12/*))");
-        assert_eq!(wallet.get_descriptor(true).unwrap(), "wsh(sortedmulti(2,[76223a6e/48'/1'/0'/2']tpubDE7NQymr4AFtewpAsWtnreyq9ghkzQBXpCZjWLFVRAvnbf7vya2eMTvT2fPapNqL8SuVvLQdbUbMfWLVDCZKnsEBqp6UK93QEzL8Ck23AwF/1/*,[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK/3/*))");
+        assert_eq!(
+            wallet.get_descriptor(false).unwrap(),
+            "wsh(sortedmulti(2,[76223a6e/48'/1'/0'/2']tpubDE7NQymr4AFtewpAsWtnreyq9ghkzQBXpCZjWLFVRAvnbf7vya2eMTvT2fPapNqL8SuVvLQdbUbMfWLVDCZKnsEBqp6UK93QEzL8Ck23AwF/0/*,[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK/12/*))"
+        );
+        assert_eq!(
+            wallet.get_descriptor(true).unwrap(),
+            "wsh(sortedmulti(2,[76223a6e/48'/1'/0'/2']tpubDE7NQymr4AFtewpAsWtnreyq9ghkzQBXpCZjWLFVRAvnbf7vya2eMTvT2fPapNqL8SuVvLQdbUbMfWLVDCZKnsEBqp6UK93QEzL8Ck23AwF/1/*,[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK/3/*))"
+        );
 
         let wallet = WalletPolicy::new(
             "Cold storage".to_string(),
@@ -369,9 +375,15 @@ mod tests {
                WalletPubKey::from_str("[053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp").unwrap(),
             ],
         );
-        assert_eq!(wallet.get_descriptor(false).unwrap(), "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/0/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/0/*),older(65535))))");
+        assert_eq!(
+            wallet.get_descriptor(false).unwrap(),
+            "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/0/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/0/*),older(65535))))"
+        );
 
-        assert_eq!(wallet.get_descriptor(true).unwrap(), "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/1/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/1/*),older(65535))))");
+        assert_eq!(
+            wallet.get_descriptor(true).unwrap(),
+            "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/1/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/1/*),older(65535))))"
+        );
 
         let wallet = WalletPolicy::new(
             "Cold storage".to_string(),
@@ -382,9 +394,15 @@ mod tests {
                WalletPubKey::from_str("[053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp").unwrap(),
             ],
         );
-        assert_eq!(wallet.get_descriptor(false).unwrap(), "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/0/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/0/*),older(65535))))");
+        assert_eq!(
+            wallet.get_descriptor(false).unwrap(),
+            "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/0/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/0/*),older(65535))))"
+        );
 
-        assert_eq!(wallet.get_descriptor(true).unwrap(), "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/1/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/1/*),older(65535))))");
+        assert_eq!(
+            wallet.get_descriptor(true).unwrap(),
+            "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/1/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/1/*),older(65535))))"
+        );
 
         let wallet = WalletPolicy::new(
             "Cold storage".to_string(),
@@ -395,8 +413,14 @@ mod tests {
                WalletPubKey::from_str("[053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp").unwrap(),
             ],
         );
-        assert_eq!(wallet.get_descriptor(false).unwrap(), "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/0/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/0/*),older(65535))))");
+        assert_eq!(
+            wallet.get_descriptor(false).unwrap(),
+            "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/0/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/0/*),older(65535))))"
+        );
 
-        assert_eq!(wallet.get_descriptor(true).unwrap(), "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/1/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/1/*),older(65535))))");
+        assert_eq!(
+            wallet.get_descriptor(true).unwrap(),
+            "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/1/*),and_v(v:pkh([053f423f/48'/1'/0'/2']tpubDEGZMZiz8Vnp7N7cTM9Cty897GJpQ8jqmw2yyDKMPfbMzqPtRbo8wViKtkx6zfrzY6jW5NPNULeN9j7oYCqvrFxCkhSdJs7QxwZ3qQ1PXSp/1/*),older(65535))))"
+        );
     }
 }

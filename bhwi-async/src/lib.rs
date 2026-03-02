@@ -7,11 +7,12 @@ use std::fmt::Debug;
 
 use async_trait::async_trait;
 use bhwi::{
+    Interpreter,
     bitcoin::{
-        bip32::{DerivationPath, Fingerprint, Xpub},
         Network,
+        bip32::{DerivationPath, Fingerprint, Xpub},
     },
-    common, Interpreter,
+    common,
 };
 pub use jade::Jade;
 pub use ledger::Ledger;
@@ -123,13 +124,13 @@ where
     E: std::fmt::Debug + 'a,
     F: std::fmt::Debug + 'a,
     D: CommonInterface<
-        common::Command,
-        common::Transmit,
-        common::Response,
-        common::Error,
-        TransportError = E,
-        HttpClientError = F,
-    >,
+            common::Command,
+            common::Transmit,
+            common::Response,
+            common::Error,
+            TransportError = E,
+            HttpClientError = F,
+        >,
     C: Into<common::Command>,
 {
     let (transport, http_client, mut intpr) = device.components();

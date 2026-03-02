@@ -1,9 +1,9 @@
 /// APDU commands  for the Bitcoin application.
 ///
 use bitcoin::{
+    Network,
     bip32::{ChildNumber, DerivationPath},
     consensus::encode::{self, VarInt},
-    Network,
 };
 use core::default::Default;
 

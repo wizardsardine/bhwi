@@ -1,10 +1,10 @@
 pub mod api;
 
 use bitcoin::{
-    bip32::{DerivationPath, Fingerprint, Xpub},
     Network,
+    bip32::{DerivationPath, Fingerprint, Xpub},
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

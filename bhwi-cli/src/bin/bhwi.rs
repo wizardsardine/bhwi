@@ -1,8 +1,8 @@
-use bhwi_cli::{get_device_with_fingerprint, list, Error};
+use bhwi_cli::{Error, get_device_with_fingerprint, list};
 
 use bitcoin::{
-    bip32::{DerivationPath, Fingerprint},
     Network,
+    bip32::{DerivationPath, Fingerprint},
 };
 use clap::{Parser, Subcommand};
 

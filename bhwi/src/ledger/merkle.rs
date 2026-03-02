@@ -1,4 +1,4 @@
-use bitcoin::hashes::{sha256, Hash, HashEngine};
+use bitcoin::hashes::{Hash, HashEngine, sha256};
 
 ///! This implementation of Merkle Trees makes usage of a
 ///! simple and opinionated data structure.
@@ -170,7 +170,7 @@ fn largest_power_of_2_less_than(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::hashes::{sha256, Hash, HashEngine};
+    use bitcoin::hashes::{Hash, HashEngine, sha256};
 
     #[test]
     fn test_merkle_tree() {

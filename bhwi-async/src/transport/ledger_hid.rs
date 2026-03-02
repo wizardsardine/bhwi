@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::Cursor;
 
-use crate::{transport::Channel, Transport};
+use crate::{Transport, transport::Channel};
 
 pub const LEDGER_VID: u16 = 0x2c97;
 pub const LEDGER_USAGE_PAGE: u16 = 0xFFA0;
