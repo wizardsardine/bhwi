@@ -7,10 +7,12 @@ use crate::coldcard::ColdcardError;
 
 pub enum Engine {
     New(k256::SecretKey),
-    Ready {
-        encrypt: ctr::Ctr64BE<aes::Aes256>,
-        decrypt: ctr::Ctr64BE<aes::Aes256>,
-    },
+    Ready(Box<InitializedEngine>),
+}
+
+pub struct InitializedEngine {
+    encrypt: ctr::Ctr64BE<aes::Aes256>,
+    decrypt: ctr::Ctr64BE<aes::Aes256>,
 }
 
 impl Engine {
@@ -30,10 +32,10 @@ impl Engine {
                 .map_err(|_| ColdcardError::Encryption("session_key"))?;
             let key = GenericArray::from_slice(&session_key);
             let nonce = GenericArray::from_slice(&[0_u8; 16]);
-            *self = Self::Ready {
+            *self = Self::Ready(Box::new(InitializedEngine {
                 encrypt: ctr::Ctr64BE::<aes::Aes256>::new(key, nonce),
                 decrypt: ctr::Ctr64BE::<aes::Aes256>::new(key, nonce),
-            };
+            }));
             Ok(())
         } else {
             Err(ColdcardError::Encryption("Engine is not New"))
@@ -55,8 +57,8 @@ impl Engine {
 
     pub fn encrypt(&mut self, mut data: Vec<u8>) -> Result<Vec<u8>, ColdcardError> {
         match self {
-            Self::Ready { encrypt, .. } => {
-                encrypt.apply_keystream(&mut data);
+            Self::Ready(engine) => {
+                engine.encrypt.apply_keystream(&mut data);
                 Ok(data)
             }
             Self::New(..) => Err(ColdcardError::Encryption("Engine not ready")),
@@ -65,8 +67,8 @@ impl Engine {
 
     pub fn decrypt(&mut self, mut data: Vec<u8>) -> Result<Vec<u8>, ColdcardError> {
         match self {
-            Self::Ready { decrypt, .. } => {
-                decrypt.apply_keystream(&mut data);
+            Self::Ready(engine) => {
+                engine.decrypt.apply_keystream(&mut data);
                 Ok(data)
             }
             Self::New(..) => Err(ColdcardError::Encryption("Engine not ready")),

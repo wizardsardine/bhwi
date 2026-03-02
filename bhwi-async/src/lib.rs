@@ -107,6 +107,8 @@ pub trait OnUnlock {
 pub trait CommonInterface<C, T, R, E> {
     type TransportError: Debug;
     type HttpClientError: Debug;
+
+    #[allow(clippy::type_complexity)]
     fn components(
         &mut self,
     ) -> (
