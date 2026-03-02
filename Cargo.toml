@@ -4,3 +4,11 @@ members = [
     "bhwi", "bhwi-async", "bhwi-wasm", "bhwi-cli"
 ]
 default-members = ["bhwi", "bhwi-async", "bhwi-cli"]
+
+[workspace.dependencies]
+async-trait = "0.1"
+bitcoin = "0.32.2"
+bhwi = { path = "./bhwi", version = "0.0.1" }
+bhwi-async = { path = "./bhwi-async", version = "0.0.1" }
+futures = "0.3"
+log = "0.4"

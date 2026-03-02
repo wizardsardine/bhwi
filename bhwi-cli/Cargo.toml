@@ -13,8 +13,9 @@ name = "bhwi"
 path = "src/bin/bhwi.rs"
 
 [dependencies]
+bitcoin.workspace = true
+bhwi-async.workspace = true
+
 clap = { version = "4.4.7", features = ["derive"] }
-bitcoin = "0.32"
 hex = "0.4"
-bhwi-async = { path = "../bhwi-async" }
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync"] }
