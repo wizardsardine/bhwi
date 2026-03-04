@@ -1,7 +1,6 @@
-use bitcoin::{
-    Network,
-    bip32::{DerivationPath, Fingerprint, Xpub},
-};
+use bitcoin::Network;
+use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
+use bitcoin::secp256k1::ecdsa::Signature;
 
 use crate::{coldcard, jade, ledger};
 
@@ -11,16 +10,27 @@ pub struct UnlockOptions {
 }
 
 pub enum Command {
-    Unlock { options: UnlockOptions },
+    Unlock {
+        options: UnlockOptions,
+    },
     GetMasterFingerprint,
-    GetXpub { path: DerivationPath, display: bool },
+    GetXpub {
+        path: DerivationPath,
+        display: bool,
+    },
+    SignMessage {
+        message: Vec<u8>,
+        path: DerivationPath,
+    },
 }
 
 pub enum Response {
     TaskDone,
+    TaskBusy,
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
     EncryptionKey([u8; 64]),
+    Signature(u8, Signature),
 }
 
 pub enum Recipient {

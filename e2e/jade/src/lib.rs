@@ -1,5 +1,3 @@
-use std::io::ErrorKind;
-
 use async_trait::async_trait;
 use bhwi_async::{HttpClient, Jade, Transport};
 use reqwest::Client;
@@ -55,7 +53,6 @@ impl HttpClient for PinServerClient {
     type Error = anyhow::Error;
 
     async fn request(&self, url: &str, request: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        dbg!("sending pin request", url, request);
         Ok(self
             .inner
             .post(url)
@@ -71,17 +68,24 @@ impl HttpClient for PinServerClient {
 
 #[cfg(test)]
 mod tests {
+    use base64ct::{Base64, Encoding};
     use bhwi_async::HWI;
     use bitcoin::Network;
 
     use super::*;
 
     async fn device() -> JadeDevice {
-        JadeDevice::new(
+        let mut dev = JadeDevice::new(
             Network::Testnet,
-            TcpClient { stream: TcpStream::connect("localhost:30121").await.unwrap() },
-            PinServerClient { inner: Client::new() },
-        )
+            TcpClient {
+                stream: TcpStream::connect("localhost:30121").await.unwrap(),
+            },
+            PinServerClient {
+                inner: Client::new(),
+            },
+        );
+        dev.unlock(Network::Testnet).await.expect("jade auth");
+        dev
     }
 
     #[tokio::test]
@@ -94,10 +98,28 @@ mod tests {
     #[tokio::test]
     async fn can_get_xpub() {
         let mut dev = device().await;
-        let xpub = dev.get_extended_pubkey("m/44'/1'/0'".parse().unwrap(), false).await.unwrap();
+        let xpub = dev
+            .get_extended_pubkey("m/44'/1'/0'".parse().unwrap(), false)
+            .await
+            .unwrap();
         assert_eq!(
             xpub.to_string(),
             "tpubDCKD5cdxMEFd2i4cNa3PJUbUHMsGDxsnfqjxVpMoG1ymWYUQUaZzTcHQo3JwYgaKe2FyKGA2FzGPSVczBoAiHGyERuA1mZ2UkGKufEnUxKk"
+        );
+    }
+
+    #[tokio::test]
+    async fn can_sign_message() {
+        let mut dev = device().await;
+        let (header, s) = dev
+            .sign_message(b"hello", "m/44'/1'/0'".parse().unwrap())
+            .await
+            .unwrap();
+        let mut sig = vec![header];
+        sig.extend_from_slice(&s.serialize_compact());
+        assert_eq!(
+            Base64::encode_string(&sig),
+            "H+SvKg15TSz+2C5ra6Q8/e8BaImOZVEeS0rOL6GCEt4vO+4xRRt+YYKavSqgAJBYZaGEiTqr7f9imyyElMNhYXU="
         );
     }
 }

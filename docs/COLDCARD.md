@@ -15,13 +15,9 @@ export PKG_CONFIG_PATH=/usr/local/opt/libffi/lib/pkgconfig
 My system doesn't have an issue finding `libffi` in using `pkg-config` and this
 breaks it since it's also not where my `libffi` is installed.
 
-## Running in Docker/Podman
+## Docker/Podman
 
 Inspired by https://github.com/tadeubas/coldcard-docker
-
-### Prerequisite
-
-You must [download a patch](https://github.com/Coldcard/firmware/compare/master...trevarj:firmware:headless-tcp-key-input.diff) that allows the coldcard e2e tests to interact with the simulator and save it as `headless_socket.patch` in the directory where you have the `Dockerfile`:
 
 ```Dockerfile
 FROM ubuntu:24.04
@@ -58,10 +54,6 @@ RUN python3 -m venv ENV && \
     make ngu-setup && \
     make && \
     find /build/firmware -name ".git" -type d -prune -exec rm -rf '{}' +
-
-# Apply patch for headless socket comms
-COPY headless_socket.patch /build/firmware/headless_socket.patch
-RUN git apply headless_socket.patch
 
 # Set the default working directory to the simulator
 WORKDIR /build/firmware/unix

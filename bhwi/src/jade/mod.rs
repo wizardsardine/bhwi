@@ -1,15 +1,17 @@
 pub mod api;
 
-use bitcoin::{
-    Network,
-    bip32::{DerivationPath, Fingerprint, Xpub},
-};
-use serde::{Serialize, de::DeserializeOwned};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::common::{Command, Error, Recipient, Response, Transmit};
+use base64ct::{Base64, Encoding};
+use bitcoin::Network;
+use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
+use bitcoin::secp256k1::ecdsa::Signature;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
 use crate::Interpreter;
+use crate::common::{Command, Error, Recipient, Response, Transmit};
 
 pub const JADE_NETWORK_MAINNET: &str = "mainnet";
 pub const JADE_NETWORK_TESTNET: &str = "testnet";
@@ -28,12 +30,17 @@ pub enum JadeCommand {
     Auth,
     GetMasterFingerprint,
     GetXpub(DerivationPath),
+    SignMessage {
+        message: Vec<u8>,
+        path: DerivationPath,
+    },
 }
 
 pub enum JadeResponse {
     TaskDone,
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
+    Signature(u8, Signature),
 }
 
 pub enum JadeRecipient {
@@ -130,9 +137,9 @@ where
         let req = match &command {
             JadeCommand::Auth => request(
                 "auth_user",
-                Some(api::GetXpubParams {
+                Some(api::AuthUserParams {
                     network: self.network,
-                    path: DerivationPath::master().to_u32_vec(),
+                    epoch: None,
                 }),
             ),
             JadeCommand::GetMasterFingerprint => request(
@@ -149,6 +156,14 @@ where
                     path: path.to_u32_vec(),
                 }),
             ),
+            JadeCommand::SignMessage { message, path } => request(
+                "sign_message",
+                Some(api::SignMessageParams {
+                    path: path.to_u32_vec(),
+                    message: str::from_utf8(message)
+                        .map_err(|e| JadeError::Serialization(e.to_string()))?,
+                }),
+            ),
         };
 
         self.state = State::Running(command);
@@ -159,26 +174,31 @@ where
             State::New => Ok(None),
             State::Running(JadeCommand::Auth) => {
                 let res: api::AuthUserResponse = from_response(&data)?.into_result()?;
-                if let api::AuthUserResponse::PinServerRequired { http_request } = res {
-                    self.state = State::WaitingPinServer;
-                    let url = match &http_request.params.urls {
-                        api::PinServerUrls::Array(urls) => urls
-                            .first()
-                            .ok_or(JadeError::UnexpectedResult("No url provided".to_string()))?,
-                        api::PinServerUrls::Object { url, .. } => url,
-                    };
-                    Ok(Some(
-                        JadeTransmit {
-                            recipient: JadeRecipient::PinServer {
-                                url: url.to_string(),
-                            },
-                            payload: serde_json::to_vec(&http_request.params.data)
-                                .map_err(|e| JadeError::Serialization(e.to_string()))?,
-                        }
-                        .into(),
-                    ))
-                } else {
-                    Ok(None)
+                match res {
+                    api::AuthUserResponse::PinServerRequired { http_request } => {
+                        dbg!("pin req");
+                        self.state = State::WaitingPinServer;
+                        let url = match &http_request.params.urls {
+                            api::PinServerUrls::Array(urls) => urls.first().ok_or(
+                                JadeError::UnexpectedResult("No url provided".to_string()),
+                            )?,
+                            api::PinServerUrls::Object { url, .. } => url,
+                        };
+                        Ok(Some(
+                            JadeTransmit {
+                                recipient: JadeRecipient::PinServer {
+                                    url: url.to_string(),
+                                },
+                                payload: serde_json::to_vec(&http_request.params.data)
+                                    .map_err(|e| JadeError::Serialization(e.to_string()))?,
+                            }
+                            .into(),
+                        ))
+                    }
+                    api::AuthUserResponse::Authenticated(_) => {
+                        self.response = Some(JadeResponse::TaskDone);
+                        Ok(None)
+                    }
                 }
             }
             State::WaitingPinServer => {
@@ -212,6 +232,16 @@ where
                 self.response = Some(JadeResponse::Xpub(xpub));
                 Ok(None)
             }
+            State::Running(JadeCommand::SignMessage { .. }) => {
+                let s: String = from_response(&data)?.into_result()?;
+                let mut sig_bytes = vec![];
+                Base64::decode(&s, &mut sig_bytes)
+                    .map_err(|e| JadeError::Serialization(e.to_string()))?;
+                let sig = Signature::from_compact(&sig_bytes[1..])
+                    .map_err(|e| JadeError::Serialization(e.to_string()))?;
+                self.response = Some(JadeResponse::Signature(sig_bytes[0], sig));
+                Ok(None)
+            }
         }
     }
     fn end(self) -> Result<Self::Response, Self::Error> {
@@ -227,6 +257,7 @@ impl From<Command> for JadeCommand {
             Command::Unlock { .. } => Self::Auth,
             Command::GetMasterFingerprint => Self::GetMasterFingerprint,
             Command::GetXpub { path, .. } => Self::GetXpub(path),
+            Command::SignMessage { message, path } => Self::SignMessage { message, path },
         }
     }
 }
@@ -237,6 +268,7 @@ impl From<JadeResponse> for Response {
             JadeResponse::TaskDone => Response::TaskDone,
             JadeResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
             JadeResponse::Xpub(xpub) => Response::Xpub(xpub),
+            JadeResponse::Signature(header, signature) => Response::Signature(header, signature),
         }
     }
 }

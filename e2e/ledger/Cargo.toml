@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base64ct = { workspace = true, features = ["alloc"] }
 bhwi-async.workspace = true
 hex.workspace = true
 serde.workspace = true

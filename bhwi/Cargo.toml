@@ -15,7 +15,7 @@ default = ["jade"]
 jade = ["serde", "serde_bytes", "serde_cbor"]
 
 [dependencies]
-base64ct.workspace = true
+base64ct = { workspace = true, features = ["alloc"] }
 bitcoin.workspace = true
 log.workspace = true # TODO: remove me
 serde = { workspace = true, features = ["derive"], optional = true }
