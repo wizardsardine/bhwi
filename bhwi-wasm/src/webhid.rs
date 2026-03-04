@@ -1,5 +1,5 @@
-use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use futures::StreamExt;
+use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use js_sys::Uint8Array;
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -1,8 +1,8 @@
 use crate::{HttpClient, Transport};
 use async_trait::async_trait;
 use bhwi::{
-    ledger::{apdu::ApduCommand, LedgerCommand, LedgerError, LedgerInterpreter, LedgerResponse},
     Interpreter,
+    ledger::{LedgerCommand, LedgerError, LedgerInterpreter, LedgerResponse, apdu::ApduCommand},
 };
 
 pub struct Ledger<T> {

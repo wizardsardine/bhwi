@@ -1,11 +1,12 @@
 use crate::{HttpClient, Transport};
 use async_trait::async_trait;
 use bhwi::{
+    Interpreter,
     coldcard::{
-        encrypt::{self, CryptoRngCore},
         ColdcardCommand, ColdcardError, ColdcardInterpreter, ColdcardResponse, ColdcardTransmit,
+        encrypt::{self, CryptoRngCore},
     },
-    common, Interpreter,
+    common,
 };
 
 pub struct Coldcard<T> {

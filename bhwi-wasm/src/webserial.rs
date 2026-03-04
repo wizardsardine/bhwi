@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use async_trait::async_trait;
 use bhwi_async::Transport;
-use futures::future::{select, Either};
+use futures::future::{Either, select};
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;

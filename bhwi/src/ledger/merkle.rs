@@ -1,13 +1,12 @@
-use bitcoin::hashes::{sha256, Hash, HashEngine};
-
-///! This implementation of Merkle Trees makes usage of a
-///! simple and opinionated data structure.
-///! The Tree is only created once and does not require
-///! multiple manipulation like new leaf insertion at a choosen index.
-///! In fact the client uses merkle trees for read only commands:
-///!  - get_merkle_leaf_proof: provide the proof the hash of the leaf
-///!    with index i
-///!  - get_merkle_leaf_index: provide the index of the leaf with hash.
+//! This implementation of Merkle Trees makes usage of a
+//! simple and opinionated data structure.
+//! The Tree is only created once and does not require
+//! multiple manipulation like new leaf insertion at a choosen index.
+//! In fact the client uses merkle trees for read only commands:
+//!  - get_merkle_leaf_proof: provide the proof the hash of the leaf
+//!    with index i
+//!  - get_merkle_leaf_index: provide the index of the leaf with hash.
+use bitcoin::hashes::{Hash, HashEngine, sha256};
 
 /// MerkleTree is containing a merkle tree generated from a list of items.
 pub struct MerkleTree {
@@ -170,7 +169,7 @@ fn largest_power_of_2_less_than(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::hashes::{sha256, Hash, HashEngine};
+    use bitcoin::hashes::{Hash, HashEngine, sha256};
 
     #[test]
     fn test_merkle_tree() {

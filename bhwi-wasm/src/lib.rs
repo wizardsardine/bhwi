@@ -7,12 +7,12 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use bhwi_async::{
+    HWI as AsyncHWI, Jade, Ledger,
     coldcard::Coldcard,
-    transport::coldcard_hid::{ColdcardTransportHID, COLDCARD_VID},
-    transport::ledger_hid::{LedgerTransportHID, LEDGER_VID},
-    Jade, Ledger, HWI as AsyncHWI,
+    transport::coldcard_hid::{COLDCARD_VID, ColdcardTransportHID},
+    transport::ledger_hid::{LEDGER_VID, LedgerTransportHID},
 };
-use bitcoin::{bip32::DerivationPath, Network};
+use bitcoin::{Network, bip32::DerivationPath};
 use log::Level;
 use pinserver::PinServer;
 use wasm_bindgen::prelude::*;
