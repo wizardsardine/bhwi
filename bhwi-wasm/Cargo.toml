@@ -12,19 +12,20 @@ description = "development kit"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-async-trait = "0.1"
-bitcoin = { version = "0.32", features = ["secp-lowmemory"] }
-bhwi = { path = "../bhwi", version = "0.0.1"}
-bhwi-async = { path = "../bhwi-async", version = "0.0.1"}
+async-trait.workspace = true
+bitcoin = { workspace = true, features = ["secp-lowmemory"] }
+bhwi.workspace = true
+bhwi-async.workspace = true
+futures.workspace = true
+log.workspace = true
+
 console_log = "0.2"
 console_error_panic_hook = "0.1.7"
-futures = "0.3"
 js-sys = "0.3.70"
-log = "0.4"
-getrandom = { version = "=0.2.16", features = ["js"]}
+getrandom = { version = "=0.2.16", features = ["js"] }
 rand_core = { version = "0.6" }
 wasm-bindgen = { version = "0.2.93" }
-wasm-bindgen-futures = { version ="0.4.43" }
+wasm-bindgen-futures = { version = "=0.4.43" }
 web-sys = { version = "0.3.77", features = [
     "Headers",
     "Request",
