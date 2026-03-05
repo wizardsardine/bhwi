@@ -1,5 +1,6 @@
-pub mod coldcard_hid;
-pub mod ledger_hid;
+pub mod coldcard;
+pub mod jade;
+pub mod ledger;
 
 use async_trait::async_trait;
 

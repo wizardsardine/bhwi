@@ -26,7 +26,7 @@ pip install --require-hashes -r requirements.txt
 
 podman build -t jade_pinserver
 mkdir pinsdir
-podman run -v $PWD/test_keys/server_private_key.key:/server_private_key.key -v $PWD/pinsdir:/pins -p 8096:8096 jade_pinserver
+podman run --rm -v $PWD/test_keys/server_private_key.key:/server_private_key.key -v $PWD/pinsdir:/pins -p 8096:8096 jade_pinserver
 ```
 
 ## Device Preparation for e2e/jade

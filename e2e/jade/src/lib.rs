@@ -1,51 +1,30 @@
 use async_trait::async_trait;
-use bhwi_async::{HttpClient, Jade, Transport};
-use reqwest::Client;
-use serde_cbor::Value;
+use bhwi_async::transport::jade::tcp::{TcpClient, TcpTransport};
+use bhwi_async::{HttpClient, Jade};
+use reqwest::Client as ReqwestClient;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub type JadeDevice = Jade<TcpClient, PinServerClient>;
+pub type JadeDevice = Jade<TcpTransport<Client>, PinServerClient>;
 
-pub struct TcpClient {
+pub struct Client {
     stream: TcpStream,
 }
 
 #[async_trait(?Send)]
-impl Transport for TcpClient {
+impl TcpClient for Client {
     type Error = anyhow::Error;
 
-    async fn exchange(&mut self, command: &[u8], _encrypted: bool) -> Result<Vec<u8>, Self::Error> {
-        self.stream.write_all(command).await?;
-
-        let mut buf = Vec::new();
-        let mut temp = [0u8; 1024];
-
-        // HACK: i don't know a better way right now!
-        loop {
-            let n = self.stream.read(&mut temp).await?;
-            if n == 0 {
-                panic!("connection closed");
-            }
-            buf.extend_from_slice(&temp[..n]);
-            let mut cursor = std::io::Cursor::new(&buf);
-            match serde_cbor::from_reader::<Value, _>(&mut cursor) {
-                Ok(_) => {
-                    return Ok(buf);
-                }
-                Err(e) if e.is_io() => {
-                    continue; // read more bytes
-                }
-                Err(e) => {
-                    return Err(e.into());
-                }
-            }
-        }
+    async fn write_all(&mut self, command: &[u8]) -> Result<(), Self::Error> {
+        Ok(self.stream.write_all(command).await?)
+    }
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        Ok(self.stream.read(buf).await?)
     }
 }
 
 pub struct PinServerClient {
-    inner: Client,
+    inner: ReqwestClient,
 }
 
 #[async_trait(?Send)]
@@ -77,11 +56,11 @@ mod tests {
     async fn device() -> JadeDevice {
         let mut dev = JadeDevice::new(
             Network::Testnet,
-            TcpClient {
+            TcpTransport::new(Client {
                 stream: TcpStream::connect("localhost:30121").await.unwrap(),
-            },
+            }),
             PinServerClient {
-                inner: Client::new(),
+                inner: ReqwestClient::new(),
             },
         );
         dev.unlock(Network::Testnet).await.expect("jade auth");

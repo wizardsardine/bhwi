@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bhwi_async::Transport;
 use bhwi_async::coldcard::Coldcard;
 use bhwi_async::transport::Channel;
-use bhwi_async::transport::coldcard_hid::ColdcardTransportHID;
+use bhwi_async::transport::coldcard::hid::ColdcardTransportHID;
 use tokio::net::UnixDatagram;
 
 const CLIENT_SOCKET: &str = "/tmp/rust-ckcc-client.sock";

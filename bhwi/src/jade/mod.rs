@@ -176,7 +176,6 @@ where
                 let res: api::AuthUserResponse = from_response(&data)?.into_result()?;
                 match res {
                     api::AuthUserResponse::PinServerRequired { http_request } => {
-                        dbg!("pin req");
                         self.state = State::WaitingPinServer;
                         let url = match &http_request.params.urls {
                             api::PinServerUrls::Array(urls) => urls.first().ok_or(
@@ -234,9 +233,8 @@ where
             }
             State::Running(JadeCommand::SignMessage { .. }) => {
                 let s: String = from_response(&data)?.into_result()?;
-                let mut sig_bytes = vec![];
-                Base64::decode(&s, &mut sig_bytes)
-                    .map_err(|e| JadeError::Serialization(e.to_string()))?;
+                let sig_bytes =
+                    Base64::decode_vec(&s).map_err(|e| JadeError::Serialization(e.to_string()))?;
                 let sig = Signature::from_compact(&sig_bytes[1..])
                     .map_err(|e| JadeError::Serialization(e.to_string()))?;
                 self.response = Some(JadeResponse::Signature(sig_bytes[0], sig));

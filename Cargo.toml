@@ -9,7 +9,7 @@ default-members = ["bhwi", "bhwi-async", "bhwi-cli"]
 aes = "0.8.3"
 anyhow = "1"
 async-trait = "0.1"
-base64ct = "1.7.3"
+base64ct = "1.8.3"
 bitcoin = "0.32.2"
 bhwi = { path = "./bhwi", version = "0.0.1" }
 bhwi-async = { path = "./bhwi-async", version = "0.0.1" }

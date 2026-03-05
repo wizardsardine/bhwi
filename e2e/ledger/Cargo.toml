@@ -7,7 +7,7 @@ edition = "2024"
 anyhow.workspace = true
 async-trait.workspace = true
 base64ct = { workspace = true, features = ["alloc"] }
-bhwi-async.workspace = true
+bhwi-async = { workspace = true, features = ["emulators"] }
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

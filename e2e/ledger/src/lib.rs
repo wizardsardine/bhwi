@@ -1,108 +1,69 @@
-use std::fmt::Display;
-
-use anyhow::Result;
 use async_trait::async_trait;
-use bhwi_async::{Ledger, Transport};
+use bhwi_async::{
+    Ledger,
+    transport::ledger::speculos::{SpeculosClient, SpeculosTransport},
+};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{Serialize, de::DeserializeOwned};
 
-pub type SpeculosDevice = Ledger<SpeculosClient>;
+pub type SpeculosDevice = Ledger<SpeculosTransport<SpeculosReqwestClient>>;
 
-pub struct SpeculosClient {
+pub struct SpeculosReqwestClient {
     endpoint: String,
     inner: Client,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum Button {
-    Left,
-    Right,
-    Both,
-}
-
-impl Display for Button {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Button::Left => "left",
-                Button::Right => "right",
-                Button::Both => "both",
-            }
-        )
-    }
-}
-
-#[derive(Serialize)]
-struct ButtonRequest {
-    action: String,
-}
-
-impl SpeculosClient {
-    pub fn new(endpoint: &str) -> SpeculosClient {
-        SpeculosClient {
-            endpoint: endpoint.into(),
+impl SpeculosReqwestClient {
+    pub fn new(url: &str) -> SpeculosReqwestClient {
+        SpeculosReqwestClient {
+            endpoint: url.into(),
             inner: Client::new(),
         }
     }
-
-    pub async fn button_press(&self, button: Button) -> Result<()> {
-        self.inner
-            .post(format!("{}/button/{button}", self.endpoint))
-            .json(&ButtonRequest {
-                action: "press-and-release".into(),
-            })
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-
-    pub async fn set_automation(&self, automation_json: Value) -> Result<()> {
-        self.inner
-            .post(format!("{}/automation", self.endpoint))
-            .json(&automation_json)
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-}
-
-impl Default for SpeculosClient {
-    fn default() -> SpeculosClient {
-        SpeculosClient::new("http://localhost:5000")
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Apdu {
-    /// hex encoded apdu data
-    data: String,
 }
 
 #[async_trait(?Send)]
-impl Transport for SpeculosClient {
+impl SpeculosClient for SpeculosReqwestClient {
     type Error = anyhow::Error;
 
-    async fn exchange(
-        &mut self,
-        apdu_command: &[u8],
-        _encrypted: bool,
-    ) -> Result<Vec<u8>, Self::Error> {
-        let Apdu { data } = self
-            .inner
-            .post(format!("{}/apdu", self.endpoint))
-            .json(&Apdu {
-                data: hex::encode(apdu_command),
-            })
+    fn url(&self) -> &str {
+        &self.endpoint
+    }
+
+    async fn post<Req: Serialize>(
+        &self,
+        endpoint: &str,
+        req: Req,
+    ) -> std::result::Result<(), Self::Error> {
+        self.inner
+            .post(endpoint)
+            .json(&req)
             .send()
             .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    async fn post_json<Req: Serialize, Res: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        req: Req,
+    ) -> std::result::Result<Res, Self::Error> {
+        Ok(self
+            .inner
+            .post(endpoint)
+            .json(&req)
+            .send()
+            .await?
+            .error_for_status()?
             .json()
-            .await?;
-        Ok(hex::decode(data)?)
+            .await?)
+    }
+}
+
+impl Default for SpeculosReqwestClient {
+    fn default() -> SpeculosReqwestClient {
+        SpeculosReqwestClient::new("http://localhost:5000")
     }
 }
 
@@ -110,11 +71,12 @@ impl Transport for SpeculosClient {
 mod tests {
     use base64ct::Encoding;
     use bhwi_async::HWI;
+    use serde_json::Value;
 
     use super::*;
 
     async fn init_device() -> SpeculosDevice {
-        SpeculosDevice::new(SpeculosClient::default())
+        SpeculosDevice::new(SpeculosTransport::new(SpeculosReqwestClient::default()))
     }
 
     #[tokio::test]
@@ -147,8 +109,10 @@ mod tests {
         let msg = b"hello";
 
         dev.transport
+            .client
             .set_automation(
-                serde_json::from_str(include_str!("../automations/sign_message.json")).unwrap(),
+                &serde_json::from_str::<Value>(include_str!("../automations/sign_message.json"))
+                    .unwrap(),
             )
             .await
             .unwrap();
@@ -165,9 +129,12 @@ mod tests {
         );
 
         dev.transport
+            .client
             .set_automation(
-                serde_json::from_str(include_str!("../automations/sign_message_reject.json"))
-                    .unwrap(),
+                &serde_json::from_str::<Value>(include_str!(
+                    "../automations/sign_message_reject.json"
+                ))
+                .unwrap(),
             )
             .await
             .unwrap();
