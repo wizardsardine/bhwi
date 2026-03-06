@@ -83,3 +83,5 @@ where
 }
 
 ```
+
+Check [docs/VISION.md](docs/VISION.md) to have a better explanation of the thought process leading to **BHWI**.
