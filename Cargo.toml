@@ -1,14 +1,24 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
-    "bhwi", "bhwi-async", "bhwi-wasm", "bhwi-cli"
+    "bhwi", "bhwi-async", "bhwi-wasm", "bhwi-cli", "e2e/*"
 ]
 default-members = ["bhwi", "bhwi-async", "bhwi-cli"]
 
 [workspace.dependencies]
+aes = "0.8.3"
+anyhow = "1"
 async-trait = "0.1"
+base64ct = "1.8.3"
 bitcoin = "0.32.2"
 bhwi = { path = "./bhwi", version = "0.0.1" }
 bhwi-async = { path = "./bhwi-async", version = "0.0.1" }
 futures = "0.3"
+hex = "0.4.3"
 log = "0.4"
+rand_core = "0.6.4"
+reqwest = "0.13.2"
+serde = "1.0.228"
+serde_json = "1.0.149"
+serde_cbor = "0.11.2"
+tokio = "1.0"

@@ -1,0 +1,15 @@
+[package]
+name = "bhwi-e2e-ledger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64ct = { workspace = true, features = ["alloc"] }
+bhwi-async = { workspace = true, features = ["emulators"] }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+reqwest = { workspace = true, features = ["json"] }

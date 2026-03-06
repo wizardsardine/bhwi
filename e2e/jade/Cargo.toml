@@ -1,0 +1,14 @@
+[package]
+name = "bhwi-e2e-jade"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64ct = { workspace = true, features = ["alloc"] }
+bhwi-async = { workspace = true, features = ["emulators"] }
+bitcoin.workspace = true
+reqwest.workspace = true
+serde_cbor.workspace = true
+tokio = { workspace = true, features = ["macros"] }

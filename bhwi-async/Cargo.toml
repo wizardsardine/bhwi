@@ -8,12 +8,20 @@ license-file = "../LICENSE"
 keywords = ["bitcoin",  "miniscript"]
 description = "development kit"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# See more keys and their definitions at
+# https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = []
+emulators = ["hex", "serde", "serde_cbor", "serde_json"]
 
 [dependencies]
 async-trait.workspace = true
 bhwi.workspace = true
 futures.workspace = true
-log.workspace = true
+hex = { workspace = true, optional = true}
+serde = { workspace = true, optional = true}
+serde_cbor = { workspace = true, optional = true}
+serde_json = { workspace = true, optional = true}
 
 byteorder = "1.5"

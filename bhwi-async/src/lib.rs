@@ -11,6 +11,7 @@ use bhwi::{
     bitcoin::{
         Network,
         bip32::{DerivationPath, Fingerprint, Xpub},
+        secp256k1::ecdsa::Signature,
     },
     common,
 };
@@ -39,6 +40,11 @@ pub trait HWI {
         path: DerivationPath,
         display: bool,
     ) -> Result<Xpub, Self::Error>;
+    async fn sign_message(
+        &mut self,
+        message: &[u8],
+        path: DerivationPath,
+    ) -> Result<(u8, Signature), Self::Error>;
 }
 
 #[derive(Debug)]
@@ -94,6 +100,26 @@ where
             run_command(self, common::Command::GetXpub { path, display }).await?
         {
             Ok(xpub)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
+
+    async fn sign_message(
+        &mut self,
+        message: &[u8],
+        path: DerivationPath,
+    ) -> Result<(u8, Signature), Self::Error> {
+        if let common::Response::Signature(header, signature) = run_command(
+            self,
+            common::Command::SignMessage {
+                message: message.to_vec(),
+                path,
+            },
+        )
+        .await?
+        {
+            Ok((header, signature))
         } else {
             Err(common::Error::NoErrorOrResult.into())
         }
