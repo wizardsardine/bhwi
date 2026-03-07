@@ -15,11 +15,11 @@ jobs:
             components: rustfmt, clippy
             override: true
       - name: rustfmt
-        run: cargo fmt -- --check
+        run: cargo fmt --all --check
       - name: clippy
         # TODO: remove -A dead_code when crates are more developed
         run: |
-          cargo clippy --all-features --all-targets -- -A dead_code -D warnings
+          cargo clippy --all --all-features --all-targets -- -A dead_code -D warnings
 
   unit_tests:
     needs: linter
@@ -51,4 +51,4 @@ jobs:
       - name: Test on Rust ${{ matrix.toolchain }} (non Windows)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo test --verbose --color always -- --nocapture
+          cargo test --all --exclude "bhwi-e2e-*" --verbose --color always -- --nocapture

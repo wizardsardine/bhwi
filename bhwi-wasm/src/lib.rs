@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use bhwi_async::{
     HWI as AsyncHWI, Jade, Ledger,
     coldcard::Coldcard,
-    transport::coldcard_hid::{COLDCARD_VID, ColdcardTransportHID},
-    transport::ledger_hid::{LEDGER_VID, LedgerTransportHID},
+    transport::coldcard::hid::{COLDCARD_VID, ColdcardTransportHID},
+    transport::ledger::hid::{LEDGER_VID, LedgerTransportHID},
 };
 use bitcoin::{Network, bip32::DerivationPath};
 use log::Level;
