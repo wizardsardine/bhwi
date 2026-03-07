@@ -94,12 +94,12 @@ impl WebHidDevice {
                     && disconnected_device.product_id() == device_clone.borrow().product_id()
                 {
                     let on_close_cb_clone = on_close_cb_clone.borrow();
-                    if !on_close_cb_clone.is_undefined() && !on_close_cb_clone.is_null() {
-                        if let Ok(cb) = <wasm_bindgen::JsValue as Clone>::clone(&on_close_cb_clone)
+                    if !on_close_cb_clone.is_undefined()
+                        && !on_close_cb_clone.is_null()
+                        && let Ok(cb) = <wasm_bindgen::JsValue as Clone>::clone(&on_close_cb_clone)
                             .dyn_into::<js_sys::Function>()
-                        {
-                            cb.call0(&JsValue::NULL).unwrap();
-                        }
+                    {
+                        cb.call0(&JsValue::NULL).unwrap();
                     }
                 }
             }) as Box<dyn FnMut(_)>)
@@ -153,10 +153,11 @@ impl WebHidDevice {
             close_future.await.unwrap();
 
             // Check if `on_close_cb` is a valid function and call it
-            if !on_close_cb.is_undefined() && !on_close_cb.is_null() {
-                if let Ok(cb) = on_close_cb.dyn_into::<js_sys::Function>() {
-                    cb.call0(&JsValue::NULL).unwrap();
-                }
+            if !on_close_cb.is_undefined()
+                && !on_close_cb.is_null()
+                && let Ok(cb) = on_close_cb.dyn_into::<js_sys::Function>()
+            {
+                cb.call0(&JsValue::NULL).unwrap();
             }
         });
     }

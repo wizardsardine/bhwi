@@ -87,6 +87,7 @@ impl<'a> AsMut<dyn HWI + 'a> for Device {
     }
 }
 
+#[derive(Default)]
 #[wasm_bindgen]
 pub struct Client {
     device: Option<Device>,
