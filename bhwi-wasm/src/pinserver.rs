@@ -5,11 +5,13 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
 
+use crate::WasmError;
+
 pub struct PinServer;
 
 #[async_trait(?Send)]
 impl HttpClient for PinServer {
-    type Error = JsValue;
+    type Error = WasmError;
     async fn request(&self, url: &str, body: &[u8]) -> Result<Vec<u8>, Self::Error> {
         // Set up request parameters
         let opts = RequestInit::new();
@@ -35,7 +37,7 @@ impl HttpClient for PinServer {
 
         // Ensure the response is OK
         if !resp.ok() {
-            return Err(JsValue::from_str("Network error or non-OK response"));
+            return Err(JsValue::from_str("Network error or non-OK response").into());
         }
 
         // Parse the response as an array buffer and convert to Vec<u8>

@@ -6,11 +6,10 @@ pub mod webserial;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
-    HWI as AsyncHWI, Jade, Ledger,
-    coldcard::Coldcard,
-    transport::coldcard::hid::{COLDCARD_VID, ColdcardTransportHID},
-    transport::ledger::hid::{LEDGER_VID, LedgerTransportHID},
+    HWI as AsyncHWI, Jade, Ledger, coldcard::Coldcard,
+    transport::coldcard::hid::ColdcardTransportHID, transport::ledger::hid::LedgerTransportHID,
 };
 use bitcoin::{Network, bip32::DerivationPath};
 use log::Level;
@@ -102,9 +101,10 @@ impl Client {
 
     #[wasm_bindgen]
     pub async fn connect_coldcard(&mut self, on_close_cb: JsValue) -> Result<(), JsValue> {
-        let device = WebHidDevice::get_webhid_device("Coldcard", COLDCARD_VID, None, on_close_cb)
-            .await
-            .ok_or(JsValue::from_str("Failed to connect to coldcard"))?;
+        let device =
+            WebHidDevice::get_webhid_device("Coldcard", COLDCARD_DEVICE_ID.vid, None, on_close_cb)
+                .await
+                .ok_or(JsValue::from_str("Failed to connect to coldcard"))?;
         let mut rng = rand_core::OsRng;
         self.device = Some(Device::Coldcard(Coldcard::new(
             ColdcardTransportHID::new(device),
@@ -115,9 +115,10 @@ impl Client {
 
     #[wasm_bindgen]
     pub async fn connect_ledger(&mut self, on_close_cb: JsValue) -> Result<(), JsValue> {
-        let device = WebHidDevice::get_webhid_device("Ledger", LEDGER_VID, None, on_close_cb)
-            .await
-            .ok_or(JsValue::from_str("Failed to connect to ledger"))?;
+        let device =
+            WebHidDevice::get_webhid_device("Ledger", LEDGER_DEVICE_ID.vid, None, on_close_cb)
+                .await
+                .ok_or(JsValue::from_str("Failed to connect to ledger"))?;
         self.device = Some(Device::Ledger(Ledger::new(LedgerTransportHID::new(device))));
         Ok(())
     }
@@ -162,5 +163,15 @@ impl Client {
             Some(d) => d.as_mut().get_xpub(path, display).await,
             None => Err(JsValue::from_str("Device not connected")),
         }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("WASM error: {0}")]
+pub struct WasmError(String);
+
+impl From<JsValue> for WasmError {
+    fn from(value: JsValue) -> Self {
+        Self(value.as_string().unwrap_or_else(|| format!("{:?}", value)))
     }
 }

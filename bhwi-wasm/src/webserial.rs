@@ -9,6 +9,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{ReadableStreamDefaultReader, SerialOptions, SerialPort, SerialPortRequestOptions};
 
+use crate::WasmError;
+
 #[wasm_bindgen]
 pub struct WebSerialDevice {
     port: SerialPort,
@@ -195,7 +197,7 @@ impl WebSerialDevice {
 
 #[async_trait(?Send)]
 impl Transport for WebSerialDevice {
-    type Error = JsValue;
+    type Error = WasmError;
     async fn exchange(&mut self, command: &[u8], _encrypted: bool) -> Result<Vec<u8>, Self::Error> {
         self.write(command).await?;
         Ok(self.read().await.unwrap())

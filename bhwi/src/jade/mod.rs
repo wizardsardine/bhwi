@@ -12,9 +12,19 @@ use serde::de::DeserializeOwned;
 
 use crate::Interpreter;
 use crate::common::{Command, Error, Recipient, Response, Transmit};
+use crate::device::DeviceId;
 
 pub const JADE_NETWORK_MAINNET: &str = "mainnet";
 pub const JADE_NETWORK_TESTNET: &str = "testnet";
+
+pub const JADE_DEVICE_IDS: [DeviceId; 6] = [
+    DeviceId::new(0x10c4).with_pid(0xea60),
+    DeviceId::new(0x1a86).with_pid(0x55d4),
+    DeviceId::new(0x0403).with_pid(0x6001),
+    DeviceId::new(0x1a86).with_pid(0x7523),
+    DeviceId::new(0x303a).with_pid(0x4001),
+    DeviceId::new(0x303a).with_pid(0x1001),
+];
 
 #[derive(Debug)]
 pub enum JadeError {
@@ -160,7 +170,7 @@ where
                 "sign_message",
                 Some(api::SignMessageParams {
                     path: path.to_u32_vec(),
-                    message: str::from_utf8(message)
+                    message: &String::from_utf8(message.to_vec())
                         .map_err(|e| JadeError::Serialization(e.to_string()))?,
                 }),
             ),

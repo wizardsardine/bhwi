@@ -12,3 +12,5 @@ bitcoin.workspace = true
 reqwest.workspace = true
 serde_cbor.workspace = true
 tokio = { workspace = true, features = ["macros"] }
+
+bhwi-cli = { path = "../../bhwi-cli" }

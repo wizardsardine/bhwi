@@ -13,9 +13,19 @@ name = "bhwi"
 path = "src/bin/bhwi.rs"
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
 bitcoin.workspace = true
-bhwi-async.workspace = true
-hex.workspace = true
+bhwi-async = { workspace = true, features = ["emulators"] }
+futures.workspace = true
+hex = { workspace = true, features = ["serde"] }
+rand_core.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync"] }
 
+async-hid = "0.5.0"
 clap = { version = "4.4.7", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
+tokio-serial = "5.4.5"

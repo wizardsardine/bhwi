@@ -11,3 +11,5 @@ base64ct = { workspace = true, features = ["alloc"] }
 bhwi-async.workspace = true
 rand_core.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+
+bhwi-cli = { path = "../../bhwi-cli" }

@@ -3,7 +3,7 @@
 ## Installation
 
 Follow instructions [here](https://github.com/Coldcard/firmware/blob/master/README.md) to build
-and simulate a coldcard device.
+and emulate a coldcard device.
 
 ### Caveat
 
@@ -81,6 +81,5 @@ podman run --rm -it \
        -v /tmp/.X11-unix:/tmp/.X11-unix \
        -v $PWD/microSD:/build/firmware/unix/work/MicroSD \
        -e DISPLAY=unix$DISPLAY \
-       -p 9999:9999 \
        coldcard-simulator
 ```

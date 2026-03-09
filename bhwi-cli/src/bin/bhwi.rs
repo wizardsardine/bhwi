@@ -1,10 +1,11 @@
-use bhwi_cli::{Error, get_device_with_fingerprint, list};
+use anyhow::Result;
+use bhwi_cli::{DeviceManager, config::Config};
 
 use bitcoin::{
     Network,
     bip32::{DerivationPath, Fingerprint},
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -16,11 +17,25 @@ struct Args {
     #[arg(long, alias = "fg", value_parser = clap::value_parser!(bitcoin::bip32::Fingerprint))]
     fingerprint: Option<Fingerprint>,
     /// default will be the Bitcoin mainnet network.
-    #[arg(long, value_parser = clap::value_parser!(bitcoin::Network), default_value_t = bitcoin::Network::Bitcoin)]
+    #[arg(long, short, value_parser = clap::value_parser!(bitcoin::Network), default_value_t = bitcoin::Network::Bitcoin)]
     network: Network,
 }
 
-#[derive(Debug, Subcommand)]
+impl From<Args> for Config {
+    fn from(args: Args) -> Self {
+        let Args {
+            network,
+            fingerprint,
+            ..
+        } = args;
+        Self {
+            network,
+            fingerprint,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
 enum Commands {
     #[command(subcommand)]
     Device(DeviceCommands),
@@ -28,32 +43,61 @@ enum Commands {
     Xpub(XpubCommands),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Copy, Subcommand)]
 enum DeviceCommands {
-    List,
+    /// List all available devices
+    #[command(alias = "enumerate")]
+    List {
+        #[arg(long, short)]
+        format: Option<ListFormat>,
+    },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum XpubCommands {
     Get {
-        #[arg(long, value_parser = clap::value_parser!(bitcoin::bip32::DerivationPath))]
+        #[arg(value_parser = clap::value_parser!(bitcoin::bip32::DerivationPath))]
         path: DerivationPath,
     },
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ListFormat {
+    Pretty,
+    Json,
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<()> {
     let args = Args::parse();
-    match args.command {
-        Commands::Device(DeviceCommands::List) => {
-            for mut device in list(args.network).await? {
-                eprint!("{}", device.get_master_fingerprint().await?);
+    let command = args.command.to_owned();
+    let config: Config = args.into();
+    let dev_man = DeviceManager::new(config);
+    match command {
+        Commands::Device(DeviceCommands::List { format }) => {
+            let devices = dev_man.enumerate().await?;
+            for (i, mut device) in devices.into_iter().enumerate() {
+                device.device().unlock(dev_man.config.network).await?;
+                let fingerprint = device.fingerprint().await?;
+                let name = device.name();
+                let is_emulated = device.is_emulated();
+                match format {
+                    Some(ListFormat::Pretty) => {
+                        if i == 0 {
+                            println!("{:<18} | {:<8} | {:<15}", "Name", "Emulated", "Fingerprint");
+                        }
+                        println!("{}", "-".repeat(55));
+                        println!("{name:<18} | {is_emulated:<8} | {fingerprint:<15}");
+                        println!("{}", "-".repeat(55));
+                    }
+                    Some(ListFormat::Json) => println!("{}", serde_json::to_string(&device)?),
+                    None => println!("{fingerprint}"),
+                }
             }
         }
         Commands::Xpub(XpubCommands::Get { path }) => {
-            if let Some(mut d) = get_device_with_fingerprint(args.network, args.fingerprint).await?
-            {
-                eprintln!("{}", d.get_extended_pubkey(path, false).await?);
+            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+                println!("{}", d.device().get_extended_pubkey(path, false).await?);
             }
         }
     }

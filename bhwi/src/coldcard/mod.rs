@@ -9,16 +9,31 @@ use bitcoin::secp256k1::ecdsa::Signature;
 use crate::Interpreter;
 use crate::coldcard::api::response::ResponseMessage;
 use crate::common::{Command, Error, Recipient, Response, Transmit};
+use crate::device::DeviceId;
 
-#[derive(Debug)]
+pub const DEFAULT_CKCC_SOCKET: &str = "/tmp/ckcc-simulator.sock";
+pub const COLDCARD_DEVICE_ID: DeviceId = DeviceId::new(0xd13e)
+    .with_pid(0xcc10)
+    .with_emulator_path(DEFAULT_CKCC_SOCKET);
+
+#[derive(Debug, thiserror::Error)]
 pub enum ColdcardError {
     /// Encryption error
+    #[error("encryption error: {0}")]
     Encryption(&'static str),
+
+    #[error("missing command info: {0}")]
     MissingCommandInfo(&'static str),
+
+    #[error("no error or result returned")]
     NoErrorOrResult,
+
     /// Serialization error
+    #[error("serialization error: {0}")]
     Serialization(String),
+
     /// Unexpected response message from device
+    #[error("unexpected response message: got {got:?}, expected {expected:?}")]
     UnexpectedResponseMessage {
         got: ResponseMessage,
         expected: Vec<ResponseMessage>,

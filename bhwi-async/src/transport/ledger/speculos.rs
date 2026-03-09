@@ -1,109 +1,51 @@
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 
 use async_trait::async_trait;
-use hex::FromHexError;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::Transport;
+use crate::{Transport, transport::Channel};
 
-pub struct SpeculosTransport<C> {
-    pub client: C,
+pub struct LedgerTransportTcp<C: Channel> {
+    channel: C,
 }
 
-impl<C> SpeculosTransport<C> {
-    pub fn new(client: C) -> Self {
-        Self { client }
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum LedgerTcpError {
+    #[error("ledger io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("ledger invalid response")]
+    InvalidResponse,
 }
 
-#[derive(Serialize, Deserialize)]
-/// Apdu response from speculos emulator
-pub struct Apdu {
-    /// hex encoded apdu data
-    data: String,
-}
-
-#[async_trait(?Send)]
-pub trait SpeculosClient {
-    type Error: Debug + From<FromHexError>;
-
-    /// The endpoint that the speculos emulator is listening on.
-    /// Ex. "localhost:5000"
-    fn url(&self) -> &str;
-
-    async fn post<Req: Serialize>(&self, endpoint: &str, json_req: Req) -> Result<(), Self::Error>;
-
-    async fn post_json<Req: Serialize, Res: DeserializeOwned>(
-        &self,
-        endpoint: &str,
-        json_req: Req,
-    ) -> Result<Res, Self::Error>;
-
-    async fn button_press(&self, button: Button) -> Result<(), Self::Error> {
-        Self::post(
-            self,
-            &format!("{}/button/{button}", Self::url(self)),
-            &ButtonRequest {
-                action: "press-and-release".into(),
-            },
-        )
-        .await
-    }
-
-    async fn set_automation<T: Serialize>(&self, automation_json: &T) -> Result<(), Self::Error> {
-        Self::post(
-            self,
-            &format!("{}/automation", Self::url(self)),
-            automation_json,
-        )
-        .await
+impl<C: Channel> LedgerTransportTcp<C> {
+    pub fn new(channel: C) -> Self {
+        Self { channel }
     }
 }
 
 #[async_trait(?Send)]
-impl<C: SpeculosClient> Transport for SpeculosTransport<C> {
-    type Error = <C as SpeculosClient>::Error;
+impl<C: Channel> Transport for LedgerTransportTcp<C> {
+    type Error = LedgerTcpError;
 
     async fn exchange(
         &mut self,
         apdu_command: &[u8],
         _encrypted: bool,
     ) -> Result<Vec<u8>, Self::Error> {
-        let Apdu { data } = self
-            .client
-            .post_json(
-                &format!("{}/apdu", self.client.url()),
-                &Apdu {
-                    data: hex::encode(apdu_command),
-                },
-            )
-            .await?;
-        Ok(hex::decode(data)?)
+        let mut tx = Vec::with_capacity(4 + apdu_command.len());
+        tx.extend_from_slice(&(apdu_command.len() as u32).to_be_bytes());
+        tx.extend_from_slice(apdu_command);
+
+        self.channel.send(&tx).await?;
+
+        let mut len_buf = [0u8; 4];
+        self.channel.receive(&mut len_buf).await?;
+
+        let resp_len = u32::from_be_bytes(len_buf) as usize;
+
+        let mut resp = vec![0u8; resp_len + 2];
+        self.channel.receive(&mut resp).await?;
+
+        Ok(resp)
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Button {
-    Left,
-    Right,
-    Both,
-}
-
-impl Display for Button {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Button::Left => "left",
-                Button::Right => "right",
-                Button::Both => "both",
-            }
-        )
-    }
-}
-
-#[derive(Serialize)]
-struct ButtonRequest {
-    action: String,
 }
