@@ -44,16 +44,30 @@ pub struct Transmit {
     pub encrypted: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("encryption error: {0}")]
     Encryption(&'static str),
+
+    #[error("no error or result returned")]
     NoErrorOrResult,
+
+    #[error("missing command info: {0}")]
     MissingCommandInfo(&'static str),
+
+    #[error("unexpected result: {0:x?}")]
     UnexpectedResult(Vec<u8>),
-    // Generic RPC/communication errors
-    Rpc(i32, Option<String>), // (code, message)
+
+    #[error("rpc error {0}: {1:?}")]
+    Rpc(i32, Option<String>),
+
+    #[error("serialization error: {0}")]
     Serialization(String),
+
+    #[error("request error: {0}")]
     Request(&'static str),
+
+    #[error("authentication refused")]
     AuthenticationRefused,
 }
 

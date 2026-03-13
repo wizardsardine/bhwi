@@ -1,58 +1,17 @@
-use std::sync::Arc;
-
 use anyhow::Result;
-use async_trait::async_trait;
 use bhwi_async::Transport;
 use bhwi_async::coldcard::Coldcard;
-use bhwi_async::transport::Channel;
 use bhwi_async::transport::coldcard::hid::ColdcardTransportHID;
-use tokio::net::UnixDatagram;
+use bhwi_cli::coldcard::emulator::EmulatorClient;
 
-const CLIENT_SOCKET: &str = "/tmp/rust-ckcc-client.sock";
-
-pub type ColdcardDevice = Coldcard<ColdcardTransportHID<SimulatorClient>>;
-
-#[derive(Clone)]
-pub struct SimulatorClient {
-    /// the ckcc simulator socket (used for ckcc cli too)
-    socket: Arc<UnixDatagram>,
-}
-
-impl SimulatorClient {
-    pub async fn new(socket_path: &str) -> Self {
-        let _ = std::fs::remove_file(CLIENT_SOCKET);
-        let socket = UnixDatagram::bind(CLIENT_SOCKET).expect("unbound socket");
-        socket
-            .connect(socket_path)
-            .expect("couldn't connect to socket");
-        Self {
-            socket: Arc::new(socket),
-        }
-    }
-
-    pub async fn default() -> Self {
-        Self::new("/tmp/ckcc-simulator.sock").await
-    }
-}
-
-#[async_trait(?Send)]
-impl Channel for SimulatorClient {
-    async fn send(&self, data: &[u8]) -> Result<usize, std::io::Error> {
-        self.socket.send(data).await?;
-        Ok(data.len())
-    }
-
-    async fn receive(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error> {
-        Ok(self.socket.recv(data).await?)
-    }
-}
+pub type ColdcardDevice = Coldcard<ColdcardTransportHID<EmulatorClient>>;
 
 pub struct DeviceControl {
-    client: ColdcardTransportHID<SimulatorClient>,
+    client: ColdcardTransportHID<EmulatorClient>,
 }
 
 impl DeviceControl {
-    pub fn new(client: SimulatorClient) -> Self {
+    pub fn new(client: EmulatorClient) -> Self {
         Self {
             client: ColdcardTransportHID::new(client),
         }
@@ -70,14 +29,14 @@ impl DeviceControl {
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64, Encoding};
-    use bhwi_async::HWI;
+    use bhwi_async::{HWI, transport::coldcard::DEFAULT_CKCC_SOCKET};
     use bitcoin::Network;
 
     use super::*;
 
     async fn device() -> (ColdcardDevice, DeviceControl) {
         let mut rng = rand_core::OsRng;
-        let client = SimulatorClient::default().await;
+        let client = EmulatorClient::new(DEFAULT_CKCC_SOCKET).await.unwrap();
         let mut dev = ColdcardDevice::new(ColdcardTransportHID::new(client.clone()), &mut rng);
         let control = DeviceControl::new(client);
         dev.unlock(Network::Testnet).await.expect("can't unlock");
@@ -105,7 +64,7 @@ mod tests {
     }
 
     // NOTE: this can be unstable if you repeat it quickly. It seems that the
-    // simulator along with the simulated device input sharing the same socket
+    // emulator along with the emulated device input sharing the same socket
     // can interfere and sometimes return junk data.
     #[tokio::test]
     async fn can_sign_message() {

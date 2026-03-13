@@ -2,6 +2,7 @@ pub use bitcoin;
 
 pub mod coldcard;
 pub mod common;
+pub mod device;
 pub mod jade;
 pub mod ledger;
 

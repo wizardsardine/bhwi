@@ -296,13 +296,26 @@ pub fn get_merkleized_map_commitment(mapping: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> 
     commitment
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("empty input")]
     EmptyInput,
+
+    #[error("unknown command: {0}")]
     UnknownCommand(u8),
+
+    #[error("unsupported request: {0}")]
     UnsupportedRequest(u8),
+
+    #[error("invalid index or size")]
     InvalidIndexOrSize,
+
+    #[error("unknown hash")]
     UnknownHash,
+
+    #[error("unknown merkle root")]
     UnknownMerkleRoot,
+
+    #[error("unexpected queue state")]
     UnexpectedQueue,
 }

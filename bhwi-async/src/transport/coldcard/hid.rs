@@ -1,20 +1,18 @@
 use crate::{Transport, transport::Channel};
 use async_trait::async_trait;
 
-pub const COLDCARD_VID: u16 = 0xd13e;
+pub use bhwi::coldcard::COLDCARD_DEVICE_ID;
+
 const COLDCARD_PACKET_WRITE_SIZE: usize = 63;
 const COLDCARD_PACKET_READ_SIZE: usize = 64;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ColdcardHIDError {
+    #[error("communication error: {0}")]
     Comm(&'static str),
-    Hid(std::io::Error),
-}
 
-impl From<std::io::Error> for ColdcardHIDError {
-    fn from(value: std::io::Error) -> Self {
-        ColdcardHIDError::Hid(value)
-    }
+    #[error("HID IO error")]
+    Hid(#[from] std::io::Error),
 }
 
 pub struct ColdcardTransportHID<C> {

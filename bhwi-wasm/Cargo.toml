@@ -19,6 +19,7 @@ bhwi-async.workspace = true
 futures.workspace = true
 log.workspace = true
 rand_core.workspace = true
+thiserror.workspace = true
 
 console_log = "0.2"
 console_error_panic_hook = "0.1.7"

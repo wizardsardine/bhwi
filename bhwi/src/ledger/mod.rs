@@ -18,28 +18,34 @@ pub use wallet::{WalletPolicy, WalletPubKey};
 
 use crate::Interpreter;
 use crate::common::{Command, Error, Response};
+use crate::device::DeviceId;
 
-#[derive(Debug)]
+pub const LEDGER_DEVICE_ID: DeviceId = DeviceId::new(0x2c97)
+    .with_usage_page(0xffa0)
+    .with_emulator_path("localhost:9999");
+
+#[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
+    #[error("missing command info: {0}")]
     MissingCommandInfo(&'static str),
+
+    #[error("no error or result returned")]
     NoErrorOrResult,
-    Apdu(ApduError),
-    Store(StoreError),
+
+    #[error("APDU error")]
+    Apdu(#[from] ApduError),
+
+    #[error("store error")]
+    Store(#[from] StoreError),
+
+    #[error("operation interrupted")]
     Interrupted,
+
+    #[error("unexpected result: {0:x?}")]
     UnexpectedResult(Vec<u8>),
+
+    #[error("failed to open app: {0:x?}")]
     FailedToOpenApp(Vec<u8>),
-}
-
-impl From<ApduError> for LedgerError {
-    fn from(value: ApduError) -> Self {
-        LedgerError::Apdu(value)
-    }
-}
-
-impl From<StoreError> for LedgerError {
-    fn from(value: StoreError) -> Self {
-        LedgerError::Store(value)
-    }
 }
 
 #[derive(Clone, Debug)]

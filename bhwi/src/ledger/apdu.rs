@@ -174,8 +174,11 @@ impl TryFrom<Vec<u8>> for ApduResponse {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ApduError {
+    #[error("unknown status word")]
     StatusWordUnknown,
+
+    #[error("response too short")]
     ResponseTooShort,
 }

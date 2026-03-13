@@ -3,7 +3,7 @@ pub mod jade;
 pub mod ledger;
 pub mod transport;
 
-use std::fmt::Debug;
+use std::{error::Error as StdError, fmt::Debug};
 
 use async_trait::async_trait;
 use bhwi::{
@@ -47,17 +47,45 @@ pub trait HWI {
     ) -> Result<(u8, Signature), Self::Error>;
 }
 
-#[derive(Debug)]
-pub enum Error<E, F> {
-    Transport(E),
-    HttpClient(F),
-    Interpreter(common::Error),
+// TODO: this will become a pain to maintain, but we can have a proc-macro
+// generate this trait by putting it over HWI's definition and then also
+// generate the blanket impl which will map the errors to HWIDeviceError
+#[async_trait(?Send)]
+pub trait HWIDevice {
+    async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError>;
+    async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError>;
+    async fn get_extended_pubkey(
+        &mut self,
+        path: DerivationPath,
+        display: bool,
+    ) -> Result<Xpub, HWIDeviceError>;
+    async fn sign_message(
+        &mut self,
+        message: &[u8],
+        path: DerivationPath,
+    ) -> Result<(u8, Signature), HWIDeviceError>;
 }
 
-impl<E, F> From<common::Error> for Error<E, F> {
-    fn from(value: common::Error) -> Self {
-        Self::Interpreter(value)
+#[derive(Debug, thiserror::Error)]
+#[error("hwi device error: {0}")]
+pub struct HWIDeviceError(#[from] Box<dyn StdError + Send + Sync + 'static>);
+
+impl HWIDeviceError {
+    pub fn new(error: impl StdError + Send + Sync + 'static) -> Self {
+        Self(Box::new(error))
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error<E, F> {
+    #[error("transport error: {0}")]
+    Transport(E),
+
+    #[error("http client error: {0}")]
+    HttpClient(F),
+
+    #[error("interpreter error: {0}")]
+    Interpreter(#[from] common::Error),
 }
 
 #[async_trait(?Send)]
@@ -126,6 +154,45 @@ where
     }
 }
 
+#[async_trait(?Send)]
+impl<T> HWIDevice for T
+where
+    T: HWI,
+    T::Error: StdError + Send + Sync + 'static,
+{
+    async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError> {
+        HWI::unlock(self, network)
+            .await
+            .map_err(HWIDeviceError::new)
+    }
+
+    async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError> {
+        HWI::get_master_fingerprint(self)
+            .await
+            .map_err(HWIDeviceError::new)
+    }
+
+    async fn get_extended_pubkey(
+        &mut self,
+        path: DerivationPath,
+        display: bool,
+    ) -> Result<Xpub, HWIDeviceError> {
+        HWI::get_extended_pubkey(self, path, display)
+            .await
+            .map_err(HWIDeviceError::new)
+    }
+
+    async fn sign_message(
+        &mut self,
+        message: &[u8],
+        path: DerivationPath,
+    ) -> Result<(u8, Signature), HWIDeviceError> {
+        HWI::sign_message(self, message, path)
+            .await
+            .map_err(HWIDeviceError::new)
+    }
+}
+
 pub trait OnUnlock {
     fn on_unlock(&mut self, _response: common::Response) -> Result<(), common::Error>;
 }
@@ -144,13 +211,13 @@ pub trait CommonInterface<C, T, R, E> {
     );
 }
 
-async fn run_command<'a, D, C, E, F>(
-    device: &'a mut D,
+async fn run_command<D, C, E, F>(
+    device: &mut D,
     command: C,
 ) -> Result<common::Response, Error<E, F>>
 where
-    E: std::fmt::Debug + 'a,
-    F: std::fmt::Debug + 'a,
+    E: Debug,
+    F: Debug,
     D: CommonInterface<
             common::Command,
             common::Transmit,

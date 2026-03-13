@@ -1,87 +1,102 @@
-use async_trait::async_trait;
-use bhwi_async::{
-    Ledger,
-    transport::ledger::speculos::{SpeculosClient, SpeculosTransport},
-};
-use reqwest::Client;
-use serde::{Serialize, de::DeserializeOwned};
-
-pub type SpeculosDevice = Ledger<SpeculosTransport<SpeculosReqwestClient>>;
-
-pub struct SpeculosReqwestClient {
-    endpoint: String,
-    inner: Client,
-}
-
-impl SpeculosReqwestClient {
-    pub fn new(url: &str) -> SpeculosReqwestClient {
-        SpeculosReqwestClient {
-            endpoint: url.into(),
-            inner: Client::new(),
-        }
-    }
-}
-
-#[async_trait(?Send)]
-impl SpeculosClient for SpeculosReqwestClient {
-    type Error = anyhow::Error;
-
-    fn url(&self) -> &str {
-        &self.endpoint
-    }
-
-    async fn post<Req: Serialize>(
-        &self,
-        endpoint: &str,
-        req: Req,
-    ) -> std::result::Result<(), Self::Error> {
-        self.inner
-            .post(endpoint)
-            .json(&req)
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-
-    async fn post_json<Req: Serialize, Res: DeserializeOwned>(
-        &self,
-        endpoint: &str,
-        req: Req,
-    ) -> std::result::Result<Res, Self::Error> {
-        Ok(self
-            .inner
-            .post(endpoint)
-            .json(&req)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
-    }
-}
-
-impl Default for SpeculosReqwestClient {
-    fn default() -> SpeculosReqwestClient {
-        SpeculosReqwestClient::new("http://localhost:5000")
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fmt::Display;
+
+    use anyhow::Result;
     use base64ct::Encoding;
     use bhwi_async::HWI;
+    use bhwi_async::{Ledger, transport::ledger::speculos::LedgerTransportTcp};
+    use bhwi_cli::ledger::SpeculosTcpChannel;
+    use reqwest::Client;
+    use serde::Serialize;
     use serde_json::Value;
+    use tokio::net::TcpStream;
 
-    use super::*;
+    pub type SpeculosDevice = Ledger<LedgerTransportTcp<SpeculosTcpChannel>>;
 
-    async fn init_device() -> SpeculosDevice {
-        SpeculosDevice::new(SpeculosTransport::new(SpeculosReqwestClient::default()))
+    struct SpeculosReqwestClient {
+        endpoint: String,
+        inner: Client,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub enum Button {
+        Left,
+        Right,
+        Both,
+    }
+
+    impl Display for Button {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{}",
+                match self {
+                    Button::Left => "left",
+                    Button::Right => "right",
+                    Button::Both => "both",
+                }
+            )
+        }
+    }
+
+    #[derive(Serialize)]
+    struct ButtonRequest {
+        action: String,
+    }
+
+    impl SpeculosReqwestClient {
+        fn new(url: &str) -> SpeculosReqwestClient {
+            SpeculosReqwestClient {
+                endpoint: url.into(),
+                inner: Client::new(),
+            }
+        }
+
+        async fn post<Req: Serialize>(&self, endpoint: &str, req: Req) -> Result<()> {
+            self.inner
+                .post(endpoint)
+                .json(&req)
+                .send()
+                .await?
+                .error_for_status()?;
+            Ok(())
+        }
+
+        async fn button_press(&self, button: Button) -> Result<()> {
+            self.post(
+                &format!("{}/button/{button}", self.endpoint),
+                &ButtonRequest {
+                    action: "press-and-release".into(),
+                },
+            )
+            .await
+        }
+
+        async fn set_automation<T: Serialize>(&self, automation_json: &T) -> Result<()> {
+            self.post(&format!("{}/automation", self.endpoint), automation_json)
+                .await
+        }
+    }
+
+    impl Default for SpeculosReqwestClient {
+        fn default() -> SpeculosReqwestClient {
+            SpeculosReqwestClient::new("http://localhost:5000")
+        }
+    }
+
+    async fn init() -> (SpeculosDevice, SpeculosReqwestClient) {
+        (
+            SpeculosDevice::new(LedgerTransportTcp::new(SpeculosTcpChannel::new(
+                TcpStream::connect("localhost:9999").await.unwrap(),
+            ))),
+            SpeculosReqwestClient::default(),
+        )
     }
 
     #[tokio::test]
     async fn can_get_master_fingerprint() {
-        let mut dev = init_device().await;
+        let (mut dev, _) = init().await;
         let fingerprint = dev
             .get_master_fingerprint()
             .await
@@ -91,7 +106,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_get_xpub() {
-        let mut dev = init_device().await;
+        let (mut dev, _) = init().await;
         let xpub = dev
             .get_extended_pubkey("m/44'/1'/0'".parse().unwrap(), false)
             .await
@@ -105,11 +120,10 @@ mod tests {
     // https://github.com/LedgerHQ/app-bitcoin-new/blob/d30a667239cd15c5a0769f07e60ef5bff1e1cb66/bitcoin_client_rs/tests/client.rs#L45
     #[tokio::test]
     async fn can_sign_message() {
-        let mut dev = init_device().await;
+        let (mut dev, client) = init().await;
         let msg = b"hello";
 
-        dev.transport
-            .client
+        client
             .set_automation(
                 &serde_json::from_str::<Value>(include_str!("../automations/sign_message.json"))
                     .unwrap(),
@@ -128,8 +142,7 @@ mod tests {
             "IL3u9GLAzgG5BdtSBqUe0Fo2Zx0UlKwSsYx2TbuVX0VULFgZYRBQCW0W7QOlsB/JgGwWNhl3eYYjXtdfyR7pM+Y="
         );
 
-        dev.transport
-            .client
+        client
             .set_automation(
                 &serde_json::from_str::<Value>(include_str!(
                     "../automations/sign_message_reject.json"

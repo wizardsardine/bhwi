@@ -1,5 +1,3 @@
-use std::fmt::Debug;
-
 use async_trait::async_trait;
 use serde_cbor::Value;
 
@@ -17,15 +15,13 @@ impl<C> TcpTransport<C> {
 
 #[async_trait(?Send)]
 pub trait TcpClient {
-    type Error: Debug + From<serde_cbor::Error>;
-
-    async fn write_all(&mut self, command: &[u8]) -> Result<(), Self::Error>;
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+    async fn write_all(&mut self, command: &[u8]) -> Result<(), std::io::Error>;
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
 }
 
 #[async_trait(?Send)]
 impl<C: TcpClient> Transport for TcpTransport<C> {
-    type Error = <C as TcpClient>::Error;
+    type Error = std::io::Error;
 
     async fn exchange(&mut self, command: &[u8], _encrypted: bool) -> Result<Vec<u8>, Self::Error> {
         self.client.write_all(command).await?;
@@ -47,7 +43,7 @@ impl<C: TcpClient> Transport for TcpTransport<C> {
                     continue; // read more bytes
                 }
                 Err(e) => {
-                    return Err(e.into());
+                    return Err(std::io::Error::other(e));
                 }
             }
         }

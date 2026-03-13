@@ -14,36 +14,32 @@
 *  limitations under the License.
 ********************************************************************************/
 use async_trait::async_trait;
+pub use bhwi::ledger::LEDGER_DEVICE_ID;
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::Cursor;
 
 use crate::{Transport, transport::Channel};
 
-pub const LEDGER_VID: u16 = 0x2c97;
-pub const LEDGER_USAGE_PAGE: u16 = 0xFFA0;
 pub const LEDGER_CHANNEL: u16 = 0x0101;
 // for Windows compatability, we prepend the buffer with a 0x00
 // so the actual buffer is 64 bytes
 const LEDGER_PACKET_WRITE_SIZE: u8 = 64;
 const LEDGER_PACKET_READ_SIZE: u8 = 64;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum LedgerHIDError {
+    #[error("communication error: {0}")]
     Comm(&'static str),
-    Hid(std::io::Error),
+
+    #[error("HID IO error")]
+    Hid(#[from] std::io::Error),
 }
 
-impl From<std::io::Error> for LedgerHIDError {
-    fn from(value: std::io::Error) -> Self {
-        LedgerHIDError::Hid(value)
-    }
-}
-
-pub struct LedgerTransportHID<C> {
+pub struct LedgerTransportHID<C: Channel> {
     channel: C,
 }
 
-impl<C> LedgerTransportHID<C> {
+impl<C: Channel> LedgerTransportHID<C> {
     pub fn new(channel: C) -> Self {
         Self { channel }
     }
