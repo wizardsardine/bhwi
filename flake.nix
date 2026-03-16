@@ -10,11 +10,16 @@
     nixpkgs.url = "nixpkgs/nixos-unstable";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        overlays = [ rust-overlay.overlays.default ];
-        pkgs = import nixpkgs { inherit system overlays; };
+  outputs = {
+    self,
+    nixpkgs,
+    flake-utils,
+    rust-overlay,
+  }:
+    flake-utils.lib.eachDefaultSystem (
+      system: let
+        overlays = [rust-overlay.overlays.default];
+        pkgs = import nixpkgs {inherit system overlays;};
         rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         inputs = [
           rust
@@ -29,10 +34,8 @@
           pkgs.clang
           pkgs.corepack_20
           pkgs.nodejs_20
-          pkgs.just
         ];
-      in
-      {
+      in {
         packages.default = pkgs.rustPlatform.buildRustPackage {
           name = "bhwi";
           src = ./.;
@@ -44,7 +47,6 @@
           nativeBuildInputs = inputs;
         };
 
-
         devShells.default = pkgs.mkShell {
           packages = inputs;
           shellHook = ''
@@ -53,6 +55,18 @@
             export CC_wasm32_unknown_unknown=${pkgs.llvmPackages.clang-unwrapped}/bin/clang
             export CFLAGS_wasm32_unknown_unknown="-I ${pkgs.llvmPackages.libclang.lib}/lib/clang/21.1.8/include/"
           '';
+        };
+
+        apps.website = {
+          type = "app";
+          program = toString (pkgs.writeShellScript "run-website" ''
+            export PATH="${pkgs.lib.makeBinPath inputs}:$PATH"
+            export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
+            export CC_wasm32_unknown_unknown=${pkgs.llvmPackages.clang-unwrapped}/bin/clang
+            export CFLAGS_wasm32_unknown_unknown="-I ${pkgs.llvmPackages.libclang.lib}/lib/clang/21.1.8/include/"
+            wasm-pack build bhwi-wasm --out-dir ../website/pkg --target web
+            cd website && npm install && npm run dev
+          '');
         };
       }
     );
