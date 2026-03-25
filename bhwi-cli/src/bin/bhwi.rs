@@ -75,8 +75,8 @@ async fn main() -> Result<()> {
     let dev_man = DeviceManager::new(config);
     match command {
         Commands::Device(DeviceCommands::List { format }) => {
-            let devices = dev_man.enumerate().await?;
-            for (i, mut device) in devices.into_iter().enumerate() {
+            let mut devices = dev_man.enumerate().await?;
+            for (i, device) in devices.iter_mut().enumerate() {
                 device.device().unlock(dev_man.config.network).await?;
                 let fingerprint = device.fingerprint().await?;
                 let name = device.name();
@@ -90,9 +90,12 @@ async fn main() -> Result<()> {
                         println!("{name:<18} | {is_emulated:<8} | {fingerprint:<15}");
                         println!("{}", "-".repeat(55));
                     }
-                    Some(ListFormat::Json) => println!("{}", serde_json::to_string(&device)?),
+                    Some(ListFormat::Json) => {}
                     None => println!("{fingerprint}"),
                 }
+            }
+            if let Some(ListFormat::Json) = format {
+                println!("{}", serde_json::json![devices])
             }
         }
         Commands::Xpub(XpubCommands::Get { path }) => {
