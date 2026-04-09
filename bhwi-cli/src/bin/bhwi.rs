@@ -1,11 +1,11 @@
 use anyhow::Result;
-use bhwi_cli::{DeviceManager, config::Config};
+use bhwi_cli::{DeviceManager, OutputFormat, config::Config};
 
 use bitcoin::{
     Network,
     bip32::{DerivationPath, Fingerprint},
 };
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -19,6 +19,9 @@ struct Args {
     /// default will be the Bitcoin mainnet network.
     #[arg(long, short, value_parser = clap::value_parser!(bitcoin::Network), default_value_t = bitcoin::Network::Bitcoin)]
     network: Network,
+    /// output formatting
+    #[arg(long, short)]
+    format: Option<OutputFormat>,
 }
 
 impl From<Args> for Config {
@@ -26,17 +29,21 @@ impl From<Args> for Config {
         let Args {
             network,
             fingerprint,
+            format,
             ..
         } = args;
         Self {
             network,
             fingerprint,
+            format,
         }
     }
 }
 
 #[derive(Debug, Clone, Subcommand)]
 enum Commands {
+    #[command(subcommand)]
+    Descriptor(DescriptorCommands),
     #[command(subcommand)]
     Device(DeviceCommands),
     #[command(subcommand)]
@@ -47,10 +54,7 @@ enum Commands {
 enum DeviceCommands {
     /// List all available devices
     #[command(alias = "enumerate")]
-    List {
-        #[arg(long, short)]
-        format: Option<ListFormat>,
-    },
+    List,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -61,28 +65,35 @@ enum XpubCommands {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum ListFormat {
-    Pretty,
-    Json,
+#[derive(Debug, Clone, Copy, Subcommand)]
+enum DescriptorCommands {
+    /// Get pubkey descriptors from device
+    #[command()]
+    Pubkeys {
+        #[arg(long, short)]
+        account: Option<u32>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let command = args.command.to_owned();
+    let format = args.format;
     let config: Config = args.into();
     let dev_man = DeviceManager::new(config);
     match command {
-        Commands::Device(DeviceCommands::List { format }) => {
+        Commands::Descriptor(DescriptorCommands::Pubkeys { account }) => {
+            dev_man.get_pubkey_descriptors(account).await?
+        }
+        Commands::Device(DeviceCommands::List) => {
             let mut devices = dev_man.enumerate().await?;
             for (i, device) in devices.iter_mut().enumerate() {
-                device.device().unlock(dev_man.config.network).await?;
                 let fingerprint = device.fingerprint().await?;
                 let name = device.name();
                 let is_emulated = device.is_emulated();
                 match format {
-                    Some(ListFormat::Pretty) => {
+                    Some(OutputFormat::Pretty) => {
                         if i == 0 {
                             println!("{:<18} | {:<8} | {:<15}", "Name", "Emulated", "Fingerprint");
                         }
@@ -90,11 +101,11 @@ async fn main() -> Result<()> {
                         println!("{name:<18} | {is_emulated:<8} | {fingerprint:<15}");
                         println!("{}", "-".repeat(55));
                     }
-                    Some(ListFormat::Json) => {}
+                    Some(OutputFormat::Json) => {}
                     None => println!("{fingerprint}"),
                 }
             }
-            if let Some(ListFormat::Json) = format {
+            if let Some(OutputFormat::Json) = format {
                 println!("{}", serde_json::json![devices])
             }
         }

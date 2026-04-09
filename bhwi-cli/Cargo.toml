@@ -19,6 +19,7 @@ bitcoin.workspace = true
 bhwi-async = { workspace = true, features = ["emulators"] }
 futures.workspace = true
 hex = { workspace = true, features = ["serde"] }
+miniscript = { workspace = true, features = ["serde"] }
 rand_core.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true

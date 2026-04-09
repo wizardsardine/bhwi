@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bhwi_async::HWIDevice;
 use bitcoin::bip32::Fingerprint;
+use clap::ValueEnum;
 use futures::future::join_all;
 use serde::{Serialize, Serializer};
 use strum::{EnumIter, IntoEnumIterator};
@@ -10,6 +11,7 @@ use crate::{coldcard::ColdcardDevice, config::Config, jade::JadeDevice, ledger::
 
 pub mod coldcard;
 pub mod config;
+pub mod get_descriptors;
 pub mod hid;
 pub mod jade;
 pub mod ledger;
@@ -109,6 +111,12 @@ impl DeviceManager {
 #[async_trait(?Send)]
 pub trait DeviceEnumerator {
     async fn enumerate(config: &Config) -> Result<Vec<Device>>;
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OutputFormat {
+    Pretty,
+    Json,
 }
 
 fn option_fingerprint<S>(value: &Option<Fingerprint>, ser: S) -> Result<S::Ok, S::Error>
