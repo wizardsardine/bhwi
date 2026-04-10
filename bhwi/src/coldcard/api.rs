@@ -1,3 +1,4 @@
+// See https://github.com/Coldcard/ckcc-protocol for implementation details.
 pub mod request {
     use bitcoin::bip32::DerivationPath;
 
@@ -16,7 +17,6 @@ pub mod request {
         }
     }
 
-    // https://github.com/Coldcard/ckcc-protocol/blob/0bd92d4d6d01872e41ffc1e7d9a1e2f153130061/ckcc/protocol.py#L125
     pub fn sign_message(message: &[u8], path: &DerivationPath) -> Vec<u8> {
         let mut data = b"smsg".to_vec();
         // coldcard can support a few different address types:
@@ -24,16 +24,18 @@ pub mod request {
         data.extend((0x01u32 | 0x02 | 0x04).to_le_bytes()); // hardcoding to P2WPKH
         let path_string = path.to_string();
         data.extend((path_string.len() as u32).to_le_bytes());
-        // https://github.com/Coldcard/ckcc-protocol/blob/0bd92d4d6d01872e41ffc1e7d9a1e2f153130061/ckcc/constants.py#L27-L31
         data.extend((message.len() as u32).to_le_bytes());
         data.extend(path_string.as_bytes());
         data.extend_from_slice(message);
         data
     }
 
-    // https://github.com/Coldcard/ckcc-protocol/blob/0bd92d4d6d01872e41ffc1e7d9a1e2f153130061/ckcc/protocol.py#L131
     pub fn get_signed_message() -> Vec<u8> {
         b"smok".to_vec()
+    }
+
+    pub fn get_version() -> Vec<u8> {
+        b"vers".to_vec()
     }
 }
 
@@ -186,6 +188,19 @@ pub mod response {
 
     pub fn get_xpub(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         Ok(ColdcardResponse::Xpub(xpub(res)?))
+    }
+
+    pub fn version(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
+        let data = ResponseHandler::expect_response(res, ResponseMessage::Asci)?;
+        let version_string =
+            std::str::from_utf8(data).map_err(|e| ColdcardError::Serialization(e.to_string()))?;
+        let lines = version_string.lines().collect::<Vec<&str>>();
+        let version = lines.get(1).unwrap_or(&version_string).to_string();
+        let device_model = lines.last().cloned().unwrap_or_default().to_string();
+        Ok(ColdcardResponse::Version {
+            version,
+            device_model,
+        })
     }
 
     pub fn mypub(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {

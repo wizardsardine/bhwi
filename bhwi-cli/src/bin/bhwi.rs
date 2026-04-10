@@ -89,17 +89,27 @@ async fn main() -> Result<()> {
         Commands::Device(DeviceCommands::List) => {
             let mut devices = dev_man.enumerate().await?;
             for (i, device) in devices.iter_mut().enumerate() {
+                // XXX: Coldcard always needs unlocking
+                device.device().unlock(dev_man.config.network).await?;
                 let fingerprint = device.fingerprint().await?;
-                let name = device.name();
+                let name = device.name().to_string();
                 let is_emulated = device.is_emulated();
+                let version = device.version().await?;
                 match format {
                     Some(OutputFormat::Pretty) => {
                         if i == 0 {
-                            println!("{:<18} | {:<8} | {:<15}", "Name", "Emulated", "Fingerprint");
+                            println!(
+                                "{:<18} | {:<8} | {:<15} | {:<12} | {:<8}",
+                                "Name", "Emulated", "Fingerprint", "Network", "Version"
+                            );
                         }
-                        println!("{}", "-".repeat(55));
-                        println!("{name:<18} | {is_emulated:<8} | {fingerprint:<15}");
-                        println!("{}", "-".repeat(55));
+                        println!("{}", "-".repeat(80));
+                        let network = version.network.unwrap_or_default();
+                        println!(
+                            "{name:<18} | {is_emulated:<8} | {fingerprint:<15} | {network:<12} | {:<8}",
+                            version.version
+                        );
+                        println!("{}", "-".repeat(80));
                     }
                     Some(OutputFormat::Json) => {}
                     None => println!("{fingerprint}"),

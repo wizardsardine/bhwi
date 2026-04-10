@@ -8,7 +8,7 @@ use bitcoin::secp256k1::ecdsa::Signature;
 
 use crate::Interpreter;
 use crate::coldcard::api::response::ResponseMessage;
-use crate::common::{Command, Error, Recipient, Response, Transmit};
+use crate::common::{Command, Error, Recipient, Response, Transmit, Version};
 use crate::device::DeviceId;
 
 pub const DEFAULT_CKCC_SOCKET: &str = "/tmp/ckcc-simulator.sock";
@@ -54,6 +54,7 @@ impl ColdcardError {
 
 pub enum ColdcardCommand {
     StartEncryption,
+    GetVersion,
     GetMasterFingerprint,
     GetXpub(DerivationPath),
     SignMessage {
@@ -65,6 +66,10 @@ pub enum ColdcardCommand {
 pub enum ColdcardResponse {
     Ok,
     Busy,
+    Version {
+        version: String,
+        device_model: String,
+    },
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
     MyPub {
@@ -131,6 +136,7 @@ where
                 payload: api::request::start_encryption(None, &self.encryption.pub_key()?),
                 encrypted: false,
             },
+            ColdcardCommand::GetVersion => request(api::request::get_version(), self.encryption)?,
             ColdcardCommand::GetMasterFingerprint => request(
                 api::request::get_xpub(&DerivationPath::master()),
                 self.encryption,
@@ -149,6 +155,11 @@ where
     fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, Self::Error> {
         match &self.state {
             State::New => Ok(None),
+            State::Running(ColdcardCommand::GetVersion) => {
+                let data = self.encryption.decrypt(data)?;
+                self.state = State::Finished(api::response::version(&data)?);
+                Ok(None)
+            }
             State::Running(ColdcardCommand::GetMasterFingerprint) => {
                 let data = self.encryption.decrypt(data)?;
                 self.state = State::Finished(api::response::master_fingerprint(&data)?);
@@ -195,6 +206,7 @@ impl TryFrom<Command> for ColdcardCommand {
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
             Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
+            Command::GetVersion => Ok(Self::GetVersion),
         }
     }
 }
@@ -204,6 +216,14 @@ impl From<ColdcardResponse> for Response {
         match res {
             ColdcardResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
             ColdcardResponse::Xpub(xpub) => Response::Xpub(xpub),
+            ColdcardResponse::Version {
+                version,
+                device_model,
+            } => Response::Version(Version {
+                version: version.as_str().into(),
+                network: None,
+                firmware: Some(device_model),
+            }),
             ColdcardResponse::MyPub { encryption_key, .. } => {
                 Response::EncryptionKey(encryption_key)
             }
@@ -233,10 +253,9 @@ impl From<ColdcardError> for Error {
             ColdcardError::MissingCommandInfo(e) => Error::MissingCommandInfo(e),
             ColdcardError::NoErrorOrResult => Error::NoErrorOrResult,
             ColdcardError::Serialization(s) => Error::Serialization(s),
-            ColdcardError::UnexpectedResponseMessage { got, expected } => Error::UnexpectedResult(
-                format!("unexpected device response message. got: {got}, expected: {expected:?}")
-                    .as_bytes()
-                    .to_vec(),
+            ColdcardError::UnexpectedResponseMessage { got, expected } => Error::unexpected_result(
+                format!("{got:?}").into_bytes(),
+                format!("coldcard unexpected response: expected {expected:?}, got {got:?}"),
             ),
         }
     }

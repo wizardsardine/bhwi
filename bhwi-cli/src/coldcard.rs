@@ -39,17 +39,16 @@ impl ColdcardDevice {
     #[cfg(unix)]
     async fn emulator_device(path: &str, rng: &mut OsRng) -> Result<Option<Device>> {
         if std::fs::exists(path)? {
-            Ok(Some(
-                Device::new(
-                    "Coldcard Emulator",
-                    Box::new(Coldcard::new(
-                        ColdcardTransportHID::new(emulator::EmulatorClient::new(path).await?),
-                        rng,
-                    )),
-                    true,
-                )
-                .await?,
-            ))
+            let Ok(client) = emulator::EmulatorClient::new(path).await else {
+                return Ok(None);
+            };
+            let device = Device::new(
+                "Coldcard Emulator",
+                Box::new(Coldcard::new(ColdcardTransportHID::new(client), rng)),
+                true,
+            )
+            .await?;
+            Ok(Some(device))
         } else {
             Ok(None)
         }
