@@ -195,6 +195,7 @@ impl TryFrom<Command> for ColdcardCommand {
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
             Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
+            Command::GetVersion => todo!(),
         }
     }
 }

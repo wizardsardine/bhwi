@@ -266,6 +266,7 @@ impl From<Command> for JadeCommand {
             Command::GetMasterFingerprint => Self::GetMasterFingerprint,
             Command::GetXpub { path, .. } => Self::GetXpub(path),
             Command::SignMessage { message, path } => Self::SignMessage { message, path },
+            Command::GetVersion => todo!(),
         }
     }
 }

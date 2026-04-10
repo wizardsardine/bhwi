@@ -228,6 +228,7 @@ impl TryFrom<Command> for LedgerCommand {
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
             Command::GetXpub { path, display } => Ok(Self::GetXpub { path, display }),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
+            Command::GetVersion => todo!(),
         }
     }
 }
