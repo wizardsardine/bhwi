@@ -233,10 +233,9 @@ impl From<ColdcardError> for Error {
             ColdcardError::MissingCommandInfo(e) => Error::MissingCommandInfo(e),
             ColdcardError::NoErrorOrResult => Error::NoErrorOrResult,
             ColdcardError::Serialization(s) => Error::Serialization(s),
-            ColdcardError::UnexpectedResponseMessage { got, expected } => Error::UnexpectedResult(
-                format!("unexpected device response message. got: {got}, expected: {expected:?}")
-                    .as_bytes()
-                    .to_vec(),
+            ColdcardError::UnexpectedResponseMessage { got, expected } => Error::unexpected_result(
+                format!("{got:?}").into_bytes(),
+                format!("coldcard unexpected response: expected {expected:?}, got {got:?}"),
             ),
         }
     }

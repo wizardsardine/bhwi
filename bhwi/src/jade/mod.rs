@@ -307,7 +307,7 @@ impl From<JadeError> for Error {
             JadeError::NoErrorOrResult => Error::NoErrorOrResult,
             JadeError::Rpc(api_error) => Error::Rpc(api_error.code, api_error.message),
             JadeError::Serialization(s) => Error::Serialization(s),
-            JadeError::UnexpectedResult(msg) => Error::UnexpectedResult(msg.into_bytes()),
+            JadeError::UnexpectedResult(msg) => Error::unexpected_result(msg.clone().into_bytes(), format!("jade unexpected result: {msg}")),
             JadeError::HandshakeRefused => Error::AuthenticationRefused,
         }
     }

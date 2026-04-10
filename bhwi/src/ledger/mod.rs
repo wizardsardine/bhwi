@@ -41,11 +41,17 @@ pub enum LedgerError {
     #[error("operation interrupted")]
     Interrupted,
 
-    #[error("unexpected result: {0:x?}")]
-    UnexpectedResult(Vec<u8>),
+    #[error("unexpected result for {1}: {0:x?}")]
+    UnexpectedResult(Vec<u8>, String),
 
     #[error("failed to open app: {0:x?}")]
     FailedToOpenApp(Vec<u8>),
+}
+
+impl LedgerError {
+    pub fn unexpected_result(data: Vec<u8>, context: impl Into<String>) -> Self {
+        LedgerError::UnexpectedResult(data, context.into())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -159,7 +165,7 @@ where
             match command {
                 LedgerCommand::GetMasterFingerprint => {
                     if res.data.len() < 4 {
-                        return Err(LedgerError::UnexpectedResult(res.data).into());
+                        return Err(LedgerError::unexpected_result(res.data, "master fingerprint response").into());
                     } else {
                         let mut fg = [0x00; 4];
                         fg.copy_from_slice(&res.data[0..4]);
@@ -170,7 +176,7 @@ where
                 }
                 LedgerCommand::GetXpub { .. } => {
                     let xpub = Xpub::from_str(&String::from_utf8_lossy(&res.data))
-                        .map_err(|_| LedgerError::UnexpectedResult(res.data))?;
+                        .map_err(|_| LedgerError::unexpected_result(res.data, "xpub string"))?;
                     self.state = State::Finished(LedgerResponse::Xpub(xpub));
                 }
                 LedgerCommand::OpenApp(..) => {
@@ -182,7 +188,7 @@ where
                     ) {
                         self.state = State::Finished(LedgerResponse::TaskDone);
                     } else {
-                        return Err(LedgerError::UnexpectedResult(res.data).into());
+                        return Err(LedgerError::unexpected_result(res.data, "open app status").into());
                     }
                 }
                 LedgerCommand::SignMessage { .. } => match res.status_word {
@@ -193,10 +199,10 @@ where
                     StatusWord::OK => {
                         let header = res.data[0];
                         let sig = Signature::from_compact(&res.data[1..])
-                            .map_err(|_| LedgerError::UnexpectedResult(res.data))?;
+                            .map_err(|_| LedgerError::unexpected_result(res.data, "signature compact data"))?;
                         self.state = State::Finished(LedgerResponse::Signature(header, sig));
                     }
-                    _ => return Err(LedgerError::UnexpectedResult(res.data).into()),
+                    _ => return Err(LedgerError::unexpected_result(res.data, "sign message status").into()),
                 },
             }
         }
@@ -245,7 +251,7 @@ impl From<LedgerError> for Error {
             LedgerError::Apdu(e) => Error::Serialization(format!("{:?}", e)),
             LedgerError::Store(_) => Error::Request("Store operation failed"),
             LedgerError::Interrupted => Error::Request("Operation interrupted"),
-            LedgerError::UnexpectedResult(data) => Error::UnexpectedResult(data),
+            LedgerError::UnexpectedResult(data, ctx) => Error::unexpected_result(data, ctx),
             LedgerError::FailedToOpenApp(_) => Error::AuthenticationRefused,
         }
     }

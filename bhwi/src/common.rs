@@ -55,8 +55,8 @@ pub enum Error {
     #[error("missing command info: {0}")]
     MissingCommandInfo(&'static str),
 
-    #[error("unexpected result: {0:x?}")]
-    UnexpectedResult(Vec<u8>),
+    #[error("unexpected result for {1}: {0:x?}")]
+    UnexpectedResult(Vec<u8>, String),
 
     #[error("rpc error {0}: {1:?}")]
     Rpc(i32, Option<String>),
@@ -69,6 +69,12 @@ pub enum Error {
 
     #[error("authentication refused")]
     AuthenticationRefused,
+}
+
+impl Error {
+    pub fn unexpected_result(data: Vec<u8>, context: impl Into<String>) -> Self {
+        Error::UnexpectedResult(data, context.into())
+    }
 }
 
 pub type ColdcardInterpreter<'a> =
