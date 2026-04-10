@@ -15,7 +15,6 @@ use bhwi::{
         secp256k1::ecdsa::Signature,
     },
     common,
-    common::Version,
 };
 pub use jade::Jade;
 pub use ledger::Ledger;

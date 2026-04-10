@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bhwi_async::HWIDevice;
+use bhwi_async::Version;
 use bitcoin::bip32::Fingerprint;
 use clap::ValueEnum;
 use futures::future::join_all;
@@ -24,6 +25,8 @@ pub struct Device {
     is_emulated: bool,
     #[serde(default, serialize_with = "option_fingerprint")]
     fingerprint: Option<Fingerprint>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    version: Option<Version>,
 }
 
 impl Device {
@@ -33,6 +36,7 @@ impl Device {
             device,
             is_emulated,
             fingerprint: None,
+            version: None,
         })
     }
 
@@ -55,6 +59,16 @@ impl Device {
             let fingerprint = self.device.get_master_fingerprint().await?;
             self.fingerprint = Some(fingerprint);
             Ok(fingerprint)
+        }
+    }
+
+    pub async fn version(&mut self) -> Result<Version> {
+        if let Some(ref version) = self.version {
+            Ok(version.clone())
+        } else {
+            let version = self.device.get_version().await?;
+            self.version = Some(version.clone());
+            Ok(version)
         }
     }
 }
