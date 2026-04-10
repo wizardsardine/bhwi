@@ -53,4 +53,13 @@ mod tests {
             "H+SvKg15TSz+2C5ra6Q8/e8BaImOZVEeS0rOL6GCEt4vO+4xRRt+YYKavSqgAJBYZaGEiTqr7f9imyyElMNhYXU="
         );
     }
+
+    #[tokio::test]
+    async fn can_get_version() {
+        let mut dev = device().await;
+        let version = dev.get_version().await.unwrap();
+        // 1.0.39-beta2-11-g1ca0a0a4-dirty
+        assert!(version.version.to_string().contains("1.0.39"));
+        assert_eq!(version.network.unwrap(), "all");
+    }
 }

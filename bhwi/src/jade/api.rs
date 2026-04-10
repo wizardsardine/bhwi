@@ -1,6 +1,6 @@
-/// See https://github.com/Blockstream/Jade/blob/master/docs/index.rst
+// See https://github.com/Blockstream/Jade/blob/master/docs/index.rst
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Display};
 
 use super::JadeError;
 
@@ -131,6 +131,20 @@ pub enum JadeNetworks {
     Test,
     #[serde(alias = "ALL")]
     All,
+}
+
+impl Display for JadeNetworks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                JadeNetworks::Main => "main",
+                JadeNetworks::Test => "test",
+                JadeNetworks::All => "all",
+            }
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
