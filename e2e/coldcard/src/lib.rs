@@ -85,4 +85,12 @@ mod tests {
             "KEMkoamxdI4o4yIKww0ZwbabbSWukI8WY1reuuPle/EJXzQ61fB/TFm+v/qmGCgTyEkhP3qCuAOOONBauJ/VtEA="
         );
     }
+
+    #[tokio::test]
+    async fn can_get_version() {
+        let (mut dev, _) = device().await;
+        let version = dev.get_version().await.unwrap();
+        assert_eq!(version.firmware, Some("mk4".to_string()));
+        assert_eq!(version.version.to_string(), "5.x.x");
+    }
 }
