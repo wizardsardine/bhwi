@@ -4,10 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bhwi_async::{
     HttpClient, Jade, Transport,
-    transport::jade::{
-        JADE_DEVICE_IDS,
-        tcp::{TcpClient as TcpClientTrait, TcpTransport},
-    },
+    transport::jade::{CborStream, JADE_DEVICE_IDS, tcp::TcpTransport},
 };
 use bitcoin::Network;
 use futures::{TryStreamExt, stream::iter};
@@ -51,11 +48,20 @@ impl SerialTransport {
 impl Transport for SerialTransport {
     type Error = std::io::Error;
     async fn exchange(&mut self, command: &[u8], _encrypted: bool) -> Result<Vec<u8>, Self::Error> {
+        self.write_all(command).await?;
+        self.read_cbor_message().await
+    }
+}
+
+#[async_trait(?Send)]
+impl CborStream for SerialTransport {
+    async fn write_all(&mut self, command: &[u8]) -> Result<(), std::io::Error> {
         let mut stream = self.stream.lock().await;
-        stream.write_all(command).await?;
-        let mut buf = vec![];
-        stream.read_to_end(&mut buf).await?;
-        Ok(buf)
+        Ok(stream.write_all(command).await?)
+    }
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        let mut stream = self.stream.lock().await;
+        Ok(stream.read(buf).await?)
     }
 }
 
@@ -153,7 +159,7 @@ impl HttpClient for PinServerClient {
         Ok(self
             .inner
             .post(url)
-            .header("Content-Type", "application/octet-stream")
+            .header("Content-Type", "application/json")
             .body(request.to_vec())
             .send()
             .await?
@@ -174,7 +180,7 @@ impl TcpClient {
 }
 
 #[async_trait(?Send)]
-impl TcpClientTrait for TcpClient {
+impl CborStream for TcpClient {
     async fn write_all(&mut self, command: &[u8]) -> Result<(), std::io::Error> {
         Ok(self.stream.write_all(command).await?)
     }
