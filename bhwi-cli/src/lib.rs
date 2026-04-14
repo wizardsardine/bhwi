@@ -127,17 +127,31 @@ impl DeviceManager {
     }
 
     pub async fn get_device_with_fingerprint(&self) -> Result<Option<Device>> {
+        let mut target_dev = None;
         for mut d in self.enumerate().await? {
             d.device.unlock(self.config.network).await?;
             if let Some(fingerprint) = self.config.fingerprint {
                 if fingerprint == d.fingerprint().await? {
-                    return Ok(Some(d));
+                    target_dev = Some(d);
                 }
             } else {
-                return Ok(Some(d));
+                target_dev = Some(d);
             }
         }
-        Ok(None)
+        let Some(mut dev) = target_dev else {
+            return Ok(None);
+        };
+        let info = dev.info().await?;
+        let networks = &info.networks;
+        let net = self.config.network;
+        if !networks.is_empty() && !networks.contains(&net) {
+            eprintln!(
+                "Warning: device {} is on {}, expected {net}",
+                dev.name,
+                info.networks_string()
+            );
+        }
+        Ok(Some(dev))
     }
 
     pub async fn enumerate(&self) -> Result<Vec<Device>> {
