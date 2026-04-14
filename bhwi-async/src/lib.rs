@@ -6,7 +6,7 @@ pub mod transport;
 use std::{error::Error as StdError, fmt::Debug};
 
 use async_trait::async_trait;
-pub use bhwi::common::Version;
+pub use bhwi::common::Info;
 use bhwi::{
     Interpreter,
     bitcoin::{
@@ -35,7 +35,7 @@ pub trait HttpClient {
 pub trait HWI {
     type Error: Debug;
     async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
-    async fn get_version(&mut self) -> Result<Version, Self::Error>;
+    async fn get_info(&mut self) -> Result<Info, Self::Error>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, Self::Error>;
     async fn get_extended_pubkey(
         &mut self,
@@ -55,7 +55,7 @@ pub trait HWI {
 #[async_trait(?Send)]
 pub trait HWIDevice {
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError>;
-    async fn get_version(&mut self) -> Result<Version, HWIDeviceError>;
+    async fn get_info(&mut self) -> Result<Info, HWIDeviceError>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError>;
     async fn get_extended_pubkey(
         &mut self,
@@ -112,8 +112,8 @@ where
         Ok(())
     }
 
-    async fn get_version(&mut self) -> Result<Version, Self::Error> {
-        if let common::Response::Version(version) =
+    async fn get_info(&mut self) -> Result<Info, Self::Error> {
+        if let common::Response::Info(version) =
             run_command(self, common::Command::GetVersion).await?
         {
             Ok(version)
@@ -179,8 +179,8 @@ where
             .map_err(HWIDeviceError::new)
     }
 
-    async fn get_version(&mut self) -> Result<Version, HWIDeviceError> {
-        HWI::get_version(self).await.map_err(HWIDeviceError::new)
+    async fn get_info(&mut self) -> Result<Info, HWIDeviceError> {
+        HWI::get_info(self).await.map_err(HWIDeviceError::new)
     }
 
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError> {

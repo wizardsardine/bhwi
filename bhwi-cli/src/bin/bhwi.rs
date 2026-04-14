@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
                 let fingerprint = device.fingerprint().await?;
                 let name = device.name().to_string();
                 let is_emulated = device.is_emulated();
-                let version = device.version().await?;
+                let info = device.info().await?;
                 match format {
                     Some(OutputFormat::Pretty) => {
                         if i == 0 {
@@ -104,10 +104,10 @@ async fn main() -> Result<()> {
                             );
                         }
                         println!("{}", "-".repeat(80));
-                        let network = version.network.unwrap_or_default();
+                        let network = info.networks_string();
                         println!(
                             "{name:<18} | {is_emulated:<8} | {fingerprint:<15} | {network:<12} | {:<8}",
-                            version.version
+                            info.version
                         );
                         println!("{}", "-".repeat(80));
                     }

@@ -18,7 +18,7 @@ use store::{DelegatedStore, StoreError};
 pub use wallet::{WalletPolicy, WalletPubKey};
 
 use crate::Interpreter;
-use crate::common::{Command, Error, Response, Version};
+use crate::common::{Command, Error, Info, Response};
 use crate::device::DeviceId;
 
 pub const LEDGER_DEVICE_ID: DeviceId = DeviceId::new(0x2c97)
@@ -310,9 +310,9 @@ impl TryFrom<Command> for LedgerCommand {
 impl From<LedgerResponse> for Response {
     fn from(res: LedgerResponse) -> Response {
         match res {
-            LedgerResponse::AppInfo(res) => Response::Version(Version {
+            LedgerResponse::AppInfo(res) => Response::Info(Info {
                 version: res.version.to_string(),
-                network: Some(res.network().to_string()),
+                networks: vec![res.network()],
                 firmware: None,
             }),
             LedgerResponse::Signature(header, signature) => Response::Signature(header, signature),

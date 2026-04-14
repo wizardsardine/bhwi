@@ -8,7 +8,7 @@ use bitcoin::secp256k1::ecdsa::Signature;
 
 use crate::Interpreter;
 use crate::coldcard::api::response::ResponseMessage;
-use crate::common::{Command, Error, Recipient, Response, Transmit, Version};
+use crate::common::{Command, Error, Info, Recipient, Response, Transmit};
 use crate::device::DeviceId;
 
 pub const DEFAULT_CKCC_SOCKET: &str = "/tmp/ckcc-simulator.sock";
@@ -219,9 +219,9 @@ impl From<ColdcardResponse> for Response {
             ColdcardResponse::Version {
                 version,
                 device_model,
-            } => Response::Version(Version {
+            } => Response::Info(Info {
                 version: version.as_str().into(),
-                network: None,
+                networks: vec![],
                 firmware: Some(device_model),
             }),
             ColdcardResponse::MyPub { encryption_key, .. } => {

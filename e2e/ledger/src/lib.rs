@@ -160,9 +160,9 @@ mod tests {
     #[tokio::test]
     async fn can_get_version() {
         let (mut dev, _) = init().await;
-        let version = dev.get_version().await.unwrap();
-        assert_eq!(version.version.to_string(), "2.4.5");
-        assert_eq!(version.firmware, Some("Bitcoin Test".to_string()));
-        assert_eq!(version.network.unwrap().to_string(), "testnet");
+        let info = dev.get_info().await.unwrap();
+        assert_eq!(info.version.to_string(), "2.4.5");
+        assert_eq!(info.firmware, Some("Bitcoin Test".to_string()));
+        assert_eq!(info.networks.first().unwrap().to_string(), "testnet");
     }
 }
