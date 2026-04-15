@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::Interpreter;
-use crate::common::{Command, Error, Recipient, Response, Transmit, Version};
+use crate::common::{Command, Error, Info, Recipient, Response, Transmit};
 use crate::device::DeviceId;
 use crate::jade::api::GetInfoResponse;
 
@@ -287,9 +287,9 @@ impl From<JadeResponse> for Response {
             JadeResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
             JadeResponse::Xpub(xpub) => Response::Xpub(xpub),
             JadeResponse::Signature(header, signature) => Response::Signature(header, signature),
-            JadeResponse::GetInfo(info) => Response::Version(Version {
+            JadeResponse::GetInfo(info) => Response::Info(Info {
                 version: info.jade_version.as_str().into(),
-                network: Some(info.jade_networks.to_string()),
+                networks: info.jade_networks.into(),
                 firmware: None,
             }),
         }

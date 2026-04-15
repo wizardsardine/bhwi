@@ -55,11 +55,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn can_get_version() {
+    async fn can_get_info() {
         let mut dev = device().await;
-        let version = dev.get_version().await.unwrap();
+        let info = dev.get_info().await.unwrap();
         // 1.0.39-beta2-11-g1ca0a0a4-dirty
-        assert!(version.version.to_string().contains("1.0.39"));
-        assert_eq!(version.network.unwrap(), "all");
+        assert!(info.version.to_string().contains("1.0.39"));
+        // jade has "all" networks
+        assert_eq!(
+            info.networks,
+            vec![
+                Network::Bitcoin,
+                Network::Testnet,
+                Network::Testnet4,
+                Network::Regtest,
+                Network::Signet
+            ]
+        );
     }
 }

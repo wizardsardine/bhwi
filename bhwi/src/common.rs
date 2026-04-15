@@ -28,20 +28,18 @@ pub enum Command {
 pub enum Response {
     TaskDone,
     TaskBusy,
-    Version(Version),
+    Info(Info),
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
     EncryptionKey([u8; 64]),
     Signature(u8, Signature),
 }
 
-/// Version information returned from a device.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct Version {
+/// Device Information
+#[derive(Debug, Clone, Default)]
+pub struct Info {
     pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub network: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub networks: Vec<Network>,
     pub firmware: Option<String>,
 }
 

@@ -87,10 +87,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn can_get_version() {
+    async fn can_get_info() {
         let (mut dev, _) = device().await;
-        let version = dev.get_version().await.unwrap();
-        assert_eq!(version.firmware, Some("mk4".to_string()));
-        assert_eq!(version.version.to_string(), "5.x.x");
+        let info = dev.get_info().await.unwrap();
+        assert_eq!(info.firmware, Some("mk4".to_string()));
+        assert_eq!(info.version.to_string(), "5.x.x");
     }
 }

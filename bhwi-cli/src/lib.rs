@@ -1,8 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bhwi_async::HWIDevice;
-use bhwi_async::Version;
-use bitcoin::bip32::Fingerprint;
+use bitcoin::{Network, bip32::Fingerprint};
 use clap::ValueEnum;
 use futures::future::join_all;
 use serde::{Serialize, Serializer};
@@ -26,7 +25,35 @@ pub struct Device {
     #[serde(default, serialize_with = "option_fingerprint")]
     fingerprint: Option<Fingerprint>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    version: Option<Version>,
+    info: Option<Info>,
+}
+
+/// Serializable Device Information
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Info {
+    pub version: String,
+    pub networks: Vec<Network>,
+    pub firmware: Option<String>,
+}
+
+impl Info {
+    pub fn networks_string(&self) -> String {
+        self.networks
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl From<bhwi_async::Info> for Info {
+    fn from(info: bhwi_async::Info) -> Self {
+        Self {
+            version: info.version,
+            networks: info.networks,
+            firmware: info.firmware,
+        }
+    }
 }
 
 impl Device {
@@ -36,7 +63,7 @@ impl Device {
             device,
             is_emulated,
             fingerprint: None,
-            version: None,
+            info: None,
         })
     }
 
@@ -62,13 +89,13 @@ impl Device {
         }
     }
 
-    pub async fn version(&mut self) -> Result<Version> {
-        if let Some(ref version) = self.version {
-            Ok(version.clone())
+    pub async fn info(&mut self) -> Result<Info> {
+        if let Some(ref info) = self.info {
+            Ok(info.clone())
         } else {
-            let version = self.device.get_version().await?;
-            self.version = Some(version.clone());
-            Ok(version)
+            let info: Info = self.device.get_info().await?.into();
+            self.info = Some(info.clone());
+            Ok(info)
         }
     }
 }
@@ -100,17 +127,31 @@ impl DeviceManager {
     }
 
     pub async fn get_device_with_fingerprint(&self) -> Result<Option<Device>> {
+        let mut target_dev = None;
         for mut d in self.enumerate().await? {
             d.device.unlock(self.config.network).await?;
             if let Some(fingerprint) = self.config.fingerprint {
                 if fingerprint == d.fingerprint().await? {
-                    return Ok(Some(d));
+                    target_dev = Some(d);
                 }
             } else {
-                return Ok(Some(d));
+                target_dev = Some(d);
             }
         }
-        Ok(None)
+        let Some(mut dev) = target_dev else {
+            return Ok(None);
+        };
+        let info = dev.info().await?;
+        let networks = &info.networks;
+        let net = self.config.network;
+        if !networks.is_empty() && !networks.contains(&net) {
+            eprintln!(
+                "Warning: device {} is on {}, expected {net}",
+                dev.name,
+                info.networks_string()
+            );
+        }
+        Ok(Some(dev))
     }
 
     pub async fn enumerate(&self) -> Result<Vec<Device>> {

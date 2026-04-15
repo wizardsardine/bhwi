@@ -15,7 +15,7 @@ path = "src/bin/bhwi.rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-bitcoin.workspace = true
+bitcoin = { workspace = true, features = ["serde"] }
 bhwi-async = { workspace = true, features = ["emulators"] }
 futures.workspace = true
 hex = { workspace = true, features = ["serde"] }
