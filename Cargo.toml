@@ -16,7 +16,8 @@ bhwi-async = { path = "./bhwi-async", version = "0.0.1" }
 futures = "0.3"
 hex = "0.4.3"
 log = "0.4"
-miniscript = "13.0.0"
+# Can move to a version once WalletPolicy is in a release
+miniscript = { git = "https://github.com/rust-bitcoin/rust-miniscript.git", rev = "c9b0499e" }
 rand_core = "0.6.4"
 reqwest = "0.13.2"
 serde = "1.0.228"
