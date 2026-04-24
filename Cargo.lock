@@ -232,6 +232,7 @@ dependencies = [
  "ctr",
  "k256",
  "log",
+ "miniscript",
  "serde",
  "serde_bytes",
  "serde_cbor",

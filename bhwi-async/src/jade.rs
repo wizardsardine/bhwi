@@ -23,7 +23,7 @@ impl<T, S> Jade<T, S> {
 
 impl<C, T, R, E, F, H> crate::CommonInterface<C, T, R, E> for Jade<F, H>
 where
-    C: Into<JadeCommand>,
+    C: TryInto<JadeCommand, Error = E>,
     T: From<JadeTransmit>,
     R: From<JadeResponse>,
     E: From<JadeError>,
