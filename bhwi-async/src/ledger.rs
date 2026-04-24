@@ -51,6 +51,6 @@ pub struct DummyClient;
 impl HttpClient for DummyClient {
     type Error = LedgerError;
     async fn request(&self, _url: &str, _req: &[u8]) -> Result<Vec<u8>, Self::Error> {
-        unreachable!("Coldcard does not need http client")
+        unreachable!("Ledger does not need http client")
     }
 }
