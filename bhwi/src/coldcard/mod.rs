@@ -207,6 +207,32 @@ impl TryFrom<Command> for ColdcardCommand {
             Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
             Command::GetVersion => Ok(Self::GetVersion),
+            Command::DisplayAddress(
+                DisplayAddress::ByPath {
+                    path,
+                    address_format,
+                    ..
+                },
+                ..,
+            ) => Ok(Self::ShowAddress {
+                path,
+                addr_fmt: address_format
+                    .map(api::request::addr_fmt::from_address_type)
+                    .unwrap_or(api::request::addr_fmt::AF_P2WPKH),
+            }),
+            Command::DisplayAddress(
+                DisplayAddress::ByDescriptor {
+                    descriptor_name,
+                    change,
+                    index,
+                    ..
+                },
+                ..,
+            ) => Ok(Self::MiniscriptAddress {
+                name: descriptor_name,
+                change,
+                index,
+            }),
         }
     }
 }

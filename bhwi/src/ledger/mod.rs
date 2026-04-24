@@ -1,6 +1,6 @@
-mod command;
+pub mod command;
 mod merkle;
-mod store;
+pub mod store;
 
 pub mod apdu;
 pub mod error;
@@ -15,10 +15,10 @@ use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::consensus::encode::deserialize_partial;
 use bitcoin::secp256k1::ecdsa::Signature;
 use store::{DelegatedStore, StoreError};
-pub use wallet::{WalletPolicy, WalletPubKey};
+pub use wallet::{AddressType, LedgerWalletPolicy, Version, WalletError, singlesig_wallet_policy};
 
 use crate::Interpreter;
-use crate::common::{Command, Error, Info, Response};
+use crate::common::{Command, DeviceContext, DisplayAddress, Error, Info, Response};
 use crate::device::DeviceId;
 
 pub const LEDGER_DEVICE_ID: DeviceId = DeviceId::new(0x2c97)
@@ -45,6 +45,9 @@ pub enum LedgerError {
     #[error("unexpected result for {1}: {0:x?}")]
     UnexpectedResult(Vec<u8>, String),
 
+    #[error("unsupported display address: {0}")]
+    UnsupportedDisplayAddress(String),
+
     #[error("failed to open app: {0:x?}")]
     FailedToOpenApp(Vec<u8>),
 }
@@ -64,6 +67,10 @@ pub enum LedgerCommand {
     GetXpub {
         path: DerivationPath,
         display: bool,
+    },
+    GetWalletAddress {
+        address: DisplayAddress,
+        context: Option<DeviceContext>,
     },
     SignMessage {
         message: Vec<u8>,
@@ -125,6 +132,7 @@ pub enum LedgerResponse {
     Signature(u8, Signature),
     TaskDone,
     Xpub(Xpub),
+    Address(String),
 }
 
 #[derive(Default)]
@@ -136,7 +144,24 @@ enum State {
         command: LedgerCommand,
         store: Option<DelegatedStore>,
     },
+    GetWalletAddress(GetWalletAddressStep),
     Finished(LedgerResponse),
+}
+
+enum GetWalletAddressStep {
+    Fingerprint {
+        address: DisplayAddress,
+        context: Option<DeviceContext>,
+    },
+    Xpub {
+        address: DisplayAddress,
+        fingerprint: Fingerprint,
+        display: bool,
+        context: Option<DeviceContext>,
+    },
+    WalletAddress {
+        store: Option<DelegatedStore>,
+    },
 }
 
 pub struct LedgerInterpreter<C, T, R, E> {
@@ -197,93 +222,235 @@ where
                     Some(store),
                 )
             }
+            LedgerCommand::GetWalletAddress { address, context } => {
+                self.state =
+                    State::GetWalletAddress(GetWalletAddressStep::Fingerprint { address, context });
+                return Ok(Self::Transmit::from(command::get_master_fingerprint()));
+            }
         };
         self.state = State::Running { command, store };
         Ok(transmit)
     }
+
     fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, Self::Error> {
-        if let State::Running { store, command } = &mut self.state {
-            let res = ApduResponse::try_from(data).map_err(LedgerError::from)?;
-            if res.status_word == StatusWord::InterruptedExecution {
-                if let Some(store) = store {
-                    let transmit = store.execute(res.data).map_err(LedgerError::from)?;
-                    return Ok(Some(Self::Transmit::from(command::continue_interrupted(
-                        transmit,
-                    ))));
-                } else {
-                    return Err(LedgerError::Interrupted.into());
+        let res = ApduResponse::try_from(data).map_err(LedgerError::from)?;
+        match &mut self.state {
+            State::GetWalletAddress(GetWalletAddressStep::Fingerprint { address, context }) => {
+                if res.data.len() < 4 {
+                    return Err(LedgerError::unexpected_result(
+                        res.data,
+                        "display address: master fingerprint",
+                    )
+                    .into());
+                }
+                let mut fg = [0x00; 4];
+                fg.copy_from_slice(&res.data[0..4]);
+                let fingerprint = Fingerprint::from(fg);
+                let (account_path, display) = match &address {
+                    DisplayAddress::ByPath { path, display, .. } => {
+                        let children: Vec<_> = path.as_ref().to_vec();
+                        if children.len() < 5 {
+                            return Err(LedgerError::UnsupportedDisplayAddress(
+                                "Ledger requires a full 5-level derivation path (e.g. m/84'/0'/0'/0/0)".into(),
+                            )
+                            .into());
+                        }
+                        (DerivationPath::from(children[..3].to_vec()), *display)
+                    }
+                    DisplayAddress::ByDescriptor { .. } => {
+                        return Err(LedgerError::UnsupportedDisplayAddress(
+                            "Ledger does not support descriptor-based address display via wallet registration yet".into(),
+                        ).into());
+                    }
+                };
+                self.state = State::GetWalletAddress(GetWalletAddressStep::Xpub {
+                    address: address.clone(),
+                    fingerprint,
+                    display,
+                    context: std::mem::take(context),
+                });
+                return Ok(Some(Self::Transmit::from(command::get_extended_pubkey(
+                    &account_path,
+                    false,
+                ))));
+            }
+            State::GetWalletAddress(GetWalletAddressStep::Xpub {
+                address,
+                fingerprint,
+                display,
+                context,
+            }) => {
+                let xpub = Xpub::from_str(&String::from_utf8_lossy(&res.data)).map_err(|_| {
+                    LedgerError::unexpected_result(res.data, "display address: xpub")
+                })?;
+                let display = *display;
+                let (ledger_policy, wallet_hmac, change, address_index) = match address {
+                    DisplayAddress::ByPath { path, .. } => {
+                        let children: Vec<_> = path.as_ref().to_vec();
+                        let change =
+                            children[3] == bitcoin::bip32::ChildNumber::from_normal_idx(1).unwrap();
+                        let address_index = u32::from(children[4]);
+                        let policy =
+                            singlesig_wallet_policy(path, *fingerprint, xpub).map_err(|_| {
+                                LedgerError::UnsupportedDisplayAddress(
+                                    "failed to construct singlesig wallet policy from path".into(),
+                                )
+                            })?;
+                        (
+                            LedgerWalletPolicy::new(String::new(), Version::V2, policy),
+                            None,
+                            change,
+                            address_index,
+                        )
+                    }
+                    DisplayAddress::ByDescriptor { index, change, .. } => {
+                        let (wallet_policy, wallet_hmac) = context
+                            .as_ref()
+                            .map(|ctx| match ctx {
+                                DeviceContext::Ledger { wallet_policy, wallet_hmac } => (wallet_policy.clone(), *wallet_hmac),
+                            })
+                            .ok_or(LedgerError::MissingCommandInfo("Ledger requires DeviceContext::Ledger for descriptor-based address display"))?;
+                        (wallet_policy, wallet_hmac, *change, *index)
+                    }
+                };
+                let store = ledger_policy.to_store().ok();
+                self.state = State::GetWalletAddress(GetWalletAddressStep::WalletAddress { store });
+                return Ok(Some(Self::Transmit::from(command::get_wallet_address(
+                    &ledger_policy,
+                    wallet_hmac.as_ref(),
+                    change,
+                    address_index,
+                    display,
+                ))));
+            }
+            State::GetWalletAddress(GetWalletAddressStep::WalletAddress { store }) => {
+                if res.status_word == StatusWord::Deny {
+                    self.state = State::Finished(LedgerResponse::TaskDone);
+                    return Ok(None);
+                }
+                if res.status_word == StatusWord::InterruptedExecution {
+                    if let Some(s) = store {
+                        let transmit = s.execute(res.data).map_err(LedgerError::from)?;
+                        return Ok(Some(Self::Transmit::from(command::continue_interrupted(
+                            transmit,
+                        ))));
+                    } else {
+                        return Err(LedgerError::Interrupted.into());
+                    }
+                }
+                if res.status_word != StatusWord::OK {
+                    return Err(
+                        LedgerError::unexpected_result(res.data, "display address status").into(),
+                    );
+                }
+                let address = String::from_utf8(res.data)
+                    .map_err(|e| LedgerError::unexpected_result(vec![], e.to_string()))?;
+                self.state = State::Finished(LedgerResponse::Address(address));
+                return Ok(None);
+            }
+            State::Running { store, command } => {
+                if res.status_word == StatusWord::InterruptedExecution {
+                    if let Some(store) = store {
+                        let transmit = store.execute(res.data).map_err(LedgerError::from)?;
+                        return Ok(Some(Self::Transmit::from(command::continue_interrupted(
+                            transmit,
+                        ))));
+                    } else {
+                        return Err(LedgerError::Interrupted.into());
+                    }
+                }
+                match command {
+                    LedgerCommand::GetAppInfo => {
+                        if res.status_word != StatusWord::OK {
+                            return Err(LedgerError::unexpected_result(
+                                res.data,
+                                "get_version response",
+                            )
+                            .into());
+                        }
+                        let response = GetAppInfoResponse::try_from(res.data.clone())
+                            .map_err(|e| LedgerError::unexpected_result(res.data, e))?;
+                        self.state = State::Finished(LedgerResponse::AppInfo(response));
+                    }
+                    LedgerCommand::GetMasterFingerprint => {
+                        if res.data.len() < 4 {
+                            return Err(LedgerError::unexpected_result(
+                                res.data,
+                                "master fingerprint response",
+                            )
+                            .into());
+                        } else {
+                            let mut fg = [0x00; 4];
+                            fg.copy_from_slice(&res.data[0..4]);
+                            self.state = State::Finished(LedgerResponse::MasterFingerprint(
+                                Fingerprint::from(fg),
+                            ));
+                        }
+                    }
+                    LedgerCommand::GetXpub { .. } => {
+                        let xpub = Xpub::from_str(&String::from_utf8_lossy(&res.data))
+                            .map_err(|_| LedgerError::unexpected_result(res.data, "xpub string"))?;
+                        self.state = State::Finished(LedgerResponse::Xpub(xpub));
+                    }
+                    LedgerCommand::OpenApp(..) => {
+                        if matches!(
+                            res.status_word,
+                            StatusWord::OK | StatusWord::ClaNotSupported
+                        ) {
+                            self.state = State::Finished(LedgerResponse::TaskDone);
+                        } else {
+                            return Err(LedgerError::unexpected_result(
+                                res.data,
+                                "open app response",
+                            )
+                            .into());
+                        }
+                    }
+                    LedgerCommand::SignMessage { .. } => match res.status_word {
+                        StatusWord::Deny
+                        | StatusWord::ClaNotSupported
+                        | StatusWord::SignatureFail => {
+                            self.state = State::Finished(LedgerResponse::TaskDone)
+                        }
+                        StatusWord::OK => {
+                            let header = res.data[0];
+                            let sig = Signature::from_compact(&res.data[1..]).map_err(|_| {
+                                LedgerError::unexpected_result(res.data, "signature compact data")
+                            })?;
+                            self.state = State::Finished(LedgerResponse::Signature(header, sig));
+                        }
+                        _ => {
+                            return Err(LedgerError::unexpected_result(
+                                res.data,
+                                "sign message status",
+                            )
+                            .into());
+                        }
+                    },
+                    LedgerCommand::GetWalletAddress { .. } => {
+                        if res.status_word == StatusWord::Deny {
+                            self.state = State::Finished(LedgerResponse::TaskDone);
+                        } else if res.status_word == StatusWord::OK {
+                            let address = String::from_utf8(res.data).map_err(|e| {
+                                LedgerError::unexpected_result(vec![], e.to_string())
+                            })?;
+                            self.state = State::Finished(LedgerResponse::Address(address));
+                        } else {
+                            return Err(LedgerError::unexpected_result(
+                                res.data,
+                                "display address status",
+                            )
+                            .into());
+                        }
+                    }
                 }
             }
-            // FIXME: cleaner handling of res.status_word before processing command results
-            match command {
-                LedgerCommand::GetAppInfo => {
-                    if res.status_word != StatusWord::OK {
-                        return Err(LedgerError::unexpected_result(
-                            res.data,
-                            "get_version response",
-                        )
-                        .into());
-                    }
-                    let response = GetAppInfoResponse::try_from(res.data.clone())
-                        .map_err(|e| LedgerError::unexpected_result(res.data, e))?;
-                    self.state = State::Finished(LedgerResponse::AppInfo(response));
-                }
-                LedgerCommand::GetMasterFingerprint => {
-                    if res.data.len() < 4 {
-                        return Err(LedgerError::unexpected_result(
-                            res.data,
-                            "master fingerprint response",
-                        )
-                        .into());
-                    } else {
-                        let mut fg = [0x00; 4];
-                        fg.copy_from_slice(&res.data[0..4]);
-                        self.state = State::Finished(LedgerResponse::MasterFingerprint(
-                            Fingerprint::from(fg),
-                        ));
-                    }
-                }
-                LedgerCommand::GetXpub { .. } => {
-                    let xpub = Xpub::from_str(&String::from_utf8_lossy(&res.data))
-                        .map_err(|_| LedgerError::unexpected_result(res.data, "xpub string"))?;
-                    self.state = State::Finished(LedgerResponse::Xpub(xpub));
-                }
-                LedgerCommand::OpenApp(..) => {
-                    if matches!(
-                        res.status_word,
-                        StatusWord::OK | StatusWord::ClaNotSupported
-                    ) {
-                        self.state = State::Finished(LedgerResponse::TaskDone);
-                    } else {
-                        return Err(
-                            LedgerError::unexpected_result(res.data, "open app response").into(),
-                        );
-                    }
-                }
-                LedgerCommand::SignMessage { .. } => match res.status_word {
-                    // FIXME: figure out if these are correctly handled
-                    StatusWord::Deny | StatusWord::ClaNotSupported | StatusWord::SignatureFail => {
-                        self.state = State::Finished(LedgerResponse::TaskDone)
-                    }
-                    StatusWord::OK => {
-                        let header = res.data[0];
-                        let sig = Signature::from_compact(&res.data[1..]).map_err(|_| {
-                            LedgerError::unexpected_result(res.data, "signature compact data")
-                        })?;
-                        self.state = State::Finished(LedgerResponse::Signature(header, sig));
-                    }
-                    _ => {
-                        return Err(LedgerError::unexpected_result(
-                            res.data,
-                            "sign message status",
-                        )
-                        .into());
-                    }
-                },
-            }
+            State::New | State::Finished(..) => {}
         }
+
         Ok(None)
     }
+
     fn end(self) -> Result<Self::Response, Self::Error> {
         if let State::Finished(res) = self.state {
             Ok(Self::Response::from(res))
@@ -303,6 +470,10 @@ impl TryFrom<Command> for LedgerCommand {
                 .ok_or(LedgerError::MissingCommandInfo("network")),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
             Command::GetXpub { path, display } => Ok(Self::GetXpub { path, display }),
+            Command::DisplayAddress(addr, ctx) => Ok(Self::GetWalletAddress {
+                address: addr,
+                context: ctx,
+            }),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
             Command::GetVersion => Ok(Self::GetAppInfo),
         }
@@ -321,6 +492,7 @@ impl From<LedgerResponse> for Response {
             LedgerResponse::TaskDone => Response::TaskDone,
             LedgerResponse::Xpub(xpub) => Response::Xpub(xpub),
             LedgerResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
+            LedgerResponse::Address(address) => Response::Address(address),
         }
     }
 }
@@ -334,6 +506,7 @@ impl From<LedgerError> for Error {
             LedgerError::Store(_) => Error::Request("Store operation failed"),
             LedgerError::Interrupted => Error::Request("Operation interrupted"),
             LedgerError::UnexpectedResult(data, ctx) => Error::unexpected_result(data, ctx),
+            LedgerError::UnsupportedDisplayAddress(ctx) => Error::UnsupportedDisplayAddress(ctx),
             LedgerError::FailedToOpenApp(_) => Error::AuthenticationRefused,
         }
     }

@@ -1,4 +1,5 @@
 use bitcoin::Network;
+use bitcoin::address::AddressType;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::secp256k1::ecdsa::Signature;
 
@@ -9,6 +10,22 @@ pub struct UnlockOptions {
     pub network: Option<Network>,
 }
 
+#[derive(Clone, Debug)]
+pub enum DisplayAddress {
+    ByPath {
+        path: DerivationPath,
+        display: bool,
+        address_format: Option<AddressType>,
+    },
+    ByDescriptor {
+        index: u32,
+        change: bool,
+        display: bool,
+        descriptor_name: String,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     GetMasterFingerprint,
     GetVersion,
@@ -16,12 +33,23 @@ pub enum Command {
         path: DerivationPath,
         display: bool,
     },
+    DisplayAddress(DisplayAddress, Option<DeviceContext>),
     SignMessage {
         message: Vec<u8>,
         path: DerivationPath,
     },
     Unlock {
         options: UnlockOptions,
+    },
+}
+
+/// Device-specific context data required by certain commands.
+#[derive(Clone, Debug)]
+pub enum DeviceContext {
+    /// Required contexts for Ledger devices
+    Ledger {
+        wallet_policy: ledger::LedgerWalletPolicy,
+        wallet_hmac: Option<[u8; 32]>,
     },
 }
 
@@ -33,6 +61,7 @@ pub enum Response {
     Xpub(Xpub),
     EncryptionKey([u8; 64]),
     Signature(u8, Signature),
+    Address(String),
 }
 
 /// Device Information
@@ -79,6 +108,9 @@ pub enum Error {
 
     #[error("authentication refused")]
     AuthenticationRefused,
+
+    #[error("unsupported display address: {0}")]
+    UnsupportedDisplayAddress(String),
 }
 
 impl Error {

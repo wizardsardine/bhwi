@@ -271,11 +271,29 @@ where
 impl From<Command> for JadeCommand {
     fn from(cmd: Command) -> Self {
         match cmd {
-            Command::Unlock { .. } => Self::Auth,
-            Command::GetMasterFingerprint => Self::GetMasterFingerprint,
-            Command::GetXpub { path, .. } => Self::GetXpub(path),
-            Command::SignMessage { message, path } => Self::SignMessage { message, path },
-            Command::GetVersion => Self::GetInfo,
+            Command::Unlock { .. } => Ok(Self::Auth),
+            Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
+            Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),
+            Command::DisplayAddress(
+                DisplayAddress::ByDescriptor {
+                    index,
+                    change,
+                    descriptor_name,
+                    ..
+                },
+                _ctx,
+            ) => Ok(Self::GetReceiveAddress {
+                index,
+                change,
+                descriptor_name,
+            }),
+            Command::DisplayAddress(DisplayAddress::ByPath { .. }, _) => {
+                Err(Error::UnsupportedDisplayAddress(
+                    "Jade does not support path-based address display".into(),
+                ))
+            }
+            Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
+            Command::GetVersion => Ok(Self::GetInfo),
         }
     }
 }
@@ -327,6 +345,9 @@ impl From<JadeError> for Error {
                 format!("jade unexpected result: {msg}"),
             ),
             JadeError::HandshakeRefused => Error::AuthenticationRefused,
+            JadeError::UnsupportedDisplayAddress => {
+                Error::UnsupportedDisplayAddress("unsupported display address on Jade".into())
+            }
         }
     }
 }
