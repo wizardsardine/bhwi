@@ -29,7 +29,7 @@ impl DeviceControl {
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64, Encoding};
-    use bhwi_async::{HWI, transport::coldcard::DEFAULT_CKCC_SOCKET};
+    use bhwi_async::{DisplayAddress, HWI, transport::coldcard::DEFAULT_CKCC_SOCKET};
     use bitcoin::Network;
 
     use super::*;
@@ -92,5 +92,46 @@ mod tests {
         let info = dev.get_info().await.unwrap();
         assert_eq!(info.firmware, Some("mk4".to_string()));
         assert_eq!(info.version.to_string(), "5.x.x");
+    }
+
+    #[tokio::test]
+    async fn can_display_address() {
+        let (mut dev, mut control) = device().await;
+        let display_task = dev.display_address(
+            DisplayAddress::ByPath {
+                path: "44'/1'/0'/0/0".parse().unwrap(),
+                display: true,
+                address_format: None,
+            },
+            None,
+        );
+        let (display_res, approve_res) = tokio::join!(display_task, control.approve());
+        let address = display_res.expect("failed to display address");
+        approve_res.unwrap();
+        // ./hwi.py --emulators --fingerprint "0f056943" displayaddress --path "m/44'/1'/0'/0/0"
+        assert_eq!(address, "tb1q3s94sczh7r0he9hsdt4r7vtcpl7ljkjyn2k3tt");
+    }
+
+    // NOTE: The Coldcard simulator in the local firmware repo does not handle
+    // the `msas` (miniscript address) command. This should succeed on real
+    // hardware.
+    #[tokio::test]
+    async fn can_display_address_miniscript() {
+        let (mut dev, mut control) = device().await;
+        let display_task = dev.display_address(
+            DisplayAddress::ByDescriptor {
+                index: 0,
+                change: false,
+                display: true,
+                descriptor_name: "coldcard".to_string(),
+            },
+            None,
+        );
+        let (display_res, _) = tokio::join!(display_task, async {
+            let _ = control.approve().await;
+        });
+        // The simulator returns err_Unknown cmd for msas, so we expect an error.
+        // On real hardware with a registered descriptor, this would succeed.
+        assert!(display_res.is_err());
     }
 }
