@@ -56,6 +56,7 @@ impl LedgerError {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum LedgerCommand {
     OpenApp(Network),
     GetAppInfo,
@@ -127,6 +128,7 @@ pub enum LedgerResponse {
 }
 
 #[derive(Default)]
+#[allow(clippy::large_enum_variant)]
 enum State {
     #[default]
     New,
