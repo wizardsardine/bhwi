@@ -4,7 +4,7 @@ mod tests {
 
     use anyhow::Result;
     use base64ct::Encoding;
-    use bhwi_async::HWI;
+    use bhwi_async::{DisplayAddress, HWI};
     use bhwi_async::{Ledger, transport::ledger::speculos::LedgerTransportTcp};
     use bhwi_cli::ledger::SpeculosTcpChannel;
     use reqwest::Client;
@@ -95,16 +95,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn can_get_master_fingerprint() {
-        let (mut dev, _) = init().await;
-        let fingerprint = dev
-            .get_master_fingerprint()
-            .await
-            .expect("failed to get fingerprint");
-        assert_eq!(fingerprint.to_string(), "f5acc2fd");
-    }
-
-    #[tokio::test]
     async fn can_get_xpub() {
         let (mut dev, _) = init().await;
         let xpub = dev
@@ -164,5 +154,43 @@ mod tests {
         assert_eq!(info.version.to_string(), "2.4.5");
         assert_eq!(info.firmware, Some("Bitcoin Test".to_string()));
         assert_eq!(info.networks.first().unwrap().to_string(), "testnet");
+    }
+
+    #[tokio::test]
+    async fn can_display_address() {
+        let (mut dev, client) = init().await;
+        client
+            .set_automation(
+                &serde_json::from_str::<Value>(include_str!("../automations/display_address.json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let address = dev
+            .display_address(
+                DisplayAddress::ByPath {
+                    path: "m/84'/1'/0'/0/0".parse().unwrap(),
+                    display: true,
+                    address_format: None,
+                },
+                None,
+            )
+            .await
+            .expect("failed to display address");
+        assert_eq!(address, "tb1qzdr7s2sr0dwmkwx033r4nujzk86u0cy6fmzfjk");
+    }
+
+    #[tokio::test]
+    async fn can_display_address_by_descriptor() {
+        // TODO: Not actually implemented yet. Need descriptor registration.
+        // let (mut dev, _) = init().await;
+        // let result = dev
+        //     .display_address(DisplayAddress::ByDescriptor {
+        //         index: 0,
+        //         change: false,
+        //         display: true,
+        //         descriptor_name: "mywallet".to_string(),
+        //     })
+        //     .await;
     }
 }

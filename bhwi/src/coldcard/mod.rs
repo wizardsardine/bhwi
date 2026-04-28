@@ -8,7 +8,7 @@ use bitcoin::secp256k1::ecdsa::Signature;
 
 use crate::Interpreter;
 use crate::coldcard::api::response::ResponseMessage;
-use crate::common::{Command, Error, Info, Recipient, Response, Transmit};
+use crate::common::{Command, DisplayAddress, Error, Info, Recipient, Response, Transmit};
 use crate::device::DeviceId;
 
 pub const DEFAULT_CKCC_SOCKET: &str = "/tmp/ckcc-simulator.sock";
@@ -61,6 +61,15 @@ pub enum ColdcardCommand {
         message: Vec<u8>,
         path: DerivationPath,
     },
+    ShowAddress {
+        path: DerivationPath,
+        addr_fmt: u32,
+    },
+    MiniscriptAddress {
+        name: String,
+        change: bool,
+        index: u32,
+    },
 }
 
 pub enum ColdcardResponse {
@@ -78,6 +87,7 @@ pub enum ColdcardResponse {
         xpub: Option<Xpub>,
     },
     Signature(u8, Signature),
+    Address(String),
 }
 
 pub struct ColdcardTransmit {
@@ -147,6 +157,17 @@ where
             ColdcardCommand::SignMessage { message, path } => {
                 request(api::request::sign_message(message, path), self.encryption)?
             }
+            ColdcardCommand::ShowAddress { path, addr_fmt } => {
+                request(api::request::show_address(path, *addr_fmt), self.encryption)?
+            }
+            ColdcardCommand::MiniscriptAddress {
+                name,
+                change,
+                index,
+            } => request(
+                api::request::miniscript_address(name, *change, *index),
+                self.encryption,
+            )?,
         };
 
         self.state = State::Running(command);
@@ -186,6 +207,16 @@ where
                 self.state = State::Finished(mypub);
                 Ok(None)
             }
+            State::Running(ColdcardCommand::ShowAddress { .. }) => {
+                let data = self.encryption.decrypt(data)?;
+                self.state = State::Finished(api::response::show_address(&data)?);
+                Ok(None)
+            }
+            State::Running(ColdcardCommand::MiniscriptAddress { .. }) => {
+                let data = self.encryption.decrypt(data)?;
+                self.state = State::Finished(api::response::miniscript_address(&data)?);
+                Ok(None)
+            }
             State::Finished(..) => Ok(None),
         }
     }
@@ -207,6 +238,32 @@ impl TryFrom<Command> for ColdcardCommand {
             Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
             Command::GetVersion => Ok(Self::GetVersion),
+            Command::DisplayAddress(
+                DisplayAddress::ByPath {
+                    path,
+                    address_format,
+                    ..
+                },
+                ..,
+            ) => Ok(Self::ShowAddress {
+                path,
+                addr_fmt: address_format
+                    .map(api::request::addr_fmt::from_address_type)
+                    .unwrap_or(api::request::addr_fmt::AF_P2WPKH),
+            }),
+            Command::DisplayAddress(
+                DisplayAddress::ByDescriptor {
+                    descriptor_name,
+                    change,
+                    index,
+                    ..
+                },
+                ..,
+            ) => Ok(Self::MiniscriptAddress {
+                name: descriptor_name,
+                change,
+                index,
+            }),
         }
     }
 }
@@ -232,6 +289,7 @@ impl From<ColdcardResponse> for Response {
             }
             ColdcardResponse::Ok => Response::TaskDone,
             ColdcardResponse::Busy => Response::TaskBusy,
+            ColdcardResponse::Address(address) => Response::Address(address),
         }
     }
 }

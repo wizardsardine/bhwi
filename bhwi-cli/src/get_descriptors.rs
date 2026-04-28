@@ -191,9 +191,9 @@ impl DeviceManager {
 
 fn bip44_purpose(desc_type: DescriptorType) -> Result<u32> {
     Ok(match desc_type {
-        DescriptorType::Sh | DescriptorType::ShSortedMulti | DescriptorType::Pkh => 44,
-        DescriptorType::Wpkh | DescriptorType::Wsh | DescriptorType::WshSortedMulti => 84,
-        DescriptorType::ShWsh | DescriptorType::ShWpkh | DescriptorType::ShWshSortedMulti => 49,
+        DescriptorType::Sh | DescriptorType::Pkh => 44,
+        DescriptorType::Wpkh | DescriptorType::Wsh => 84,
+        DescriptorType::ShWsh | DescriptorType::ShWpkh => 49,
         DescriptorType::Tr => 86,
         DescriptorType::Bare => anyhow::bail!("Bare PK descriptors aren't supported"),
     })

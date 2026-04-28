@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::Interpreter;
-use crate::common::{Command, Error, Info, Recipient, Response, Transmit};
+use crate::common::{Command, DisplayAddress, Error, Info, Recipient, Response, Transmit};
 use crate::device::DeviceId;
 use crate::jade::api::GetInfoResponse;
 
@@ -35,6 +35,7 @@ pub enum JadeError {
     Serialization(String),
     UnexpectedResult(String),
     HandshakeRefused,
+    UnsupportedDisplayAddress,
 }
 
 pub enum JadeCommand {
@@ -42,6 +43,11 @@ pub enum JadeCommand {
     GetMasterFingerprint,
     GetInfo,
     GetXpub(DerivationPath),
+    GetReceiveAddress {
+        index: u32,
+        change: bool,
+        descriptor_name: String,
+    },
     SignMessage {
         message: Vec<u8>,
         path: DerivationPath,
@@ -54,6 +60,7 @@ pub enum JadeResponse {
     Signature(u8, Signature),
     TaskDone,
     Xpub(Xpub),
+    Address(String),
 }
 
 pub enum JadeRecipient {
@@ -135,7 +142,7 @@ fn from_response<D: DeserializeOwned>(buffer: &[u8]) -> Result<api::Response<D>,
 
 impl<C, T, R, E> Interpreter for JadeInterpreter<C, T, R, E>
 where
-    C: Into<JadeCommand>,
+    C: TryInto<JadeCommand, Error = E>,
     T: From<JadeTransmit>,
     R: From<JadeResponse>,
     E: From<JadeError>,
@@ -146,7 +153,7 @@ where
     type Error = E;
 
     fn start(&mut self, command: Self::Command) -> Result<Self::Transmit, Self::Error> {
-        let command: JadeCommand = command.into();
+        let command: JadeCommand = command.try_into()?;
         let req = match &command {
             JadeCommand::Auth => request(
                 "auth_user",
@@ -175,6 +182,19 @@ where
                     path: path.to_u32_vec(),
                     message: &String::from_utf8(message.to_vec())
                         .map_err(|e| JadeError::Serialization(e.to_string()))?,
+                }),
+            ),
+            JadeCommand::GetReceiveAddress {
+                index,
+                change,
+                descriptor_name,
+            } => request(
+                "get_receive_address",
+                Some(api::DescriptorAddressParams {
+                    network: self.network,
+                    branch: u32::from(*change),
+                    pointer: *index,
+                    descriptor_name,
                 }),
             ),
             JadeCommand::GetInfo => request("get_version_info", None::<api::EmptyRequest>),
@@ -254,6 +274,11 @@ where
                 self.response = Some(JadeResponse::Signature(sig_bytes[0], sig));
                 Ok(None)
             }
+            State::Running(JadeCommand::GetReceiveAddress { .. }) => {
+                let address: String = from_response(&data)?.into_result()?;
+                self.response = Some(JadeResponse::Address(address));
+                Ok(None)
+            }
             State::Running(JadeCommand::GetInfo) => {
                 let info: GetInfoResponse = from_response(&data)?.into_result()?;
                 self.response = Some(JadeResponse::GetInfo(info));
@@ -268,14 +293,34 @@ where
     }
 }
 
-impl From<Command> for JadeCommand {
-    fn from(cmd: Command) -> Self {
+impl TryFrom<Command> for JadeCommand {
+    type Error = Error;
+
+    fn try_from(cmd: Command) -> Result<Self, Self::Error> {
         match cmd {
-            Command::Unlock { .. } => Self::Auth,
-            Command::GetMasterFingerprint => Self::GetMasterFingerprint,
-            Command::GetXpub { path, .. } => Self::GetXpub(path),
-            Command::SignMessage { message, path } => Self::SignMessage { message, path },
-            Command::GetVersion => Self::GetInfo,
+            Command::Unlock { .. } => Ok(Self::Auth),
+            Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
+            Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),
+            Command::DisplayAddress(
+                DisplayAddress::ByDescriptor {
+                    index,
+                    change,
+                    descriptor_name,
+                    ..
+                },
+                _ctx,
+            ) => Ok(Self::GetReceiveAddress {
+                index,
+                change,
+                descriptor_name,
+            }),
+            Command::DisplayAddress(DisplayAddress::ByPath { .. }, _) => {
+                Err(Error::UnsupportedDisplayAddress(
+                    "Jade does not support path-based address display".into(),
+                ))
+            }
+            Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
+            Command::GetVersion => Ok(Self::GetInfo),
         }
     }
 }
@@ -292,6 +337,7 @@ impl From<JadeResponse> for Response {
                 networks: info.jade_networks.into(),
                 firmware: None,
             }),
+            JadeResponse::Address(address) => Response::Address(address),
         }
     }
 }
@@ -327,6 +373,9 @@ impl From<JadeError> for Error {
                 format!("jade unexpected result: {msg}"),
             ),
             JadeError::HandshakeRefused => Error::AuthenticationRefused,
+            JadeError::UnsupportedDisplayAddress => {
+                Error::UnsupportedDisplayAddress("unsupported display address on Jade".into())
+            }
         }
     }
 }
