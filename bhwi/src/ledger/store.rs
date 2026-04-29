@@ -21,6 +21,7 @@ use super::{apdu::ClientCommandCode, merkle::MerkleTree};
 ///
 /// Finally, it keeps track of the yielded values (that is, the values sent from the hardware
 /// wallet with a YIELD client command).
+#[derive(Default)]
 pub struct DelegatedStore {
     yielded: Vec<Vec<u8>>,
     queue: Vec<Vec<u8>>,
@@ -30,12 +31,7 @@ pub struct DelegatedStore {
 
 impl DelegatedStore {
     pub fn new() -> Self {
-        Self {
-            yielded: Vec::new(),
-            queue: Vec::new(),
-            known_preimages: Vec::new(),
-            trees: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Adds a preimage to the list of known preimages.

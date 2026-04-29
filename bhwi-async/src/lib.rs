@@ -6,6 +6,8 @@ pub mod transport;
 use std::{error::Error as StdError, fmt::Debug};
 
 use async_trait::async_trait;
+pub use bhwi::common::DeviceContext;
+pub use bhwi::common::DisplayAddress;
 pub use bhwi::common::Info;
 use bhwi::{
     Interpreter,
@@ -14,7 +16,7 @@ use bhwi::{
         bip32::{DerivationPath, Fingerprint, Xpub},
         secp256k1::ecdsa::Signature,
     },
-    common,
+    common::{self},
 };
 pub use jade::Jade;
 pub use ledger::Ledger;
@@ -47,6 +49,11 @@ pub trait HWI {
         message: &[u8],
         path: DerivationPath,
     ) -> Result<(u8, Signature), Self::Error>;
+    async fn display_address(
+        &mut self,
+        address: common::DisplayAddress,
+        context: Option<common::DeviceContext>,
+    ) -> Result<String, Self::Error>;
 }
 
 // TODO: this will become a pain to maintain, but we can have a proc-macro
@@ -67,6 +74,11 @@ pub trait HWIDevice {
         message: &[u8],
         path: DerivationPath,
     ) -> Result<(u8, Signature), HWIDeviceError>;
+    async fn display_address(
+        &mut self,
+        address: common::DisplayAddress,
+        context: Option<common::DeviceContext>,
+    ) -> Result<String, HWIDeviceError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -165,6 +177,20 @@ where
             Err(common::Error::NoErrorOrResult.into())
         }
     }
+
+    async fn display_address(
+        &mut self,
+        address: common::DisplayAddress,
+        context: Option<common::DeviceContext>,
+    ) -> Result<String, Self::Error> {
+        if let common::Response::Address(addr) =
+            run_command(self, common::Command::DisplayAddress(address, context)).await?
+        {
+            Ok(addr)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
 }
 
 #[async_trait(?Send)]
@@ -205,6 +231,16 @@ where
         path: DerivationPath,
     ) -> Result<(u8, Signature), HWIDeviceError> {
         HWI::sign_message(self, message, path)
+            .await
+            .map_err(HWIDeviceError::new)
+    }
+
+    async fn display_address(
+        &mut self,
+        address: DisplayAddress,
+        context: Option<DeviceContext>,
+    ) -> Result<String, HWIDeviceError> {
+        HWI::display_address(self, address, context)
             .await
             .map_err(HWIDeviceError::new)
     }

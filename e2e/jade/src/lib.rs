@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64, Encoding};
-    use bhwi_async::HWI;
     use bhwi_async::transport::jade::tcp::TcpTransport;
+    use bhwi_async::{DisplayAddress, HWI};
     use bhwi_cli::jade::{JadeQemuDevice, PinServerClient, TcpClient};
     use bitcoin::Network;
     use tokio::net::TcpStream;
@@ -71,5 +71,22 @@ mod tests {
                 Network::Signet
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn can_display_address_miniscript() {
+        let mut dev = device().await;
+        let res = dev
+            .display_address(
+                DisplayAddress::ByPath {
+                    path: "m/84'/1'/0'/0/0".parse().unwrap(),
+                    display: true,
+                    address_format: None,
+                },
+                None,
+            )
+            .await;
+        // Jade does not support Path-based address display
+        assert!(res.is_err());
     }
 }

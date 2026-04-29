@@ -17,6 +17,50 @@ pub mod request {
         }
     }
 
+    /// Address format bitmask constants (from ckcc-protocol)
+    pub mod addr_fmt {
+        pub const AFC_PUBKEY: u32 = 0x01;
+        pub const AFC_SEGWIT: u32 = 0x02;
+        pub const AFC_BECH32: u32 = 0x04;
+        pub const AFC_SCRIPT: u32 = 0x08;
+        pub const AFC_WRAPPED: u32 = 0x10;
+        pub const AFC_BECH32M: u32 = 0x20;
+
+        pub const AF_P2PKH: u32 = AFC_PUBKEY;
+        pub const AF_P2WPKH: u32 = AFC_PUBKEY | AFC_SEGWIT | AFC_BECH32;
+        pub const AF_P2WPKH_P2SH: u32 = AFC_PUBKEY | AFC_SEGWIT | AFC_WRAPPED;
+        pub const AF_P2TR: u32 = AFC_PUBKEY | AFC_SEGWIT | AFC_BECH32M;
+        pub const AF_P2SH: u32 = AFC_SCRIPT;
+        pub const AF_P2WSH: u32 = AFC_SCRIPT | AFC_SEGWIT | AFC_BECH32;
+        pub const AF_P2WSH_P2SH: u32 = AFC_SCRIPT | AFC_SEGWIT | AFC_WRAPPED;
+
+        pub fn from_address_type(addr_type: bitcoin::address::AddressType) -> u32 {
+            match addr_type {
+                bitcoin::address::AddressType::P2pkh => AF_P2PKH,
+                bitcoin::address::AddressType::P2sh => AF_P2SH,
+                bitcoin::address::AddressType::P2wpkh => AF_P2WPKH,
+                bitcoin::address::AddressType::P2wsh => AF_P2WSH,
+                bitcoin::address::AddressType::P2tr => AF_P2TR,
+                _ => AF_P2WPKH,
+            }
+        }
+    }
+
+    pub fn show_address(path: &DerivationPath, addr_fmt: u32) -> Vec<u8> {
+        let mut data = b"show".to_vec();
+        data.extend(addr_fmt.to_le_bytes());
+        data.extend(path.to_string().as_bytes());
+        data
+    }
+
+    pub fn miniscript_address(name: &str, change: bool, index: u32) -> Vec<u8> {
+        let mut data = b"msas".to_vec();
+        data.extend((change as u32).to_le_bytes());
+        data.extend(index.to_le_bytes());
+        data.extend(name.as_bytes());
+        data
+    }
+
     pub fn sign_message(message: &[u8], path: &DerivationPath) -> Vec<u8> {
         let mut data = b"smsg".to_vec();
         // coldcard can support a few different address types:
@@ -178,6 +222,34 @@ pub mod response {
         let s =
             std::str::from_utf8(data).map_err(|e| ColdcardError::Serialization(e.to_string()))?;
         Xpub::from_str(s).map_err(|e| ColdcardError::Serialization(e.to_string()))
+    }
+
+    pub fn show_address(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
+        match ResponseHandler::parse_response(res)? {
+            (ResponseMessage::Asci, data) => {
+                let address = String::from_utf8(data.to_owned())?;
+                Ok(ColdcardResponse::Address(address))
+            }
+            (ResponseMessage::Refu, _) => Ok(ColdcardResponse::Ok),
+            (msg, _) => Err(ColdcardError::unexpected_response_message(
+                msg,
+                &[ResponseMessage::Asci, ResponseMessage::Refu],
+            )),
+        }
+    }
+
+    pub fn miniscript_address(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
+        match ResponseHandler::parse_response(res)? {
+            (ResponseMessage::Asci, data) => {
+                let address = String::from_utf8(data.to_owned())?;
+                Ok(ColdcardResponse::Address(address))
+            }
+            (ResponseMessage::Refu, _) => Ok(ColdcardResponse::Ok),
+            (msg, _) => Err(ColdcardError::unexpected_response_message(
+                msg,
+                &[ResponseMessage::Asci, ResponseMessage::Refu],
+            )),
+        }
     }
 
     pub fn master_fingerprint(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {

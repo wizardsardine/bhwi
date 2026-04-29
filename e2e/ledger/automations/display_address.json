@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "regexp": "Verify|Path|Address",
+      "actions": [
+        ["button", 2, true],
+        ["button", 2, false]
+      ]
+    },
+    {
+      "regexp": "Confirm|Approve",
+      "actions": [
+        [ "button", 1, true ],
+        [ "button", 2, true ],
+        [ "button", 2, false ],
+        [ "button", 1, false ]
+      ]
+    }
+  ]
+}

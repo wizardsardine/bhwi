@@ -18,6 +18,7 @@ jade = ["serde", "serde_bytes", "serde_cbor"]
 base64ct = { workspace = true, features = ["alloc"] }
 bitcoin.workspace = true
 log.workspace = true # TODO: remove me
+miniscript.workspace = true
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json.workspace = true
 serde_cbor = { workspace = true, optional = true }

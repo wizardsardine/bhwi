@@ -9,6 +9,7 @@ use strum::{EnumIter, IntoEnumIterator};
 
 use crate::{coldcard::ColdcardDevice, config::Config, jade::JadeDevice, ledger::LedgerDevice};
 
+pub mod address;
 pub mod coldcard;
 pub mod config;
 pub mod get_descriptors;

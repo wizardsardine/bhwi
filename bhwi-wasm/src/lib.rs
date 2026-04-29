@@ -60,6 +60,7 @@ impl<T: AsyncHWI> HWI for T {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum Device {
     Ledger(Ledger<LedgerTransportHID<webhid::WebHidDevice>>),
     Coldcard(Coldcard<ColdcardTransportHID<webhid::WebHidDevice>>),
