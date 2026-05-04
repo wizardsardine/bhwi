@@ -17,6 +17,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 bitcoin = { workspace = true, features = ["serde"] }
 bhwi-async = { workspace = true, features = ["emulators"] }
+bhwi.workspace = true
 futures.workspace = true
 hex = { workspace = true, features = ["serde"] }
 miniscript = { workspace = true, features = ["serde"] }

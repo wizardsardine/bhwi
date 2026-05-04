@@ -9,7 +9,7 @@ use core::default::Default;
 
 use super::{
     apdu::{self, ApduCommand},
-    wallet::LedgerWalletPolicy,
+    wallet::{LedgerWalletPolicy, WalletError},
 };
 
 // https://github.com/LedgerHQ/ledger-live/blob/5a0a1aa5dc183116839851b79bceb6704f1de4b9/libs/ledger-live-common/src/hw/openApp.ts#L3
@@ -68,38 +68,42 @@ pub fn get_extended_pubkey(path: &DerivationPath, display: bool) -> ApduCommand 
 }
 
 /// Creates the APDU command required to register the given wallet policy.
-pub fn register_wallet(policy: &LedgerWalletPolicy) -> ApduCommand {
-    let bytes = policy.serialize().expect("wallet policy serialization");
+pub fn register_wallet(policy: &LedgerWalletPolicy) -> Result<ApduCommand, WalletError> {
+    let bytes = policy.serialize()?;
     let mut data = encode::serialize(&VarInt(bytes.len() as u64));
     data.extend(bytes);
-    ApduCommand {
+    Ok(ApduCommand {
         cla: apdu::Cla::Bitcoin as u8,
         ins: apdu::BitcoinCommandCode::RegisterWallet as u8,
         data,
         ..Default::default()
-    }
+    })
 }
 
 /// Creates the APDU command required to retrieve an address for the given wallet.
+///
+/// The hmac is the result of a prior wallet registration; if `None`, a zeroed
+/// hmac is sent (used for singlesig wallets derived from paths rather than
+/// registered by descriptor).
 pub fn get_wallet_address(
     policy: &LedgerWalletPolicy,
     hmac: Option<&[u8; 32]>,
     change: bool,
     address_index: u32,
     display: bool,
-) -> ApduCommand {
+) -> Result<ApduCommand, WalletError> {
     let mut data: Vec<u8> = Vec::with_capacity(70);
     data.push(if display { 1_u8 } else { b'\0' });
-    data.extend_from_slice(&policy.id().expect("wallet policy id"));
+    data.extend_from_slice(&policy.id()?);
     data.extend_from_slice(hmac.unwrap_or(&[b'\0'; 32]));
     data.push(if change { 1_u8 } else { b'\0' });
     data.extend_from_slice(&address_index.to_be_bytes());
-    ApduCommand {
+    Ok(ApduCommand {
         cla: apdu::Cla::Bitcoin as u8,
         ins: apdu::BitcoinCommandCode::GetWalletAddress as u8,
         data,
         ..Default::default()
-    }
+    })
 }
 
 /// Creates the APDU command required to sign a psbt.
@@ -111,21 +115,21 @@ pub fn sign_psbt(
     output_commitments_root: &[u8; 32],
     policy: &LedgerWalletPolicy,
     hmac: Option<&[u8; 32]>,
-) -> ApduCommand {
+) -> Result<ApduCommand, WalletError> {
     let mut data: Vec<u8> = Vec::new();
     data.extend_from_slice(global_mapping_commitment);
     data.extend(encode::serialize(&VarInt(inputs_number as u64)));
     data.extend_from_slice(input_commitments_root);
     data.extend(encode::serialize(&VarInt(outputs_number as u64)));
     data.extend_from_slice(output_commitments_root);
-    data.extend_from_slice(&policy.id().expect("wallet policy id"));
+    data.extend_from_slice(&policy.id()?);
     data.extend_from_slice(hmac.unwrap_or(&[b'\0'; 32]));
-    ApduCommand {
+    Ok(ApduCommand {
         cla: apdu::Cla::Bitcoin as u8,
         ins: apdu::BitcoinCommandCode::SignPSBT as u8,
         data,
         ..Default::default()
-    }
+    })
 }
 
 /// Creates the APDU Command to sign a message.

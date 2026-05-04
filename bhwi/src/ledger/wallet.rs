@@ -1,3 +1,4 @@
+use core::fmt::Display;
 use core::str::FromStr;
 
 use bitcoin::{
@@ -52,11 +53,38 @@ impl WalletPolicyParts {
             .clone()
             .into_descriptor()
             .map_err(WalletError::WalletPolicy)?;
-        let key_strings: Vec<String> = descriptor.iter_pk().map(|k| k.to_string()).collect();
+        let key_strings: Vec<String> = descriptor
+            .iter_pk()
+            .map(format_key_without_derivation)
+            .collect();
         Ok(Self {
             descriptor_template,
             key_strings,
         })
+    }
+}
+
+/// Formats a `DescriptorPublicKey` as a BIP-388 KEY_INFO string (`[origin]xpub`),
+/// stripping the derivation path suffix and wildcard that `Display` includes.
+///
+/// The Ledger wallet protocol's merkle tree hashes keys in this format, not the
+/// full descriptor key format that includes `/<0;1>/*` suffixes.
+fn format_key_without_derivation(key: DescriptorPublicKey) -> String {
+    match key {
+        DescriptorPublicKey::Single(_) => key.to_string(),
+        DescriptorPublicKey::XPub(xpub) => format_origin_xkey(&xpub.origin, &xpub.xkey),
+        DescriptorPublicKey::MultiXPub(xpub) => format_origin_xkey(&xpub.origin, &xpub.xkey),
+    }
+}
+
+fn format_origin_xkey<K: Display>(
+    origin: &Option<(Fingerprint, DerivationPath)>,
+    xkey: &K,
+) -> String {
+    match origin {
+        Some((fp, path)) if !path.as_ref().is_empty() => format!("[{fp}/{path}]{xkey}"),
+        Some((fp, _)) => format!("[{fp}]{xkey}"),
+        None => xkey.to_string(),
     }
 }
 
@@ -178,6 +206,26 @@ pub enum WalletError {
     UnsupportedAddressType,
     InvalidPolicy,
     WalletPolicy(WalletPolicyError),
+}
+
+impl core::fmt::Display for WalletError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            WalletError::InvalidThreshold => write!(f, "invalid threshold"),
+            WalletError::UnsupportedAddressType => write!(f, "unsupported address type"),
+            WalletError::InvalidPolicy => write!(f, "invalid wallet policy"),
+            WalletError::WalletPolicy(e) => write!(f, "wallet policy error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for WalletError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WalletError::WalletPolicy(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 impl From<WalletPolicyError> for WalletError {

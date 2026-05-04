@@ -1,4 +1,5 @@
 pub use bitcoin;
+pub use miniscript;
 
 pub mod coldcard;
 pub mod common;

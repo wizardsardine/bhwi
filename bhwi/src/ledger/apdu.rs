@@ -78,6 +78,8 @@ pub enum StatusWord {
     BadState = 0xB007,
     /// Signature fail
     SignatureFail = 0xB008,
+    /// Command not allowed
+    CommandNotAllowed = 0x6901,
     /// Success
     OK = 0x9000,
     /// The command is interrupted, and requires the client's response
@@ -90,6 +92,7 @@ impl TryFrom<u16> for StatusWord {
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
             0x6985 => Ok(StatusWord::Deny),
+            0x6901 => Ok(StatusWord::CommandNotAllowed),
             0x6A80 => Ok(StatusWord::IncorrectData),
             0x6A82 => Ok(StatusWord::NotSupported),
             0x6A86 => Ok(StatusWord::WrongP1P2),
@@ -165,7 +168,7 @@ impl TryFrom<Vec<u8>> for ApduResponse {
             return Err(ApduError::ResponseTooShort);
         }
         let s = u16::from_be_bytes([res[res.len() - 2], res[res.len() - 1]]);
-        let status_word = StatusWord::try_from(s)?;
+        let status_word = StatusWord::try_from(s).map_err(|_| ApduError::StatusWordUnknown)?;
 
         Ok(ApduResponse {
             data: res[0..res.len() - 2].to_vec(),

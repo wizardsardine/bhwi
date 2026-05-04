@@ -321,6 +321,9 @@ impl TryFrom<Command> for JadeCommand {
             }
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
             Command::GetVersion => Ok(Self::GetInfo),
+            Command::RegisterWallet { .. } => Err(Error::MissingCommandInfo(
+                "RegisterWallet not supported by Jade",
+            )),
         }
     }
 }

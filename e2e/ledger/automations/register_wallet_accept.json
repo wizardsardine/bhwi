@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "regexp": "Review account|Account name|Wallet policy|Wallet|co-signer|Our|Their|key|public|Policy",
+      "actions": [
+        ["button", 2, true],
+        ["button", 2, false]
+      ]
+    },
+    {
+      "text": "Register account",
+      "actions": [
+        ["button", 1, true],
+        ["button", 2, true],
+        ["button", 2, false],
+        ["button", 1, false]
+      ]
+    },
+    {
+      "regexp": "Verify|Path|Address",
+      "actions": [
+        ["button", 2, true],
+        ["button", 2, false]
+      ]
+    },
+    {
+      "text": "Confirm",
+      "actions": [
+        ["button", 1, true],
+        ["button", 2, true],
+        ["button", 2, false],
+        ["button", 1, false]
+      ]
+    }
+  ]
+}

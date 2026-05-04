@@ -1,12 +1,16 @@
 #[cfg(test)]
 mod tests {
     use std::fmt::Display;
+    use std::str::FromStr;
 
     use anyhow::Result;
     use base64ct::Encoding;
-    use bhwi_async::{DisplayAddress, HWI};
+    use bhwi::ledger::{LedgerWalletPolicy, Version};
+    use bhwi_async::{DeviceContext, DisplayAddress, HWI};
     use bhwi_async::{Ledger, transport::ledger::speculos::LedgerTransportTcp};
+
     use bhwi_cli::ledger::SpeculosTcpChannel;
+    use miniscript::descriptor::WalletPolicy;
     use reqwest::Client;
     use serde::Serialize;
     use serde_json::Value;
@@ -182,15 +186,60 @@ mod tests {
 
     #[tokio::test]
     async fn can_display_address_by_descriptor() {
-        // TODO: Not actually implemented yet. Need descriptor registration.
-        // let (mut dev, _) = init().await;
-        // let result = dev
-        //     .display_address(DisplayAddress::ByDescriptor {
-        //         index: 0,
-        //         change: false,
-        //         display: true,
-        //         descriptor_name: "mywallet".to_string(),
-        //     })
-        //     .await;
+        let (mut dev, client) = init().await;
+        client
+            .set_automation(
+                &serde_json::from_str::<Value>(include_str!(
+                    "../automations/register_wallet_accept.json"
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let xpub = dev
+            .get_extended_pubkey("m/84'/1'/0'".parse().unwrap(), false)
+            .await
+            .unwrap();
+
+        let key_str = format!("[{fingerprint}/84'/1'/0']{xpub}");
+        let policy_str = format!("wpkh({key_str}/<0;1>/*)",);
+        let name = "testwallet";
+
+        let hmac = dev
+            .register_wallet(name, &policy_str)
+            .await
+            .expect("failed to register wallet");
+        let wallet_policy = WalletPolicy::from_str(&policy_str).unwrap();
+        let ledger_policy = LedgerWalletPolicy::new(name.to_string(), Version::V2, wallet_policy);
+        let ctx = DeviceContext::Ledger {
+            wallet_policy: ledger_policy,
+            wallet_hmac: Some(hmac),
+        };
+
+        client
+            .set_automation(
+                &serde_json::from_str::<Value>(include_str!(
+                    "../automations/register_wallet_accept.json"
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let address = dev
+            .display_address(
+                DisplayAddress::ByDescriptor {
+                    index: 0,
+                    change: false,
+                    display: true,
+                    descriptor_name: name.to_string(),
+                },
+                Some(ctx),
+            )
+            .await
+            .expect("failed to display address by descriptor");
+        assert_eq!(address, "tb1qzdr7s2sr0dwmkwx033r4nujzk86u0cy6fmzfjk");
     }
 }
