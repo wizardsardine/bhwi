@@ -264,6 +264,9 @@ impl TryFrom<Command> for ColdcardCommand {
                 change,
                 index,
             }),
+            Command::RegisterWallet { .. } => Err(ColdcardError::MissingCommandInfo(
+                "RegisterWallet not supported by Coldcard",
+            )),
         }
     }
 }

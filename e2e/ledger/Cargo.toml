@@ -13,5 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 reqwest = { workspace = true, features = ["json"] }
+miniscript.workspace = true
 
 bhwi-cli = { path = "../../bhwi-cli" }
+bhwi.workspace = true

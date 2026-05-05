@@ -2,6 +2,7 @@ use bitcoin::Network;
 use bitcoin::address::AddressType;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::secp256k1::ecdsa::Signature;
+use miniscript::descriptor::WalletPolicy;
 
 use crate::{coldcard, jade, ledger};
 
@@ -34,6 +35,10 @@ pub enum Command {
         display: bool,
     },
     DisplayAddress(DisplayAddress, Option<DeviceContext>),
+    RegisterWallet {
+        name: String,
+        policy: WalletPolicy,
+    },
     SignMessage {
         message: Vec<u8>,
         path: DerivationPath,
@@ -62,6 +67,7 @@ pub enum Response {
     EncryptionKey([u8; 64]),
     Signature(u8, Signature),
     Address(String),
+    WalletHmac([u8; 32]),
 }
 
 /// Device Information

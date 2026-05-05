@@ -39,6 +39,9 @@ pub enum LedgerError {
     #[error("store error")]
     Store(#[from] StoreError),
 
+    #[error("wallet error: {0}")]
+    Wallet(#[from] WalletError),
+
     #[error("operation interrupted")]
     Interrupted,
 
@@ -75,6 +78,9 @@ pub enum LedgerCommand {
     SignMessage {
         message: Vec<u8>,
         path: DerivationPath,
+    },
+    RegisterWallet {
+        policy: LedgerWalletPolicy,
     },
 }
 
@@ -133,6 +139,7 @@ pub enum LedgerResponse {
     TaskDone,
     Xpub(Xpub),
     Address(String),
+    WalletHmac([u8; 32]),
 }
 
 #[derive(Default)]
@@ -227,6 +234,10 @@ where
                     State::GetWalletAddress(GetWalletAddressStep::Fingerprint { address, context });
                 return Ok(Self::Transmit::from(command::get_master_fingerprint()));
             }
+            LedgerCommand::RegisterWallet { ref policy } => (
+                Self::Transmit::from(command::register_wallet(policy).map_err(LedgerError::from)?),
+                Some(policy.to_store().map_err(LedgerError::from)?),
+            ),
         };
         self.state = State::Running { command, store };
         Ok(transmit)
@@ -234,8 +245,12 @@ where
 
     fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, Self::Error> {
         let res = ApduResponse::try_from(data).map_err(LedgerError::from)?;
-        match &mut self.state {
-            State::GetWalletAddress(GetWalletAddressStep::Fingerprint { address, context }) => {
+        let state = std::mem::take(&mut self.state);
+        let (next_state, result) = match state {
+            State::GetWalletAddress(GetWalletAddressStep::Fingerprint {
+                mut address,
+                context,
+            }) => {
                 if res.data.len() < 4 {
                     return Err(LedgerError::unexpected_result(
                         res.data,
@@ -246,7 +261,7 @@ where
                 let mut fg = [0x00; 4];
                 fg.copy_from_slice(&res.data[0..4]);
                 let fingerprint = Fingerprint::from(fg);
-                let (account_path, display) = match &address {
+                match &mut address {
                     DisplayAddress::ByPath { path, display, .. } => {
                         let children: Vec<_> = path.as_ref().to_vec();
                         if children.len() < 5 {
@@ -255,24 +270,55 @@ where
                             )
                             .into());
                         }
-                        (DerivationPath::from(children[..3].to_vec()), *display)
+                        let account_path = DerivationPath::from(children[..3].to_vec());
+                        let display = *display;
+                        let cmd = Self::Transmit::from(command::get_extended_pubkey(
+                            &account_path,
+                            false,
+                        ));
+                        (
+                            State::GetWalletAddress(GetWalletAddressStep::Xpub {
+                                address,
+                                fingerprint,
+                                display,
+                                context,
+                            }),
+                            Some(cmd),
+                        )
                     }
-                    DisplayAddress::ByDescriptor { .. } => {
-                        return Err(LedgerError::UnsupportedDisplayAddress(
-                            "Ledger does not support descriptor-based address display via wallet registration yet".into(),
-                        ).into());
+                    DisplayAddress::ByDescriptor {
+                        index,
+                        change,
+                        display,
+                        ..
+                    } => {
+                        let (ledger_policy, wallet_hmac) = context
+                            .as_ref()
+                            .map(|ctx| match ctx {
+                                DeviceContext::Ledger { wallet_policy, wallet_hmac } => {
+                                    (wallet_policy.clone(), *wallet_hmac)
+                                }
+                            })
+                            .ok_or(LedgerError::MissingCommandInfo(
+                                "Ledger requires DeviceContext::Ledger for descriptor-based address display",
+                            ))?;
+                        let store = Some(ledger_policy.to_store().map_err(LedgerError::from)?);
+                        let cmd = Self::Transmit::from(
+                            command::get_wallet_address(
+                                &ledger_policy,
+                                wallet_hmac.as_ref(),
+                                *change,
+                                *index,
+                                *display,
+                            )
+                            .map_err(LedgerError::from)?,
+                        );
+                        (
+                            State::GetWalletAddress(GetWalletAddressStep::WalletAddress { store }),
+                            Some(cmd),
+                        )
                     }
-                };
-                self.state = State::GetWalletAddress(GetWalletAddressStep::Xpub {
-                    address: address.clone(),
-                    fingerprint,
-                    display,
-                    context: std::mem::take(context),
-                });
-                return Ok(Some(Self::Transmit::from(command::get_extended_pubkey(
-                    &account_path,
-                    false,
-                ))));
+                }
             }
             State::GetWalletAddress(GetWalletAddressStep::Xpub {
                 address,
@@ -283,19 +329,14 @@ where
                 let xpub = Xpub::from_str(&String::from_utf8_lossy(&res.data)).map_err(|_| {
                     LedgerError::unexpected_result(res.data, "display address: xpub")
                 })?;
-                let display = *display;
                 let (ledger_policy, wallet_hmac, change, address_index) = match address {
                     DisplayAddress::ByPath { path, .. } => {
                         let children: Vec<_> = path.as_ref().to_vec();
                         let change =
                             children[3] == bitcoin::bip32::ChildNumber::from_normal_idx(1).unwrap();
                         let address_index = u32::from(children[4]);
-                        let policy =
-                            singlesig_wallet_policy(path, *fingerprint, xpub).map_err(|_| {
-                                LedgerError::UnsupportedDisplayAddress(
-                                    "failed to construct singlesig wallet policy from path".into(),
-                                )
-                            })?;
+                        let policy = singlesig_wallet_policy(&path, fingerprint, xpub)
+                            .map_err(LedgerError::from)?;
                         (
                             LedgerWalletPolicy::new(String::new(), Version::V2, policy),
                             None,
@@ -307,54 +348,62 @@ where
                         let (wallet_policy, wallet_hmac) = context
                             .as_ref()
                             .map(|ctx| match ctx {
-                                DeviceContext::Ledger { wallet_policy, wallet_hmac } => (wallet_policy.clone(), *wallet_hmac),
+                                DeviceContext::Ledger { wallet_policy, wallet_hmac } => {
+                                    (wallet_policy.clone(), *wallet_hmac)
+                                }
                             })
-                            .ok_or(LedgerError::MissingCommandInfo("Ledger requires DeviceContext::Ledger for descriptor-based address display"))?;
-                        (wallet_policy, wallet_hmac, *change, *index)
+                            .ok_or(LedgerError::MissingCommandInfo(
+                                "Ledger requires DeviceContext::Ledger for descriptor-based address display",
+                            ))?;
+                        (wallet_policy, wallet_hmac, change, index)
                     }
                 };
-                let store = ledger_policy.to_store().ok();
-                self.state = State::GetWalletAddress(GetWalletAddressStep::WalletAddress { store });
-                return Ok(Some(Self::Transmit::from(command::get_wallet_address(
-                    &ledger_policy,
-                    wallet_hmac.as_ref(),
-                    change,
-                    address_index,
-                    display,
-                ))));
+                let store = Some(ledger_policy.to_store().map_err(LedgerError::from)?);
+                let cmd = Self::Transmit::from(
+                    command::get_wallet_address(
+                        &ledger_policy,
+                        wallet_hmac.as_ref(),
+                        change,
+                        address_index,
+                        display,
+                    )
+                    .map_err(LedgerError::from)?,
+                );
+                (
+                    State::GetWalletAddress(GetWalletAddressStep::WalletAddress { store }),
+                    Some(cmd),
+                )
             }
-            State::GetWalletAddress(GetWalletAddressStep::WalletAddress { store }) => {
+            State::GetWalletAddress(GetWalletAddressStep::WalletAddress { mut store }) => {
                 if res.status_word == StatusWord::Deny {
-                    self.state = State::Finished(LedgerResponse::TaskDone);
-                    return Ok(None);
-                }
-                if res.status_word == StatusWord::InterruptedExecution {
-                    if let Some(s) = store {
+                    (State::Finished(LedgerResponse::TaskDone), None)
+                } else if res.status_word == StatusWord::InterruptedExecution {
+                    if let Some(ref mut s) = store {
                         let transmit = s.execute(res.data).map_err(LedgerError::from)?;
-                        return Ok(Some(Self::Transmit::from(command::continue_interrupted(
-                            transmit,
-                        ))));
+                        let cmd = Self::Transmit::from(command::continue_interrupted(transmit));
+                        self.state =
+                            State::GetWalletAddress(GetWalletAddressStep::WalletAddress { store });
+                        return Ok(Some(cmd));
                     } else {
                         return Err(LedgerError::Interrupted.into());
                     }
-                }
-                if res.status_word != StatusWord::OK {
+                } else if res.status_word != StatusWord::OK {
                     return Err(
                         LedgerError::unexpected_result(res.data, "display address status").into(),
                     );
+                } else {
+                    let address = String::from_utf8(res.data)
+                        .map_err(|e| LedgerError::unexpected_result(vec![], e.to_string()))?;
+                    (State::Finished(LedgerResponse::Address(address)), None)
                 }
-                let address = String::from_utf8(res.data)
-                    .map_err(|e| LedgerError::unexpected_result(vec![], e.to_string()))?;
-                self.state = State::Finished(LedgerResponse::Address(address));
-                return Ok(None);
             }
-            State::Running { store, command } => {
+            State::Running { mut store, command } => {
                 if res.status_word == StatusWord::InterruptedExecution {
-                    if let Some(store) = store {
-                        let transmit = store.execute(res.data).map_err(LedgerError::from)?;
-                        return Ok(Some(Self::Transmit::from(command::continue_interrupted(
-                            transmit,
-                        ))));
+                    if let Some(ref mut s) = store {
+                        let transmit = s.execute(res.data).map_err(LedgerError::from)?;
+                        let cmd = Self::Transmit::from(command::continue_interrupted(transmit));
+                        self.state = State::Running { store, command };
+                        return Ok(Some(cmd));
                     } else {
                         return Err(LedgerError::Interrupted.into());
                     }
@@ -370,7 +419,7 @@ where
                         }
                         let response = GetAppInfoResponse::try_from(res.data.clone())
                             .map_err(|e| LedgerError::unexpected_result(res.data, e))?;
-                        self.state = State::Finished(LedgerResponse::AppInfo(response));
+                        (State::Finished(LedgerResponse::AppInfo(response)), None)
                     }
                     LedgerCommand::GetMasterFingerprint => {
                         if res.data.len() < 4 {
@@ -382,22 +431,25 @@ where
                         } else {
                             let mut fg = [0x00; 4];
                             fg.copy_from_slice(&res.data[0..4]);
-                            self.state = State::Finished(LedgerResponse::MasterFingerprint(
-                                Fingerprint::from(fg),
-                            ));
+                            (
+                                State::Finished(LedgerResponse::MasterFingerprint(
+                                    Fingerprint::from(fg),
+                                )),
+                                None,
+                            )
                         }
                     }
                     LedgerCommand::GetXpub { .. } => {
                         let xpub = Xpub::from_str(&String::from_utf8_lossy(&res.data))
                             .map_err(|_| LedgerError::unexpected_result(res.data, "xpub string"))?;
-                        self.state = State::Finished(LedgerResponse::Xpub(xpub));
+                        (State::Finished(LedgerResponse::Xpub(xpub)), None)
                     }
                     LedgerCommand::OpenApp(..) => {
                         if matches!(
                             res.status_word,
                             StatusWord::OK | StatusWord::ClaNotSupported
                         ) {
-                            self.state = State::Finished(LedgerResponse::TaskDone);
+                            (State::Finished(LedgerResponse::TaskDone), None)
                         } else {
                             return Err(LedgerError::unexpected_result(
                                 res.data,
@@ -410,14 +462,17 @@ where
                         StatusWord::Deny
                         | StatusWord::ClaNotSupported
                         | StatusWord::SignatureFail => {
-                            self.state = State::Finished(LedgerResponse::TaskDone)
+                            (State::Finished(LedgerResponse::TaskDone), None)
                         }
                         StatusWord::OK => {
                             let header = res.data[0];
                             let sig = Signature::from_compact(&res.data[1..]).map_err(|_| {
                                 LedgerError::unexpected_result(res.data, "signature compact data")
                             })?;
-                            self.state = State::Finished(LedgerResponse::Signature(header, sig));
+                            (
+                                State::Finished(LedgerResponse::Signature(header, sig)),
+                                None,
+                            )
                         }
                         _ => {
                             return Err(LedgerError::unexpected_result(
@@ -429,12 +484,12 @@ where
                     },
                     LedgerCommand::GetWalletAddress { .. } => {
                         if res.status_word == StatusWord::Deny {
-                            self.state = State::Finished(LedgerResponse::TaskDone);
+                            (State::Finished(LedgerResponse::TaskDone), None)
                         } else if res.status_word == StatusWord::OK {
                             let address = String::from_utf8(res.data).map_err(|e| {
                                 LedgerError::unexpected_result(vec![], e.to_string())
                             })?;
-                            self.state = State::Finished(LedgerResponse::Address(address));
+                            (State::Finished(LedgerResponse::Address(address)), None)
                         } else {
                             return Err(LedgerError::unexpected_result(
                                 res.data,
@@ -443,12 +498,32 @@ where
                             .into());
                         }
                     }
+                    LedgerCommand::RegisterWallet { .. } => {
+                        if res.status_word != StatusWord::OK {
+                            return Err(LedgerError::unexpected_result(
+                                res.data,
+                                "register wallet status",
+                            )
+                            .into());
+                        }
+                        if res.data.len() < 64 {
+                            return Err(LedgerError::unexpected_result(
+                                res.data,
+                                "register wallet: response too short",
+                            )
+                            .into());
+                        }
+                        let mut hmac = [0u8; 32];
+                        hmac.copy_from_slice(&res.data[32..64]);
+                        (State::Finished(LedgerResponse::WalletHmac(hmac)), None)
+                    }
                 }
             }
-            State::New | State::Finished(..) => {}
-        }
-
-        Ok(None)
+            State::New => (State::New, None),
+            State::Finished(_) => (state, None),
+        };
+        self.state = next_state;
+        Ok(result)
     }
 
     fn end(self) -> Result<Self::Response, Self::Error> {
@@ -476,6 +551,9 @@ impl TryFrom<Command> for LedgerCommand {
             }),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
             Command::GetVersion => Ok(Self::GetAppInfo),
+            Command::RegisterWallet { name, policy } => Ok(Self::RegisterWallet {
+                policy: LedgerWalletPolicy::new(name, Version::V2, policy),
+            }),
         }
     }
 }
@@ -486,13 +564,14 @@ impl From<LedgerResponse> for Response {
             LedgerResponse::AppInfo(res) => Response::Info(Info {
                 version: res.version.to_string(),
                 networks: vec![res.network()],
-                firmware: None,
+                firmware: Some(res.app_name),
             }),
             LedgerResponse::Signature(header, signature) => Response::Signature(header, signature),
             LedgerResponse::TaskDone => Response::TaskDone,
             LedgerResponse::Xpub(xpub) => Response::Xpub(xpub),
             LedgerResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
             LedgerResponse::Address(address) => Response::Address(address),
+            LedgerResponse::WalletHmac(hmac) => Response::WalletHmac(hmac),
         }
     }
 }
@@ -504,6 +583,7 @@ impl From<LedgerError> for Error {
             LedgerError::NoErrorOrResult => Error::NoErrorOrResult,
             LedgerError::Apdu(e) => Error::Serialization(format!("{:?}", e)),
             LedgerError::Store(_) => Error::Request("Store operation failed"),
+            LedgerError::Wallet(_) => Error::Request("Wallet operation failed"),
             LedgerError::Interrupted => Error::Request("Operation interrupted"),
             LedgerError::UnexpectedResult(data, ctx) => Error::unexpected_result(data, ctx),
             LedgerError::UnsupportedDisplayAddress(ctx) => Error::UnsupportedDisplayAddress(ctx),

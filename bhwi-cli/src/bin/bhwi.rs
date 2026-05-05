@@ -7,6 +7,7 @@ use bitcoin::{
     bip32::{DerivationPath, Fingerprint},
 };
 use clap::{Parser, Subcommand};
+use miniscript::descriptor::WalletPolicy;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -51,6 +52,15 @@ enum Commands {
     Device(DeviceCommands),
     #[command(subcommand)]
     Xpub(XpubCommands),
+    /// Register a wallet policy on the device
+    RegisterWallet {
+        /// Name of the wallet
+        #[arg(long)]
+        name: String,
+        /// Miniscript wallet policy descriptor (e.g. "wpkh(@0/**)")
+        #[arg(long, value_parser = clap::value_parser!(WalletPolicy))]
+        descriptor: WalletPolicy,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -75,6 +85,14 @@ enum AddressCommands {
         /// Address format for path-based retrieval (p2pkh, p2sh, p2wpkh, p2wsh, p2tr)
         #[arg(long, value_parser = clap::value_parser!(AddressType))]
         address_format: Option<AddressType>,
+        /// HMAC from wallet registration (hex-encoded 64 chars), required for
+        /// Ledger descriptor-based addresses.
+        #[arg(long)]
+        hmac: Option<String>,
+        /// Miniscript wallet policy matching the registered wallet,
+        /// required for Ledger descriptor-based addresses.
+        #[arg(long, value_parser = clap::value_parser!(WalletPolicy))]
+        wallet_descriptor: Option<WalletPolicy>,
     },
 }
 
@@ -118,6 +136,8 @@ async fn main() -> Result<()> {
             change,
             display,
             address_format,
+            hmac,
+            wallet_descriptor,
         }) => match (from_path, from_descriptor) {
             (Some(path), None) => {
                 let target = AddressTarget::Path {
@@ -133,6 +153,8 @@ async fn main() -> Result<()> {
                     change,
                     display,
                     descriptor_name,
+                    hmac,
+                    wallet_descriptor,
                 };
                 dev_man.get_address(target).await?
             }
@@ -177,6 +199,15 @@ async fn main() -> Result<()> {
         Commands::Xpub(XpubCommands::Get { path }) => {
             if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
                 println!("{}", d.device().get_extended_pubkey(path, false).await?);
+            }
+        }
+        Commands::RegisterWallet { name, descriptor } => {
+            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+                let hmac = d
+                    .device()
+                    .register_wallet(&name, &descriptor.to_string())
+                    .await?;
+                println!("{}", hex::encode(hmac));
             }
         }
     }
