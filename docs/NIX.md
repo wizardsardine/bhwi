@@ -1,4 +1,4 @@
-# Nix Emulator CI
+# Nix
 
 BHWI uses Nix flake outputs to run emulator-backed e2e tests for the currently
 supported devices: Coldcard, Ledger, and Jade.
@@ -53,27 +53,52 @@ Packages/checks:
 
 ## Local E2E
 
+Run each emulator in its own terminal, then run the matching test command from
+another terminal after the emulator is ready. The first run may take a while
+because firmware and Python environments are built under `$XDG_CACHE_HOME/bhwi`.
+
 Coldcard:
 
 ```sh
+# Terminal 1
 nix run .#coldcard
+
+# Terminal 2
 nix develop .#coldcard -c cargo test -p bhwi-e2e-coldcard -- --test-threads=1
 ```
 
 Ledger:
 
 ```sh
+# Terminal 1
 nix run .#ledger
+
+# Terminal 2
 nix develop .#ledger -c cargo test -p bhwi-e2e-ledger -- --test-threads=1
 ```
 
 Jade:
 
 ```sh
+# Terminal 1
 nix run .#jade-pinserver
+
+# Terminal 2
 nix run .#jade
+
+# Terminal 3, after QEMU is listening
 nix run .#jade-init
+
+# Terminal 3
 nix develop .#jade -c cargo test -p bhwi-e2e-jade -- --test-threads=1
+```
+
+Useful readiness checks:
+
+```sh
+test -S /tmp/ckcc-simulator.sock
+nc -z localhost 9999 && nc -z localhost 5000
+nc -z localhost 8096 && nc -z localhost 30121
 ```
 
 ## Device Details

@@ -2,6 +2,20 @@
 
 ## Simulating Ledger Devices
 
+## Nix
+
+The recommended local e2e path is the Nix runner documented in
+[`docs/NIX.md`](NIX.md). It builds the pinned Ledger Bitcoin app when needed and
+starts Speculos on APDU `localhost:9999` and API `localhost:5000`.
+
+```sh
+# Terminal 1
+nix run .#ledger
+
+# Terminal 2
+nix develop .#ledger -c cargo test -p bhwi-e2e-ledger -- --test-threads=1
+```
+
 ## Installing
 
 ### Install the Speculos emulator
