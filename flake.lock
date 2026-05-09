@@ -1,5 +1,37 @@
 {
   "nodes": {
+    "app-bitcoin-new": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778169666,
+        "narHash": "sha256-5cKGK8NRmSHzBEb9gCR3u7Yh6G/r9QZCrqpAVbdZPRg=",
+        "owner": "LedgerHQ",
+        "repo": "app-bitcoin-new",
+        "rev": "d03ad67b243d424595c32df60a385f5aa575b912",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LedgerHQ",
+        "repo": "app-bitcoin-new",
+        "type": "github"
+      }
+    },
+    "coldcard-firmware": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1777127775,
+        "narHash": "sha256-Zw1jd4/LN55/o4462wtEJMUEOH4OjD3CVGPOZFpmO1c=",
+        "owner": "Coldcard",
+        "repo": "firmware",
+        "rev": "ca06dfd2509eacfad333be9d35ed274559915d0e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Coldcard",
+        "repo": "firmware",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -18,6 +50,58 @@
         "type": "github"
       }
     },
+    "flake-utils_2": {
+      "inputs": {
+        "systems": "systems_2"
+      },
+      "locked": {
+        "lastModified": 1731533236,
+        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    },
+    "jade-firmware": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1772102672,
+        "narHash": "sha256-Aahk6zMMyxMIPl18RjoJsjLjV7Yunuer+1SSiWlBs6g=",
+        "owner": "Blockstream",
+        "repo": "Jade",
+        "rev": "1ca0a0a475f227153070bc00e56734e0ca1fe6c2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Blockstream",
+        "repo": "Jade",
+        "rev": "1ca0a0a475f227153070bc00e56734e0ca1fe6c2",
+        "type": "github"
+      }
+    },
+    "jade-pinserver": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1770970125,
+        "narHash": "sha256-GrbwOHOOgNbh4398Tva31QFaZFIR4d6IHdAD+gnXt0I=",
+        "owner": "Blockstream",
+        "repo": "blind_pin_server",
+        "rev": "0205d38e75cb47f187db2efda5846cc898a85039",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Blockstream",
+        "repo": "blind_pin_server",
+        "rev": "0205d38e75cb47f187db2efda5846cc898a85039",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1773282481,
@@ -33,10 +117,67 @@
         "type": "indirect"
       }
     },
+    "nixpkgs-coldcard": {
+      "locked": {
+        "lastModified": 1735563628,
+        "narHash": "sha256-OnSAY7XDSx7CtDoqNh8jwVwh4xNL/2HaJxGjryLWzX8=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "b134951a4c9f3c995fd7be05f3243f8ecd65d798",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-24.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs-esp-dev": {
+      "inputs": {
+        "flake-utils": "flake-utils_2",
+        "nixpkgs": "nixpkgs_2"
+      },
+      "locked": {
+        "lastModified": 1767865407,
+        "narHash": "sha256-QWF1rZYd+HvNzLIeRS+OEBX7HF0EhWCGeLbMkgtbsIo=",
+        "owner": "mirrexagon",
+        "repo": "nixpkgs-esp-dev",
+        "rev": "5287d6e1ca9e15ebd5113c41b9590c468e1e001b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "mirrexagon",
+        "repo": "nixpkgs-esp-dev",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1767799921,
+        "narHash": "sha256-r4GVX+FToWVE2My8VVZH4V0pTIpnu2ZE8/Z4uxGEMBE=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "d351d0653aeb7877273920cd3e823994e7579b0b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-25.11",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
+        "app-bitcoin-new": "app-bitcoin-new",
+        "coldcard-firmware": "coldcard-firmware",
         "flake-utils": "flake-utils",
+        "jade-firmware": "jade-firmware",
+        "jade-pinserver": "jade-pinserver",
         "nixpkgs": "nixpkgs",
+        "nixpkgs-coldcard": "nixpkgs-coldcard",
+        "nixpkgs-esp-dev": "nixpkgs-esp-dev",
         "rust-overlay": "rust-overlay"
       }
     },
@@ -61,6 +202,21 @@
       }
     },
     "systems": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    },
+    "systems_2": {
       "locked": {
         "lastModified": 1681028828,
         "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",

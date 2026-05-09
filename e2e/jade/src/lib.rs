@@ -67,8 +67,8 @@ mod tests {
                 Network::Bitcoin,
                 Network::Testnet,
                 Network::Testnet4,
-                Network::Regtest,
-                Network::Signet
+                Network::Signet,
+                Network::Regtest
             ]
         );
     }

@@ -1,5 +1,19 @@
 # Coldcard Emulation
 
+## Nix
+
+The recommended local e2e path is the Nix runner documented in
+[`docs/NIX.md`](NIX.md). It builds the pinned Coldcard simulator under
+`$XDG_CACHE_HOME/bhwi/coldcard` and exposes `/tmp/ckcc-simulator.sock`.
+
+```sh
+# Terminal 1
+nix run .#coldcard
+
+# Terminal 2
+nix develop .#coldcard -c cargo test -p bhwi-e2e-coldcard -- --test-threads=1
+```
+
 ## Installation
 
 Follow instructions [here](https://github.com/Coldcard/firmware/blob/master/README.md) to build

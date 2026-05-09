@@ -1,5 +1,23 @@
 # Jade Emulation
 
+## Nix
+
+The recommended local e2e path is the Nix runner documented in
+[`docs/NIX.md`](NIX.md). It starts the Jade pinserver, runs the pinned Jade QEMU
+image, and uses `jade-init` to configure the emulator for tests.
+
+```sh
+# Terminal 1
+nix run .#jade-pinserver
+
+# Terminal 2
+nix run .#jade
+
+# Terminal 3, after QEMU is listening
+nix run .#jade-init
+nix develop .#jade -c cargo test -p bhwi-e2e-jade -- --test-threads=1
+```
+
 ## Docker/Podman
 
 https://github.com/Blockstream/Jade/blob/1ca0a0a475f227153070bc00e56734e0ca1fe6c2/README.md?plain=1#L257
