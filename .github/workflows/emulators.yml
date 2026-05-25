@@ -76,7 +76,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ env.XDG_CACHE_HOME }}/bhwi/ledger
-          key: ledger-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/scripts/build-ledger-app.sh', 'nix/scripts/start-ledger.sh') }}
+          key: ledger-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/speculos.nix', 'nix/scripts/build-ledger-app.sh', 'nix/scripts/start-ledger.sh') }}
           restore-keys: |
             ledger-${{ runner.os }}-
       - name: Start Ledger Speculos

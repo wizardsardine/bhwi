@@ -28,7 +28,7 @@ writeShellApplication {
       exit 1
     fi
 
-    image="''${SPECULOS_CONTAINER_IMAGE:-ghcr.io/ledgerhq/ledger-app-builder/ledger-app-dev-tools:latest}"
+    image="''${SPECULOS_CONTAINER_IMAGE:-ghcr.io/ledgerhq/ledger-app-builder/ledger-app-dev-tools@sha256:811ed84d8f29d80a8469ac3b33ed5efcc3bef1605016a11a32b99475d91da3dc}"
     elf_dir="$(cd "$(dirname "$elf")" && pwd)"
     elf_name="$(basename "$elf")"
 

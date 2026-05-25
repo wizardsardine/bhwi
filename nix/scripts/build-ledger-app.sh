@@ -18,7 +18,7 @@ src_key="${rev//[^A-Za-z0-9_.-]/_}"
 work="$cache_root/app-bitcoin-new-$src_key"
 elf="$work/build/nanox/bin/app.elf"
 marker="$work/.bhwi-built"
-image="${LEDGER_APP_BUILDER_IMAGE:-ghcr.io/ledgerhq/ledger-app-builder/ledger-app-dev-tools:latest}"
+image="${LEDGER_APP_BUILDER_IMAGE:-ghcr.io/ledgerhq/ledger-app-builder/ledger-app-dev-tools@sha256:811ed84d8f29d80a8469ac3b33ed5efcc3bef1605016a11a32b99475d91da3dc}"
 
 mkdir -p "$cache_root"
 
