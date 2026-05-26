@@ -2,9 +2,9 @@
 name = "bhwi"
 version = "0.0.1"
 edition = "2024"
-authors = ["Edouard Paris <m@edouard.paris>"]
+authors.workspace = true
 repository = "https://github.com/wizardsardine/bhwi"
-license-file = "../LICENSE"
+license-file.workspace = true
 keywords = ["bitcoin",  "miniscript"]
 description = "development kit"
 

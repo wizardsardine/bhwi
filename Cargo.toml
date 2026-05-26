@@ -5,6 +5,10 @@ members = [
 ]
 default-members = ["bhwi", "bhwi-async", "bhwi-cli"]
 
+[workspace.package]
+authors = ["Edouard Paris <m@edouard.paris>", "Trevor Arjeski <tmarjeski@gmail.com>"]
+license-file = "LICENSE"
+
 [workspace.dependencies]
 aes = "0.8.3"
 anyhow = "1"
