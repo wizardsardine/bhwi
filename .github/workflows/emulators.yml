@@ -1,0 +1,171 @@
+name: Emulator CI
+
+on:
+  push:
+    branches:
+      - main
+      - feat/nix-emulator-ci
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TEST_THREADS: "1"
+  XDG_CACHE_HOME: ${{ github.workspace }}/.cache
+
+jobs:
+  nix-flake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Show flake outputs
+        run: nix flake show --allow-import-from-derivation
+      - name: Build script check
+        run: nix build .#checks.x86_64-linux.emulator-scripts
+
+  coldcard-e2e:
+    needs: nix-flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.XDG_CACHE_HOME }}/bhwi/coldcard
+          key: coldcard-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/scripts/start-coldcard.sh') }}
+          restore-keys: |
+            coldcard-${{ runner.os }}-
+      - name: Start Coldcard simulator
+        run: |
+          nix run .#coldcard > coldcard.log 2>&1 &
+          echo $! > coldcard.pid
+          tail -n +1 -F coldcard.log &
+          echo $! > coldcard-tail.pid
+          bash nix/scripts/wait-for-socket.sh /tmp/ckcc-simulator.sock 1800 "$(cat coldcard.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Coldcard startup log" coldcard.log
+            cat coldcard.log || true
+            exit 1
+          }
+          kill "$(cat coldcard-tail.pid)" || true
+      - name: Run Coldcard e2e
+        run: |
+          set -o pipefail
+          nix develop .#coldcard -c cargo test -p bhwi-e2e-coldcard -- --test-threads=1 2>&1 | tee coldcard-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Coldcard e2e log" coldcard-e2e.log
+            cat coldcard-e2e.log || true
+            exit 1
+          }
+      - name: Coldcard logs
+        if: always()
+        run: |
+          cat coldcard.log || true
+          if [ -f coldcard.pid ]; then kill "$(cat coldcard.pid)" || true; fi
+
+  ledger-e2e:
+    needs: nix-flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.XDG_CACHE_HOME }}/bhwi/ledger
+          key: ledger-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/speculos.nix', 'nix/scripts/build-ledger-app.sh', 'nix/scripts/start-ledger.sh') }}
+          restore-keys: |
+            ledger-${{ runner.os }}-
+      - name: Start Ledger Speculos
+        run: |
+          nix run .#ledger > ledger.log 2>&1 &
+          echo $! > ledger.pid
+          tail -n +1 -F ledger.log &
+          echo $! > ledger-tail.pid
+          bash nix/scripts/wait-for-port.sh localhost 9999 1800 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger startup log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          bash nix/scripts/wait-for-port.sh localhost 5000 300 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger startup log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          kill "$(cat ledger-tail.pid)" || true
+      - name: Run Ledger e2e
+        run: |
+          set -o pipefail
+          nix develop .#ledger -c cargo test -p bhwi-e2e-ledger -- --test-threads=1 2>&1 | tee ledger-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger e2e log" ledger-e2e.log
+            cat ledger-e2e.log || true
+            exit 1
+          }
+      - name: Ledger logs
+        if: always()
+        run: |
+          cat ledger.log || true
+          if [ -f ledger.pid ]; then kill "$(cat ledger.pid)" || true; fi
+
+  jade-e2e:
+    needs: nix-flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.XDG_CACHE_HOME }}/bhwi/jade
+          key: jade-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/scripts/start-jade.sh', 'nix/scripts/start-jade-pinserver.sh', 'nix/scripts/init-jade.sh') }}
+          restore-keys: |
+            jade-${{ runner.os }}-
+      - name: Start Jade pinserver
+        run: |
+          nix run .#jade-pinserver > jade-pinserver.log 2>&1 &
+          echo $! > jade-pinserver.pid
+          tail -n +1 -F jade-pinserver.log &
+          echo $! > jade-pinserver-tail.pid
+          bash nix/scripts/wait-for-port.sh localhost 8096 1800 "$(cat jade-pinserver.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Jade pinserver startup log" jade-pinserver.log
+            cat jade-pinserver.log || true
+            exit 1
+          }
+          kill "$(cat jade-pinserver-tail.pid)" || true
+      - name: Start Jade QEMU
+        run: |
+          nix run .#jade > jade.log 2>&1 &
+          echo $! > jade.pid
+          tail -n +1 -F jade.log &
+          echo $! > jade-tail.pid
+          bash nix/scripts/wait-for-port.sh localhost 30121 1800 "$(cat jade.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Jade QEMU startup log" jade.log
+            cat jade.log || true
+            exit 1
+          }
+          kill "$(cat jade-tail.pid)" || true
+      - name: Initialize Jade
+        run: |
+          nix run .#jade-init > jade-init.log 2>&1 || {
+            bash nix/scripts/emit-gh-error-log.sh "Jade init log" jade-init.log
+            cat jade-init.log || true
+            exit 1
+          }
+      - name: Run Jade e2e
+        run: |
+          set -o pipefail
+          nix develop .#jade -c cargo test -p bhwi-e2e-jade -- --test-threads=1 2>&1 | tee jade-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Jade e2e log" jade-e2e.log
+            cat jade-e2e.log || true
+            exit 1
+          }
+      - name: Jade logs
+        if: always()
+        run: |
+          cat jade-pinserver.log || true
+          cat jade.log || true
+          if [ -f jade.pid ]; then kill "$(cat jade.pid)" || true; fi
+          if [ -f jade-pinserver.pid ]; then kill "$(cat jade-pinserver.pid)" || true; fi
