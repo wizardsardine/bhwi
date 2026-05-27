@@ -32,7 +32,7 @@ writeShellApplication {
     elf_dir="$(cd "$(dirname "$elf")" && pwd)"
     elf_name="$(basename "$elf")"
 
-    if command -v docker >/dev/null 2>&1; then
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       exec docker run --rm --network host -v "$elf_dir:/app:ro" "$image" \
         speculos "/app/$elf_name" "$@"
     elif command -v podman >/dev/null 2>&1; then
