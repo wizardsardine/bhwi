@@ -4,7 +4,16 @@ mod tests {
     use bhwi_async::transport::jade::tcp::TcpTransport;
     use bhwi_async::{DisplayAddress, HWI};
     use bhwi_cli::jade::{JadeQemuDevice, PinServerClient, TcpClient};
-    use bitcoin::Network;
+    use bitcoin::{
+        Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
+        Witness,
+        absolute::LockTime,
+        address::Address,
+        bip32::{ChildNumber, DerivationPath},
+        psbt::{Input, Psbt},
+        secp256k1::Secp256k1,
+        transaction::Version as TxVersion,
+    };
     use tokio::net::TcpStream;
 
     async fn device() -> JadeQemuDevice {
@@ -88,5 +97,82 @@ mod tests {
             .await;
         // Jade does not support Path-based address display
         assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn can_sign_psbt() {
+        let mut dev = device().await;
+        let fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let xpub = dev
+            .get_extended_pubkey("m/84'/1'/0'".parse().unwrap(), false)
+            .await
+            .unwrap();
+        let secp = Secp256k1::verification_only();
+        let input_path: DerivationPath = "m/84'/1'/0'/0/0".parse().unwrap();
+        let change_path: DerivationPath = "m/84'/1'/0'/1/0".parse().unwrap();
+        let input_child_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(0).unwrap(),
+            ChildNumber::from_normal_idx(0).unwrap(),
+        ]);
+        let change_child_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(1).unwrap(),
+            ChildNumber::from_normal_idx(0).unwrap(),
+        ]);
+        let input_xpub = xpub.derive_pub(&secp, &input_child_path).unwrap();
+        let change_xpub = xpub.derive_pub(&secp, &change_child_path).unwrap();
+        let input_pubkey = PublicKey::new(input_xpub.public_key);
+        let change_pubkey = PublicKey::new(change_xpub.public_key);
+        let input_script = Address::p2wpkh(&input_xpub.to_pub(), Network::Testnet).script_pubkey();
+        let change_script =
+            Address::p2wpkh(&change_xpub.to_pub(), Network::Testnet).script_pubkey();
+        let prev_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: input_script.clone(),
+            }],
+        };
+        let unsigned_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: prev_tx.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: change_script,
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        psbt.inputs[0] = Input {
+            non_witness_utxo: Some(prev_tx),
+            witness_utxo: Some(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: input_script,
+            }),
+            bip32_derivation: [(input_pubkey.inner, (fingerprint, input_path))].into(),
+            ..Default::default()
+        };
+        psbt.outputs[0].bip32_derivation =
+            [(change_pubkey.inner, (fingerprint, change_path))].into();
+
+        let signed = dev.sign_tx(psbt, None).await.expect("failed to sign psbt");
+
+        assert_eq!(signed.inputs.len(), 1);
+        assert_eq!(signed.inputs[0].partial_sigs.len(), 1);
+        assert!(signed.inputs[0].partial_sigs.contains_key(&input_pubkey));
     }
 }

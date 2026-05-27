@@ -1,4 +1,6 @@
 use anyhow::Result;
+use bhwi::ledger::{LedgerWalletPolicy, Version};
+use bhwi_async::DeviceContext;
 use bhwi_cli::{DeviceManager, OutputFormat, address::AddressTarget, config::Config};
 
 use std::path::PathBuf;
@@ -70,9 +72,9 @@ enum Commands {
         /// PSBT file in base64 text format
         #[arg(long)]
         psbt: PathBuf,
-        /// Ledger wallet policy name
-        #[arg(long = "policy-name", alias = "name", alias = "wallet-name")]
-        policy_name: Option<String>,
+        /// Wallet name
+        #[arg(long, alias = "wallet-name")]
+        name: Option<String>,
         /// Miniscript wallet policy descriptor
         #[arg(long, value_parser = clap::value_parser!(WalletPolicy))]
         descriptor: Option<WalletPolicy>,
@@ -234,7 +236,7 @@ async fn main() -> Result<()> {
         }
         Commands::SignPsbt {
             psbt,
-            policy_name,
+            name,
             descriptor,
             hmac,
             output,
@@ -242,12 +244,21 @@ async fn main() -> Result<()> {
             let psbt_text = std::fs::read_to_string(psbt)?;
             let psbt = Psbt::from_str(psbt_text.trim())?;
             let hmac = hmac.as_deref().map(parse_hmac).transpose()?;
-            let descriptor = descriptor.as_ref().map(ToString::to_string);
+            let context = match (name, descriptor, hmac) {
+                (Some(name), Some(policy), hmac) => Some(DeviceContext::Ledger {
+                    wallet_policy: LedgerWalletPolicy::new(name, Version::V2, policy),
+                    wallet_hmac: hmac,
+                }),
+                (None, None, None) => None,
+                (None, None, Some(_)) => {
+                    anyhow::bail!("--hmac requires --name and --descriptor for Ledger signing")
+                }
+                _ => anyhow::bail!(
+                    "--name and --descriptor must be provided together for Ledger signing"
+                ),
+            };
             if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
-                let signed = d
-                    .device()
-                    .sign_tx(psbt, policy_name.as_deref(), descriptor.as_deref(), hmac)
-                    .await?;
+                let signed = d.device().sign_tx(psbt, context).await?;
                 let signed = signed.to_string();
                 if let Some(output) = output {
                     std::fs::write(output, signed)?;

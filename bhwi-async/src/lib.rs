@@ -60,9 +60,7 @@ pub trait HWI {
     async fn sign_tx(
         &mut self,
         psbt: Psbt,
-        policy_name: Option<&str>,
-        policy: Option<&str>,
-        hmac: Option<[u8; 32]>,
+        context: Option<common::DeviceContext>,
     ) -> Result<Psbt, Self::Error>;
 }
 
@@ -97,9 +95,7 @@ pub trait HWIDevice {
     async fn sign_tx(
         &mut self,
         psbt: Psbt,
-        policy_name: Option<&str>,
-        policy: Option<&str>,
-        hmac: Option<[u8; 32]>,
+        context: Option<common::DeviceContext>,
     ) -> Result<Psbt, HWIDeviceError>;
 }
 
@@ -235,24 +231,10 @@ where
     async fn sign_tx(
         &mut self,
         psbt: Psbt,
-        policy_name: Option<&str>,
-        policy: Option<&str>,
-        hmac: Option<[u8; 32]>,
+        context: Option<common::DeviceContext>,
     ) -> Result<Psbt, Self::Error> {
-        let policy = policy
-            .map(WalletPolicy::from_str)
-            .transpose()
-            .map_err(|e| common::Error::Serialization(e.to_string()))?;
-        if let common::Response::SignedPsbt(psbt) = run_command(
-            self,
-            common::Command::SignTx {
-                policy_name: policy_name.map(ToString::to_string),
-                psbt,
-                policy,
-                hmac,
-            },
-        )
-        .await?
+        if let common::Response::SignedPsbt(psbt) =
+            run_command(self, common::Command::SignTx(psbt, context)).await?
         {
             Ok(psbt)
         } else {
@@ -326,11 +308,9 @@ where
     async fn sign_tx(
         &mut self,
         psbt: Psbt,
-        policy_name: Option<&str>,
-        policy: Option<&str>,
-        hmac: Option<[u8; 32]>,
+        context: Option<common::DeviceContext>,
     ) -> Result<Psbt, HWIDeviceError> {
-        HWI::sign_tx(self, psbt, policy_name, policy, hmac)
+        HWI::sign_tx(self, psbt, context)
             .await
             .map_err(HWIDeviceError::new)
     }

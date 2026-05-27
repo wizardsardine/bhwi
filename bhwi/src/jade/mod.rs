@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use base64ct::{Base64, Encoding};
 use bitcoin::Network;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::Signature;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -52,6 +53,9 @@ pub enum JadeCommand {
         message: Vec<u8>,
         path: DerivationPath,
     },
+    SignPsbt {
+        psbt: Psbt,
+    },
 }
 
 pub enum JadeResponse {
@@ -61,6 +65,7 @@ pub enum JadeResponse {
     TaskDone,
     Xpub(Xpub),
     Address(String),
+    SignedPsbt(Psbt),
 }
 
 pub enum JadeRecipient {
@@ -78,6 +83,13 @@ enum State {
     Running(JadeCommand),
     WaitingPinServer,
     WaitingFinalHandshake,
+    GettingExtendedData {
+        origid: String,
+        orig: String,
+        next_seqnum: u32,
+        seqlen: u32,
+        chunks: Vec<u8>,
+    },
 }
 
 pub struct JadeInterpreter<C, T, R, E> {
@@ -140,6 +152,16 @@ fn from_response<D: DeserializeOwned>(buffer: &[u8]) -> Result<api::Response<D>,
     serde_cbor::from_slice(buffer).map_err(|_| JadeError::Cbor)
 }
 
+fn from_response_bytes(buffer: &[u8]) -> Result<api::ResponseBytes, JadeError> {
+    serde_cbor::from_slice(buffer).map_err(|_| JadeError::Cbor)
+}
+
+fn parse_signed_psbt(bytes: &[u8]) -> Result<JadeResponse, JadeError> {
+    Psbt::deserialize(bytes)
+        .map(JadeResponse::SignedPsbt)
+        .map_err(|e| JadeError::Serialization(e.to_string()))
+}
+
 impl<C, T, R, E> Interpreter for JadeInterpreter<C, T, R, E>
 where
     C: TryInto<JadeCommand, Error = E>,
@@ -184,6 +206,13 @@ where
                         .map_err(|e| JadeError::Serialization(e.to_string()))?,
                 }),
             ),
+            JadeCommand::SignPsbt { psbt } => request(
+                "sign_psbt",
+                Some(api::SignPsbtParams {
+                    network: self.network,
+                    psbt: psbt.serialize(),
+                }),
+            ),
             JadeCommand::GetReceiveAddress {
                 index,
                 change,
@@ -204,20 +233,61 @@ where
         req
     }
     fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, Self::Error> {
-        match self.state {
-            State::New => Ok(None),
+        if let State::GettingExtendedData {
+            origid,
+            orig,
+            next_seqnum,
+            seqlen,
+            chunks,
+        } = &mut self.state
+        {
+            let res = from_response_bytes(&data)?;
+            if let Some(e) = res.error {
+                return Err(JadeError::Rpc(e).into());
+            }
+            let chunk = res.result.ok_or(JadeError::NoErrorOrResult)?;
+            let seqnum = res.seqnum.unwrap_or(*next_seqnum);
+            if seqnum != *next_seqnum {
+                return Err(JadeError::UnexpectedResult(format!(
+                    "unexpected sign_psbt fragment {seqnum}, wanted {next_seqnum}"
+                ))
+                .into());
+            }
+            chunks.extend_from_slice(&chunk);
+            if seqnum >= *seqlen {
+                self.response = Some(parse_signed_psbt(chunks)?);
+                return Ok(None);
+            }
+
+            *next_seqnum = seqnum + 1;
+            return Ok(Some(request(
+                "get_extended_data",
+                Some(api::GetExtendedDataParams {
+                    origid,
+                    orig,
+                    seqnum: *next_seqnum,
+                    seqlen: *seqlen,
+                }),
+            )?));
+        }
+
+        let mut next_state = None;
+        let mut response = None;
+
+        let transmit = match &self.state {
+            State::New => None,
             State::Running(JadeCommand::Auth) => {
                 let res: api::AuthUserResponse = from_response(&data)?.into_result()?;
                 match res {
                     api::AuthUserResponse::PinServerRequired { http_request } => {
-                        self.state = State::WaitingPinServer;
+                        next_state = Some(State::WaitingPinServer);
                         let url = match &http_request.params.urls {
                             api::PinServerUrls::Array(urls) => urls.first().ok_or(
                                 JadeError::UnexpectedResult("No url provided".to_string()),
                             )?,
                             api::PinServerUrls::Object { url, .. } => url,
                         };
-                        Ok(Some(
+                        Some(
                             JadeTransmit {
                                 recipient: JadeRecipient::PinServer {
                                     url: url.to_string(),
@@ -226,11 +296,11 @@ where
                                     .map_err(|e| JadeError::Serialization(e.to_string()))?,
                             }
                             .into(),
-                        ))
+                        )
                     }
                     api::AuthUserResponse::Authenticated(_) => {
-                        self.response = Some(JadeResponse::TaskDone);
-                        Ok(None)
+                        response = Some(JadeResponse::TaskDone);
+                        None
                     }
                 }
             }
@@ -238,32 +308,30 @@ where
                 let pin_params: api::PinParams = serde_json::from_slice(&data).map_err(|_| {
                     JadeError::Serialization("Wrong response from pin server".to_string())
                 })?;
-                let transmit = request("pin", Some(pin_params))?;
-                self.state = State::WaitingFinalHandshake;
-                Ok(Some(transmit))
+                next_state = Some(State::WaitingFinalHandshake);
+                Some(request("pin", Some(pin_params))?)
             }
             State::WaitingFinalHandshake => {
                 let handshake_completed: bool = from_response(&data)?.into_result()?;
-                if handshake_completed {
-                    self.response = Some(JadeResponse::TaskDone);
-                    Ok(None)
-                } else {
-                    Err(JadeError::HandshakeRefused.into())
+                if !handshake_completed {
+                    return Err(JadeError::HandshakeRefused.into());
                 }
+                response = Some(JadeResponse::TaskDone);
+                None
             }
             State::Running(JadeCommand::GetMasterFingerprint) => {
                 let s: String = from_response(&data)?.into_result()?;
                 let xpub =
                     Xpub::from_str(&s).map_err(|e| JadeError::Serialization(e.to_string()))?;
-                self.response = Some(JadeResponse::MasterFingerprint(xpub.fingerprint()));
-                Ok(None)
+                response = Some(JadeResponse::MasterFingerprint(xpub.fingerprint()));
+                None
             }
             State::Running(JadeCommand::GetXpub(..)) => {
                 let s: String = from_response(&data)?.into_result()?;
                 let xpub =
                     Xpub::from_str(&s).map_err(|e| JadeError::Serialization(e.to_string()))?;
-                self.response = Some(JadeResponse::Xpub(xpub));
-                Ok(None)
+                response = Some(JadeResponse::Xpub(xpub));
+                None
             }
             State::Running(JadeCommand::SignMessage { .. }) => {
                 let s: String = from_response(&data)?.into_result()?;
@@ -271,20 +339,66 @@ where
                     Base64::decode_vec(&s).map_err(|e| JadeError::Serialization(e.to_string()))?;
                 let sig = Signature::from_compact(&sig_bytes[1..])
                     .map_err(|e| JadeError::Serialization(e.to_string()))?;
-                self.response = Some(JadeResponse::Signature(sig_bytes[0], sig));
-                Ok(None)
+                response = Some(JadeResponse::Signature(sig_bytes[0], sig));
+                None
             }
+            State::Running(JadeCommand::SignPsbt { .. }) => {
+                let res = from_response_bytes(&data)?;
+                if let Some(e) = res.error {
+                    return Err(JadeError::Rpc(e).into());
+                }
+                let chunk = res.result.ok_or(JadeError::NoErrorOrResult)?;
+                let seqnum = res.seqnum.unwrap_or(1);
+                let seqlen = res.seqlen.unwrap_or(1);
+                if seqnum != 1 {
+                    return Err(JadeError::UnexpectedResult(format!(
+                        "unexpected first sign_psbt fragment {seqnum}"
+                    ))
+                    .into());
+                }
+                if seqlen <= 1 {
+                    response = Some(parse_signed_psbt(&chunk)?);
+                    None
+                } else {
+                    let next_seqnum = seqnum + 1;
+                    next_state = Some(State::GettingExtendedData {
+                        origid: res.id.clone(),
+                        orig: "sign_psbt".to_string(),
+                        next_seqnum,
+                        seqlen,
+                        chunks: chunk,
+                    });
+                    Some(request(
+                        "get_extended_data",
+                        Some(api::GetExtendedDataParams {
+                            origid: &res.id,
+                            orig: "sign_psbt",
+                            seqnum: next_seqnum,
+                            seqlen,
+                        }),
+                    )?)
+                }
+            }
+            State::GettingExtendedData { .. } => unreachable!("handled before immutable match"),
             State::Running(JadeCommand::GetReceiveAddress { .. }) => {
                 let address: String = from_response(&data)?.into_result()?;
-                self.response = Some(JadeResponse::Address(address));
-                Ok(None)
+                response = Some(JadeResponse::Address(address));
+                None
             }
             State::Running(JadeCommand::GetInfo) => {
                 let info: GetInfoResponse = from_response(&data)?.into_result()?;
-                self.response = Some(JadeResponse::GetInfo(info));
-                Ok(None)
+                response = Some(JadeResponse::GetInfo(info));
+                None
             }
+        };
+
+        if let Some(state) = next_state {
+            self.state = state;
         }
+        if response.is_some() {
+            self.response = response;
+        }
+        Ok(transmit)
     }
     fn end(self) -> Result<Self::Response, Self::Error> {
         self.response
@@ -324,9 +438,7 @@ impl TryFrom<Command> for JadeCommand {
             Command::RegisterWallet { .. } => Err(Error::MissingCommandInfo(
                 "RegisterWallet not supported by Jade",
             )),
-            Command::SignTx { .. } => {
-                Err(Error::MissingCommandInfo("SignTx not supported by Jade"))
-            }
+            Command::SignTx(psbt, _) => Ok(Self::SignPsbt { psbt }),
         }
     }
 }
@@ -344,6 +456,7 @@ impl From<JadeResponse> for Response {
                 firmware: None,
             }),
             JadeResponse::Address(address) => Response::Address(address),
+            JadeResponse::SignedPsbt(psbt) => Response::SignedPsbt(psbt),
         }
     }
 }

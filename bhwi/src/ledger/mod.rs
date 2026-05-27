@@ -773,21 +773,19 @@ impl TryFrom<Command> for LedgerCommand {
             Command::RegisterWallet { name, policy } => Ok(Self::RegisterWallet {
                 policy: LedgerWalletPolicy::new(name, Version::V2, policy),
             }),
-            Command::SignTx {
-                policy_name,
-                psbt,
-                policy,
-                hmac,
-            } => {
-                let policy_name = policy_name.ok_or(LedgerError::MissingCommandInfo(
-                    "ledger sign_tx policy_name",
-                ))?;
-                let policy =
-                    policy.ok_or(LedgerError::MissingCommandInfo("ledger sign_tx policy"))?;
+            Command::SignTx(psbt, context) => {
+                let (ledger_policy, wallet_hmac) = context
+                    .map(|ctx| match ctx {
+                        DeviceContext::Ledger {
+                            wallet_policy,
+                            wallet_hmac,
+                        } => (wallet_policy, wallet_hmac),
+                    })
+                    .ok_or(LedgerError::MissingCommandInfo("ledger sign tx context"))?;
                 Ok(Self::SignPsbt {
                     psbt,
-                    policy: LedgerWalletPolicy::new(policy_name, Version::V2, policy),
-                    hmac,
+                    policy: ledger_policy,
+                    hmac: wallet_hmac,
                 })
             }
         }
