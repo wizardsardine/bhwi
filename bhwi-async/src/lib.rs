@@ -15,6 +15,7 @@ use bhwi::{
     bitcoin::{
         Network,
         bip32::{DerivationPath, Fingerprint, Xpub},
+        psbt::Psbt,
         secp256k1::ecdsa::Signature,
     },
     common::{self},
@@ -56,6 +57,13 @@ pub trait HWI {
         context: Option<common::DeviceContext>,
     ) -> Result<String, Self::Error>;
     async fn register_wallet(&mut self, name: &str, policy: &str) -> Result<[u8; 32], Self::Error>;
+    async fn sign_tx(
+        &mut self,
+        psbt: Psbt,
+        policy_name: Option<&str>,
+        policy: Option<&str>,
+        hmac: Option<[u8; 32]>,
+    ) -> Result<Psbt, Self::Error>;
 }
 
 // TODO: this will become a pain to maintain, but we can have a proc-macro
@@ -86,6 +94,13 @@ pub trait HWIDevice {
         name: &str,
         policy: &str,
     ) -> Result<[u8; 32], HWIDeviceError>;
+    async fn sign_tx(
+        &mut self,
+        psbt: Psbt,
+        policy_name: Option<&str>,
+        policy: Option<&str>,
+        hmac: Option<[u8; 32]>,
+    ) -> Result<Psbt, HWIDeviceError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -216,6 +231,34 @@ where
             Err(common::Error::NoErrorOrResult.into())
         }
     }
+
+    async fn sign_tx(
+        &mut self,
+        psbt: Psbt,
+        policy_name: Option<&str>,
+        policy: Option<&str>,
+        hmac: Option<[u8; 32]>,
+    ) -> Result<Psbt, Self::Error> {
+        let policy = policy
+            .map(WalletPolicy::from_str)
+            .transpose()
+            .map_err(|e| common::Error::Serialization(e.to_string()))?;
+        if let common::Response::SignedPsbt(psbt) = run_command(
+            self,
+            common::Command::SignTx {
+                policy_name: policy_name.map(ToString::to_string),
+                psbt,
+                policy,
+                hmac,
+            },
+        )
+        .await?
+        {
+            Ok(psbt)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
 }
 
 #[async_trait(?Send)]
@@ -276,6 +319,18 @@ where
         policy: &str,
     ) -> Result<[u8; 32], HWIDeviceError> {
         HWI::register_wallet(self, name, policy)
+            .await
+            .map_err(HWIDeviceError::new)
+    }
+
+    async fn sign_tx(
+        &mut self,
+        psbt: Psbt,
+        policy_name: Option<&str>,
+        policy: Option<&str>,
+        hmac: Option<[u8; 32]>,
+    ) -> Result<Psbt, HWIDeviceError> {
+        HWI::sign_tx(self, psbt, policy_name, policy, hmac)
             .await
             .map_err(HWIDeviceError::new)
     }
