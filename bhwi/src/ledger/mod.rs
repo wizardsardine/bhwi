@@ -13,6 +13,7 @@ use apdu::{ApduCommand, ApduError, ApduResponse, StatusWord};
 use bitcoin::Network;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::consensus::encode::deserialize_partial;
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::Signature;
 use store::{DelegatedStore, StoreError};
 pub use wallet::{AddressType, LedgerWalletPolicy, Version, WalletError, singlesig_wallet_policy};
@@ -53,6 +54,9 @@ pub enum LedgerError {
 
     #[error("failed to open app: {0:x?}")]
     FailedToOpenApp(Vec<u8>),
+
+    #[error("invalid psbt: {0}")]
+    InvalidPsbt(String),
 }
 
 impl LedgerError {
@@ -81,6 +85,11 @@ pub enum LedgerCommand {
     },
     RegisterWallet {
         policy: LedgerWalletPolicy,
+    },
+    SignPsbt {
+        psbt: Psbt,
+        policy: LedgerWalletPolicy,
+        hmac: Option<[u8; 32]>,
     },
 }
 
@@ -140,6 +149,7 @@ pub enum LedgerResponse {
     Xpub(Xpub),
     Address(String),
     WalletHmac([u8; 32]),
+    SignedPsbt(Psbt),
 }
 
 #[derive(Default)]
@@ -181,6 +191,112 @@ impl<C, T, R, E> Default for LedgerInterpreter<C, T, R, E> {
         Self {
             state: State::default(),
             _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+fn apply_psbt_signature(psbt: &mut Psbt, yielded: &[u8]) -> Result<(), LedgerError> {
+    let (input_index, yielded_object) = parse_sign_psbt_yielded(yielded)?;
+    let input = psbt
+        .inputs
+        .get_mut(input_index)
+        .ok_or_else(|| LedgerError::InvalidPsbt(format!("invalid input index {input_index}")))?;
+
+    let SignPsbtYieldedObject::Partial(partial_signature) = yielded_object else {
+        return Ok(());
+    };
+
+    match partial_signature {
+        psbt::PartialSignature::Sig(pubkey, sig) => {
+            input.partial_sigs.insert(pubkey, sig);
+        }
+        psbt::PartialSignature::TapScriptSig(pubkey, Some(leaf_hash), sig) => {
+            input.tap_script_sigs.insert((pubkey, leaf_hash), sig);
+        }
+        psbt::PartialSignature::TapScriptSig(_, None, sig) => {
+            input.tap_key_sig = Some(sig);
+        }
+    }
+    Ok(())
+}
+
+enum SignPsbtYieldedObject {
+    Partial(psbt::PartialSignature),
+    Ignored,
+}
+
+fn parse_sign_psbt_yielded(data: &[u8]) -> Result<(usize, SignPsbtYieldedObject), LedgerError> {
+    let (tag, read) = deserialize_unchecked_varint(data)?;
+    match tag {
+        // TODO: Parse and store MuSig2 yields once rust-bitcoin exposes the
+        // corresponding PSBT fields.
+        tag if tag >= 0x80000000 => {
+            let (input_index, _) = deserialize_unchecked_varint(&data[read..])?;
+            Ok((
+                input_index_to_usize(input_index)?,
+                SignPsbtYieldedObject::Ignored,
+            ))
+        }
+        input_index => {
+            let partial_signature =
+                psbt::PartialSignature::from_slice(&data[read..]).map_err(|_| {
+                    LedgerError::InvalidPsbt("invalid partial signature yield".to_string())
+                })?;
+            Ok((
+                input_index_to_usize(input_index)?,
+                SignPsbtYieldedObject::Partial(partial_signature),
+            ))
+        }
+    }
+}
+
+fn input_index_to_usize(input_index: u64) -> Result<usize, LedgerError> {
+    usize::try_from(input_index).map_err(|_| {
+        LedgerError::InvalidPsbt(format!("input index does not fit usize: {input_index}"))
+    })
+}
+
+fn deserialize_unchecked_varint(data: &[u8]) -> Result<(u64, usize), LedgerError> {
+    let first = data
+        .first()
+        .ok_or_else(|| LedgerError::InvalidPsbt("missing sign_psbt yield tag".to_string()))?;
+    match first {
+        0x00..=0xFC => Ok((*first as u64, 1)),
+        0xFD => {
+            let bytes = data.get(1..3).ok_or_else(|| {
+                LedgerError::InvalidPsbt("truncated sign_psbt yield varint".to_string())
+            })?;
+            let value = u16::from_le_bytes(bytes.try_into().expect("slice length checked")) as u64;
+            if value < 0xFD {
+                return Err(LedgerError::InvalidPsbt(
+                    "non-minimal sign_psbt yield varint".to_string(),
+                ));
+            }
+            Ok((value, 3))
+        }
+        0xFE => {
+            let bytes = data.get(1..5).ok_or_else(|| {
+                LedgerError::InvalidPsbt("truncated sign_psbt yield varint".to_string())
+            })?;
+            let value = u32::from_le_bytes(bytes.try_into().expect("slice length checked")) as u64;
+            if value < 0x10000 {
+                return Err(LedgerError::InvalidPsbt(
+                    "non-minimal sign_psbt yield varint".to_string(),
+                ));
+            }
+            Ok((value, 5))
+        }
+        0xFF => {
+            let bytes = data.get(1..9).ok_or_else(|| {
+                LedgerError::InvalidPsbt("truncated sign_psbt yield varint".to_string())
+            })?;
+            let value = u64::from_le_bytes(bytes.try_into().expect("slice length checked"));
+            if value < 0x1_0000_0000 {
+                return Err(LedgerError::InvalidPsbt(
+                    "non-minimal sign_psbt yield varint".to_string(),
+                ));
+            }
+            Ok((value, 9))
         }
     }
 }
@@ -238,6 +354,88 @@ where
                 Self::Transmit::from(command::register_wallet(policy).map_err(LedgerError::from)?),
                 Some(policy.to_store().map_err(LedgerError::from)?),
             ),
+            LedgerCommand::SignPsbt {
+                ref psbt,
+                ref policy,
+                ref hmac,
+            } => {
+                if psbt.inputs.len() != psbt.unsigned_tx.input.len() {
+                    return Err(LedgerError::InvalidPsbt(
+                        "psbt input count does not match unsigned transaction".to_string(),
+                    )
+                    .into());
+                }
+                if psbt.outputs.len() != psbt.unsigned_tx.output.len() {
+                    return Err(LedgerError::InvalidPsbt(
+                        "psbt output count does not match unsigned transaction".to_string(),
+                    )
+                    .into());
+                }
+
+                let global_map = psbt::get_v2_global_pairs(psbt)
+                    .into_iter()
+                    .map(psbt::deserialize_pair)
+                    .collect::<Vec<_>>();
+                let input_maps = psbt
+                    .inputs
+                    .iter()
+                    .zip(&psbt.unsigned_tx.input)
+                    .map(|(input, txin)| {
+                        psbt::get_v2_input_pairs(input, txin)
+                            .into_iter()
+                            .map(psbt::deserialize_pair)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let output_maps = psbt
+                    .outputs
+                    .iter()
+                    .zip(&psbt.unsigned_tx.output)
+                    .map(|(output, txout)| {
+                        psbt::get_v2_output_pairs(output, txout)
+                            .into_iter()
+                            .map(psbt::deserialize_pair)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+
+                let global_commitment = store::get_merkleized_map_commitment(&global_map);
+                let input_commitments = input_maps
+                    .iter()
+                    .map(|map| store::get_merkleized_map_commitment(map))
+                    .collect::<Vec<_>>();
+                let output_commitments = output_maps
+                    .iter()
+                    .map(|map| store::get_merkleized_map_commitment(map))
+                    .collect::<Vec<_>>();
+
+                let mut store = policy.to_store().map_err(LedgerError::from)?;
+                store.add_known_mapping(&global_map);
+                for map in &input_maps {
+                    store.add_known_mapping(map);
+                }
+                for map in &output_maps {
+                    store.add_known_mapping(map);
+                }
+                let input_commitments_root = store.add_known_list(&input_commitments);
+                let output_commitments_root = store.add_known_list(&output_commitments);
+
+                (
+                    Self::Transmit::from(
+                        command::sign_psbt(
+                            &global_commitment,
+                            psbt.inputs.len(),
+                            &input_commitments_root,
+                            psbt.outputs.len(),
+                            &output_commitments_root,
+                            policy,
+                            hmac.as_ref(),
+                        )
+                        .map_err(LedgerError::from)?,
+                    ),
+                    Some(store),
+                )
+            }
         };
         self.state = State::Running { command, store };
         Ok(transmit)
@@ -517,6 +715,27 @@ where
                         hmac.copy_from_slice(&res.data[32..64]);
                         (State::Finished(LedgerResponse::WalletHmac(hmac)), None)
                     }
+                    LedgerCommand::SignPsbt { mut psbt, .. } => match res.status_word {
+                        StatusWord::Deny
+                        | StatusWord::ClaNotSupported
+                        | StatusWord::SignatureFail => {
+                            (State::Finished(LedgerResponse::TaskDone), None)
+                        }
+                        StatusWord::OK => {
+                            let store = store.ok_or(LedgerError::Interrupted)?;
+                            for yielded in store.yielded() {
+                                apply_psbt_signature(&mut psbt, &yielded)?;
+                            }
+                            (State::Finished(LedgerResponse::SignedPsbt(psbt)), None)
+                        }
+                        _ => {
+                            return Err(LedgerError::unexpected_result(
+                                res.data,
+                                "sign psbt status",
+                            )
+                            .into());
+                        }
+                    },
                 }
             }
             State::New => (State::New, None),
@@ -554,6 +773,23 @@ impl TryFrom<Command> for LedgerCommand {
             Command::RegisterWallet { name, policy } => Ok(Self::RegisterWallet {
                 policy: LedgerWalletPolicy::new(name, Version::V2, policy),
             }),
+            Command::SignTx {
+                policy_name,
+                psbt,
+                policy,
+                hmac,
+            } => {
+                let policy_name = policy_name.ok_or(LedgerError::MissingCommandInfo(
+                    "ledger sign_tx policy_name",
+                ))?;
+                let policy =
+                    policy.ok_or(LedgerError::MissingCommandInfo("ledger sign_tx policy"))?;
+                Ok(Self::SignPsbt {
+                    psbt,
+                    policy: LedgerWalletPolicy::new(policy_name, Version::V2, policy),
+                    hmac,
+                })
+            }
         }
     }
 }
@@ -572,6 +808,7 @@ impl From<LedgerResponse> for Response {
             LedgerResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
             LedgerResponse::Address(address) => Response::Address(address),
             LedgerResponse::WalletHmac(hmac) => Response::WalletHmac(hmac),
+            LedgerResponse::SignedPsbt(psbt) => Response::SignedPsbt(psbt),
         }
     }
 }
@@ -588,6 +825,88 @@ impl From<LedgerError> for Error {
             LedgerError::UnexpectedResult(data, ctx) => Error::unexpected_result(data, ctx),
             LedgerError::UnsupportedDisplayAddress(ctx) => Error::UnsupportedDisplayAddress(ctx),
             LedgerError::FailedToOpenApp(_) => Error::AuthenticationRefused,
+            LedgerError::InvalidPsbt(e) => Error::Serialization(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const XONLY: [u8; 32] = [
+        0x4f, 0x35, 0x5b, 0xdc, 0xb7, 0xcc, 0x0a, 0xf7, 0x28, 0xef, 0x3c, 0xce, 0xb9, 0x61, 0x5d,
+        0x90, 0x68, 0x4b, 0xb5, 0xb2, 0xca, 0x5f, 0x85, 0x9a, 0xb0, 0xf0, 0xb7, 0x04, 0x07, 0x58,
+        0x71, 0xaa,
+    ];
+
+    fn encode_unchecked_varint(value: u64) -> Vec<u8> {
+        match value {
+            0..=0xFC => vec![value as u8],
+            0xFD..=0xFFFF => {
+                let mut out = vec![0xFD];
+                out.extend_from_slice(&(value as u16).to_le_bytes());
+                out
+            }
+            0x1_0000..=0xFFFF_FFFF => {
+                let mut out = vec![0xFE];
+                out.extend_from_slice(&(value as u32).to_le_bytes());
+                out
+            }
+            _ => {
+                let mut out = vec![0xFF];
+                out.extend_from_slice(&value.to_le_bytes());
+                out
+            }
+        }
+    }
+
+    fn assert_ignored(payload: &[u8], expected_input_index: usize) {
+        let (input_index, object) = parse_sign_psbt_yielded(payload).expect("payload should parse");
+        assert_eq!(input_index, expected_input_index);
+        assert!(matches!(object, SignPsbtYieldedObject::Ignored));
+    }
+
+    #[test]
+    fn parse_legacy_partial_taproot_without_tapleaf() {
+        let mut payload = encode_unchecked_varint(3);
+        payload.push(32);
+        payload.extend_from_slice(&XONLY);
+        payload.extend_from_slice(&[0xaa; 64]);
+
+        let (input_index, object) =
+            parse_sign_psbt_yielded(&payload).expect("payload should parse");
+        assert_eq!(input_index, 3);
+        assert!(matches!(
+            object,
+            SignPsbtYieldedObject::Partial(psbt::PartialSignature::TapScriptSig(_, None, _))
+        ));
+    }
+
+    #[test]
+    fn parse_reserved_musig_pubnonce_tag_is_ignored() {
+        let mut payload = encode_unchecked_varint(0xFFFF_FFFF);
+        payload.extend(encode_unchecked_varint(7));
+        payload.extend_from_slice(&[0xaa; 164]);
+
+        assert_ignored(&payload, 7);
+    }
+
+    #[test]
+    fn parse_reserved_musig_partial_signature_tag_is_ignored() {
+        let mut payload = encode_unchecked_varint(0xFFFF_FFFE);
+        payload.extend(encode_unchecked_varint(2));
+        payload.extend_from_slice(&[0xbb; 98]);
+
+        assert_ignored(&payload, 2);
+    }
+
+    #[test]
+    fn parse_unknown_reserved_tag_is_ignored() {
+        let mut payload = encode_unchecked_varint(0x89AB_CDEF);
+        payload.extend(encode_unchecked_varint(11));
+        payload.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+        assert_ignored(&payload, 11);
     }
 }
