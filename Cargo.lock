@@ -343,6 +343,7 @@ dependencies = [
  "console_log",
  "futures",
  "getrandom 0.2.16",
+ "hex",
  "js-sys",
  "log",
  "rand_core 0.6.4",
