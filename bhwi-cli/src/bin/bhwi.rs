@@ -1,10 +1,14 @@
 use anyhow::Result;
 use bhwi_cli::{DeviceManager, OutputFormat, address::AddressTarget, config::Config};
 
+use std::path::PathBuf;
+use std::str::FromStr;
+
 use bitcoin::{
     Network,
     address::AddressType,
     bip32::{DerivationPath, Fingerprint},
+    psbt::Psbt,
 };
 use clap::{Parser, Subcommand};
 use miniscript::descriptor::WalletPolicy;
@@ -60,6 +64,24 @@ enum Commands {
         /// Miniscript wallet policy descriptor (e.g. "wpkh(@0/**)")
         #[arg(long, value_parser = clap::value_parser!(WalletPolicy))]
         descriptor: WalletPolicy,
+    },
+    /// Sign a PSBT with the selected device
+    SignPsbt {
+        /// PSBT file in base64 text format
+        #[arg(long)]
+        psbt: PathBuf,
+        /// Ledger wallet policy name
+        #[arg(long = "policy-name", alias = "name", alias = "wallet-name")]
+        policy_name: Option<String>,
+        /// Miniscript wallet policy descriptor
+        #[arg(long, value_parser = clap::value_parser!(WalletPolicy))]
+        descriptor: Option<WalletPolicy>,
+        /// HMAC from wallet registration (hex-encoded 64 chars)
+        #[arg(long)]
+        hmac: Option<String>,
+        /// Output file. Defaults to stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -210,6 +232,38 @@ async fn main() -> Result<()> {
                 println!("{}", hex::encode(hmac));
             }
         }
+        Commands::SignPsbt {
+            psbt,
+            policy_name,
+            descriptor,
+            hmac,
+            output,
+        } => {
+            let psbt_text = std::fs::read_to_string(psbt)?;
+            let psbt = Psbt::from_str(psbt_text.trim())?;
+            let hmac = hmac.as_deref().map(parse_hmac).transpose()?;
+            let descriptor = descriptor.as_ref().map(ToString::to_string);
+            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+                let signed = d
+                    .device()
+                    .sign_tx(psbt, policy_name.as_deref(), descriptor.as_deref(), hmac)
+                    .await?;
+                let signed = signed.to_string();
+                if let Some(output) = output {
+                    std::fs::write(output, signed)?;
+                } else {
+                    println!("{signed}");
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn parse_hmac(hmac: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(hmac)?;
+    let hmac: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("hmac must be 32 bytes / 64 hex characters"))?;
+    Ok(hmac)
 }

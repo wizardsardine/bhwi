@@ -1,6 +1,7 @@
 use bitcoin::Network;
 use bitcoin::address::AddressType;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::Signature;
 use miniscript::descriptor::WalletPolicy;
 
@@ -39,6 +40,12 @@ pub enum Command {
         name: String,
         policy: WalletPolicy,
     },
+    SignTx {
+        policy_name: Option<String>,
+        psbt: Psbt,
+        policy: Option<WalletPolicy>,
+        hmac: Option<[u8; 32]>,
+    },
     SignMessage {
         message: Vec<u8>,
         path: DerivationPath,
@@ -66,6 +73,7 @@ pub enum Response {
     Xpub(Xpub),
     EncryptionKey([u8; 64]),
     Signature(u8, Signature),
+    SignedPsbt(Psbt),
     Address(String),
     WalletHmac([u8; 32]),
 }

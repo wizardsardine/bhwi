@@ -1,10 +1,19 @@
 #[cfg(test)]
 mod tests {
-    use std::fmt::Display;
     use std::str::FromStr;
 
     use anyhow::Result;
     use base64ct::Encoding;
+    use bhwi::bitcoin::{
+        Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
+        Witness,
+        absolute::LockTime,
+        address::Address,
+        bip32::{ChildNumber, DerivationPath},
+        psbt::{Input, Output, Psbt},
+        secp256k1::Secp256k1,
+        transaction::Version as TxVersion,
+    };
     use bhwi::ledger::{LedgerWalletPolicy, Version};
     use bhwi_async::{DeviceContext, DisplayAddress, HWI};
     use bhwi_async::{Ledger, transport::ledger::speculos::LedgerTransportTcp};
@@ -23,32 +32,6 @@ mod tests {
         inner: Client,
     }
 
-    #[derive(Debug, Clone, Copy)]
-    pub enum Button {
-        Left,
-        Right,
-        Both,
-    }
-
-    impl Display for Button {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(
-                f,
-                "{}",
-                match self {
-                    Button::Left => "left",
-                    Button::Right => "right",
-                    Button::Both => "both",
-                }
-            )
-        }
-    }
-
-    #[derive(Serialize)]
-    struct ButtonRequest {
-        action: String,
-    }
-
     impl SpeculosReqwestClient {
         fn new(url: &str) -> SpeculosReqwestClient {
             SpeculosReqwestClient {
@@ -65,16 +48,6 @@ mod tests {
                 .await?
                 .error_for_status()?;
             Ok(())
-        }
-
-        async fn button_press(&self, button: Button) -> Result<()> {
-            self.post(
-                &format!("{}/button/{button}", self.endpoint),
-                &ButtonRequest {
-                    action: "press-and-release".into(),
-                },
-            )
-            .await
         }
 
         async fn set_automation<T: Serialize>(&self, automation_json: &T) -> Result<()> {
@@ -241,5 +214,111 @@ mod tests {
             .await
             .expect("failed to display address by descriptor");
         assert_eq!(address, "tb1qzdr7s2sr0dwmkwx033r4nujzk86u0cy6fmzfjk");
+    }
+
+    #[tokio::test]
+    async fn can_sign_psbt() {
+        let (mut dev, client) = init().await;
+        let fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let xpub = dev
+            .get_extended_pubkey("m/84'/1'/0'".parse().unwrap(), false)
+            .await
+            .unwrap();
+        let secp = Secp256k1::verification_only();
+        let input_path: DerivationPath = "m/84'/1'/0'/0/0".parse().unwrap();
+        let change_path: DerivationPath = "m/84'/1'/0'/1/0".parse().unwrap();
+        let input_child_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(0).unwrap(),
+            ChildNumber::from_normal_idx(0).unwrap(),
+        ]);
+        let change_child_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(1).unwrap(),
+            ChildNumber::from_normal_idx(0).unwrap(),
+        ]);
+        let input_xpub = xpub.derive_pub(&secp, &input_child_path).unwrap();
+        let change_xpub = xpub.derive_pub(&secp, &change_child_path).unwrap();
+        let input_pubkey = PublicKey::new(input_xpub.public_key);
+        let change_pubkey = PublicKey::new(change_xpub.public_key);
+        let input_script = Address::p2wpkh(&input_xpub.to_pub(), Network::Testnet).script_pubkey();
+        let change_script =
+            Address::p2wpkh(&change_xpub.to_pub(), Network::Testnet).script_pubkey();
+        let prev_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: input_script.clone(),
+            }],
+        };
+        let unsigned_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: prev_tx.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: change_script,
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        psbt.inputs[0] = Input {
+            non_witness_utxo: Some(prev_tx),
+            witness_utxo: Some(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: input_script,
+            }),
+            bip32_derivation: [(input_pubkey.inner, (fingerprint, input_path))].into(),
+            ..Default::default()
+        };
+        psbt.outputs[0] = Output {
+            bip32_derivation: [(change_pubkey.inner, (fingerprint, change_path))].into(),
+            ..Default::default()
+        };
+
+        let key_str = format!("[{fingerprint}/84'/1'/0']{xpub}");
+        let policy = format!("wpkh({key_str}/<0;1>/*)");
+        let name = "psbttest";
+        client
+            .set_automation(
+                &serde_json::from_str::<Value>(include_str!(
+                    "../automations/register_wallet_accept.json"
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let hmac = dev
+            .register_wallet(name, &policy)
+            .await
+            .expect("failed to register psbt wallet");
+
+        client
+            .set_automation(
+                &serde_json::from_str::<Value>(include_str!("../automations/sign_psbt.json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let signed = dev
+            .sign_tx(psbt, Some(name), Some(&policy), Some(hmac))
+            .await
+            .expect("failed to sign psbt");
+
+        assert_eq!(signed.inputs.len(), 1);
+        assert_eq!(signed.inputs[0].partial_sigs.len(), 1);
+        assert!(signed.inputs[0].partial_sigs.contains_key(&input_pubkey));
     }
 }

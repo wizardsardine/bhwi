@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "regexp": "Review|From|To|Amount|Address|Fees|Fee|Output|Transaction|Account|Security risk|Unverified inputs",
+      "actions": [
+        ["button", 2, true],
+        ["button", 2, false]
+      ]
+    },
+    {
+      "regexp": "Accept|Approve|Sign|Continue anyway",
+      "actions": [
+        ["button", 1, true],
+        ["button", 2, true],
+        ["button", 2, false],
+        ["button", 1, false]
+      ]
+    }
+  ]
+}

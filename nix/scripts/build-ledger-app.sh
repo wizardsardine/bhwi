@@ -35,10 +35,10 @@ if [[ ! -f "$elf" || ! -f "$marker" ]]; then
   fi
   chmod -R u+w "$work"
 
-  if command -v docker >/dev/null 2>&1; then
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     runner=(docker run --rm --user "$(id -u):$(id -g)" -v "$work:/app" -w /app "$image")
   elif command -v podman >/dev/null 2>&1; then
-    runner=(podman run --rm --user "$(id -u):$(id -g)" -v "$work:/app:Z" -w /app "$image")
+    runner=(podman run --rm --userns=keep-id -v "$work:/app:Z" -w /app "$image")
   else
     echo "Neither docker nor podman is available for Ledger app-builder" >&2
     exit 1

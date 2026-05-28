@@ -324,6 +324,9 @@ impl TryFrom<Command> for JadeCommand {
             Command::RegisterWallet { .. } => Err(Error::MissingCommandInfo(
                 "RegisterWallet not supported by Jade",
             )),
+            Command::SignTx { .. } => {
+                Err(Error::MissingCommandInfo("SignTx not supported by Jade"))
+            }
         }
     }
 }
