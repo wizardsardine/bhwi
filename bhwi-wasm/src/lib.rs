@@ -6,12 +6,14 @@ pub mod webserial;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use bhwi::ledger::{LedgerWalletPolicy, Version};
+use bhwi::miniscript::descriptor::WalletPolicy;
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
-    HWI as AsyncHWI, Jade, Ledger, coldcard::Coldcard,
+    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, coldcard::Coldcard,
     transport::coldcard::hid::ColdcardTransportHID, transport::ledger::hid::LedgerTransportHID,
 };
-use bitcoin::{Network, bip32::DerivationPath};
+use bitcoin::{Network, address::AddressType, bip32::DerivationPath};
 use log::Level;
 use pinserver::PinServer;
 use wasm_bindgen::prelude::*;
@@ -32,6 +34,12 @@ pub trait HWI {
     async fn unlock(&mut self, network: &str) -> Result<(), JsValue>;
     async fn get_mfg(&mut self) -> Result<String, JsValue>;
     async fn get_xpub(&mut self, path: &str, display: bool) -> Result<String, JsValue>;
+    async fn display_address(
+        &mut self,
+        address: DisplayAddress,
+        context: Option<DeviceContext>,
+    ) -> Result<String, JsValue>;
+    async fn get_info(&mut self) -> Result<JsValue, JsValue>;
 }
 
 #[async_trait(?Send)]
@@ -57,6 +65,42 @@ impl<T: AsyncHWI> HWI for T {
             .await
             .map(|xpub| xpub.to_string())
             .map_err(|e| JsValue::from_str(&format!("Failed to get fingerprint: {:?}", e)))
+    }
+
+    async fn display_address(
+        &mut self,
+        address: DisplayAddress,
+        context: Option<DeviceContext>,
+    ) -> Result<String, JsValue> {
+        AsyncHWI::display_address(self, address, context)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to display address: {:?}", e)))
+    }
+
+    async fn get_info(&mut self) -> Result<JsValue, JsValue> {
+        let info = AsyncHWI::get_info(self)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to get info: {:?}", e)))?;
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(&obj, &"version".into(), &JsValue::from_str(&info.version)).unwrap();
+        let networks = js_sys::Array::new();
+        for n in &info.networks {
+            networks.push(&JsValue::from_str(match n {
+                Network::Bitcoin => "bitcoin",
+                _ => "testnet",
+            }));
+        }
+        js_sys::Reflect::set(&obj, &"networks".into(), &networks).unwrap();
+        js_sys::Reflect::set(
+            &obj,
+            &"firmware".into(),
+            &match &info.firmware {
+                Some(f) => JsValue::from_str(f),
+                None => JsValue::NULL,
+            },
+        )
+        .unwrap();
+        Ok(obj.into())
     }
 }
 
@@ -155,6 +199,14 @@ impl Client {
     }
 
     #[wasm_bindgen]
+    pub async fn get_info(&mut self) -> Result<JsValue, JsValue> {
+        match &mut self.device {
+            Some(d) => d.as_mut().get_info().await,
+            None => Err(JsValue::from_str("Device not connected")),
+        }
+    }
+
+    #[wasm_bindgen]
     pub async fn get_extended_pubkey(
         &mut self,
         path: &str,
@@ -162,6 +214,86 @@ impl Client {
     ) -> Result<String, JsValue> {
         match &mut self.device {
             Some(d) => d.as_mut().get_xpub(path, display).await,
+            None => Err(JsValue::from_str("Device not connected")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub async fn display_address_by_path(
+        &mut self,
+        path: &str,
+        display: bool,
+        address_format: Option<String>,
+    ) -> Result<String, JsValue> {
+        let path = DerivationPath::from_str(path)
+            .map_err(|e| JsValue::from_str(&format!("Invalid derivation path: {:?}", e)))?;
+        let address_format = address_format
+            .map(|f| match f.as_str() {
+                "legacy" => Ok(AddressType::P2pkh),
+                "nested-segwit" => Ok(AddressType::P2sh),
+                "native-segwit" => Ok(AddressType::P2wpkh),
+                "taproot" => Ok(AddressType::P2tr),
+                _ => Err(JsValue::from_str(&format!(
+                    "Invalid address format: {f}. Expected: legacy, nested-segwit, native-segwit, taproot"
+                ))),
+            })
+            .transpose()?;
+        let address = DisplayAddress::ByPath {
+            path,
+            display,
+            address_format,
+        };
+        match &mut self.device {
+            Some(d) => d.as_mut().display_address(address, None).await,
+            None => Err(JsValue::from_str("Device not connected")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub async fn display_address_by_descriptor(
+        &mut self,
+        descriptor_name: &str,
+        index: u32,
+        change: bool,
+        display: bool,
+        wallet_hmac_hex: Option<String>,
+        wallet_descriptor: Option<String>,
+    ) -> Result<String, JsValue> {
+        let context = match (wallet_hmac_hex, wallet_descriptor) {
+            (Some(hmac_hex), Some(desc)) => {
+                let hmac_bytes = hex::decode(&hmac_hex)
+                    .map_err(|e| JsValue::from_str(&format!("Invalid hmac hex: {e}")))?;
+                let hmac: [u8; 32] = hmac_bytes
+                    .try_into()
+                    .map_err(|_| JsValue::from_str("hmac must be 32 bytes (64 hex chars)"))?;
+                let wallet_policy: WalletPolicy = desc
+                    .parse()
+                    .map_err(|e| JsValue::from_str(&format!("Invalid wallet descriptor: {e}")))?;
+                let ledger_policy = LedgerWalletPolicy::new(
+                    descriptor_name.to_string(),
+                    Version::V2,
+                    wallet_policy,
+                );
+                Some(DeviceContext::Ledger {
+                    wallet_policy: ledger_policy,
+                    wallet_hmac: Some(hmac),
+                })
+            }
+            (None, None) => None,
+            _ => {
+                return Err(JsValue::from_str(
+                    "Both wallet_hmac_hex and wallet_descriptor must be provided together",
+                ));
+            }
+        };
+        let address = DisplayAddress::ByDescriptor {
+            index,
+            change,
+            display,
+            descriptor_name: descriptor_name.to_string(),
+        };
+        match &mut self.device {
+            Some(d) => d.as_mut().display_address(address, context).await,
             None => Err(JsValue::from_str("Device not connected")),
         }
     }

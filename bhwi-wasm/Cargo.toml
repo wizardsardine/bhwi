@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 async-trait.workspace = true
 bitcoin = { workspace = true, features = ["secp-lowmemory"] }
 bhwi.workspace = true
+hex.workspace = true
 bhwi-async.workspace = true
 futures.workspace = true
 log.workspace = true
