@@ -4,6 +4,7 @@ use bhwi_cli::{DeviceManager, OutputFormat, address::AddressTarget, config::Conf
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use bitcoin::base64::prelude::{BASE64_STANDARD, Engine as _};
 use bitcoin::{
     Network,
     address::AddressType,
@@ -79,6 +80,18 @@ enum Commands {
         /// HMAC from wallet registration (hex-encoded 64 chars)
         #[arg(long)]
         hmac: Option<String>,
+        /// Output file. Defaults to stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Sign a message with the selected device
+    SignMessage {
+        /// Message to sign
+        #[arg(long)]
+        message: String,
+        /// BIP32 derivation path (e.g. m/44'/0'/0'/0/0)
+        #[arg(long, value_parser = clap::value_parser!(DerivationPath))]
+        path: DerivationPath,
         /// Output file. Defaults to stdout.
         #[arg(long, short)]
         output: Option<PathBuf>,
@@ -256,8 +269,40 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::SignMessage {
+            message,
+            path,
+            output,
+        } => {
+            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+                let (header, signature) = d.device().sign_message(message.as_bytes(), path).await?;
+                let signature = message_signature_base64(header, &signature);
+                let rendered = match format {
+                    Some(OutputFormat::Json) => {
+                        serde_json::json!({ "signature": signature }).to_string()
+                    }
+                    Some(OutputFormat::Pretty) | None => signature,
+                };
+
+                if let Some(output) = output {
+                    std::fs::write(output, rendered)?;
+                } else {
+                    println!("{rendered}");
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn message_signature_base64(
+    header: u8,
+    signature: &bitcoin::secp256k1::ecdsa::Signature,
+) -> String {
+    let mut payload = [0u8; 65];
+    payload[0] = header;
+    payload[1..].copy_from_slice(&signature.serialize_compact());
+    BASE64_STANDARD.encode(payload)
 }
 
 fn parse_hmac(hmac: &str) -> Result<[u8; 32]> {
