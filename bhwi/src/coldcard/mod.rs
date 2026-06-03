@@ -4,6 +4,8 @@ pub mod encrypt;
 use std::string::FromUtf8Error;
 
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
+use bitcoin::hashes::{Hash, sha256};
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::Signature;
 
 use crate::Interpreter;
@@ -70,6 +72,9 @@ pub enum ColdcardCommand {
         change: bool,
         index: u32,
     },
+    SignPsbt {
+        psbt: Psbt,
+    },
 }
 
 pub enum ColdcardResponse {
@@ -88,6 +93,7 @@ pub enum ColdcardResponse {
     },
     Signature(u8, Signature),
     Address(String),
+    SignedPsbt(Psbt),
 }
 
 pub struct ColdcardTransmit {
@@ -98,6 +104,22 @@ pub struct ColdcardTransmit {
 enum State {
     New,
     Running(ColdcardCommand),
+    UploadingPsbt {
+        bytes: Vec<u8>,
+        offset: usize,
+    },
+    VerifyingPsbtUpload {
+        length: usize,
+        expected_sha: [u8; 32],
+    },
+    SigningPsbt,
+    PollingSignedPsbt,
+    DownloadingSignedPsbt {
+        expected_sha: [u8; 32],
+        bytes: Vec<u8>,
+        offset: usize,
+        total_len: usize,
+    },
     Finished(ColdcardResponse),
 }
 
@@ -125,6 +147,28 @@ fn request(
         payload: encryption.encrypt(payload)?,
         encrypted: true,
     })
+}
+
+fn psbt_upload_request(bytes: &[u8], offset: usize) -> Result<Vec<u8>, ColdcardError> {
+    let end = (offset + api::request::MAX_UPLOAD_CHUNK_LEN).min(bytes.len());
+    let offset = u32::try_from(offset)
+        .map_err(|_| ColdcardError::Serialization("upload offset too large".to_string()))?;
+    let total = u32::try_from(bytes.len())
+        .map_err(|_| ColdcardError::Serialization("psbt too large".to_string()))?;
+    Ok(api::request::upload(
+        offset,
+        total,
+        &bytes[offset as usize..end],
+    ))
+}
+
+fn download_request(offset: usize, total_len: usize) -> Result<Vec<u8>, ColdcardError> {
+    let length = (api::request::MAX_UPLOAD_CHUNK_LEN).min(total_len - offset);
+    let offset = u32::try_from(offset)
+        .map_err(|_| ColdcardError::Serialization("download offset too large".to_string()))?;
+    let length = u32::try_from(length)
+        .map_err(|_| ColdcardError::Serialization("download length too large".to_string()))?;
+    Ok(api::request::download(offset, length, 1))
 }
 
 impl<'a, C, T, R, E> Interpreter for ColdcardInterpreter<'a, C, T, R, E>
@@ -168,13 +212,19 @@ where
                 api::request::miniscript_address(name, *change, *index),
                 self.encryption,
             )?,
+            ColdcardCommand::SignPsbt { psbt } => {
+                let bytes = psbt.serialize();
+                let req = request(psbt_upload_request(&bytes, 0)?, self.encryption)?;
+                self.state = State::UploadingPsbt { bytes, offset: 0 };
+                return Ok(req.into());
+            }
         };
 
         self.state = State::Running(command);
         Ok(req.into())
     }
     fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, Self::Error> {
-        match &self.state {
+        match &mut self.state {
             State::New => Ok(None),
             State::Running(ColdcardCommand::GetVersion) => {
                 let data = self.encryption.decrypt(data)?;
@@ -215,6 +265,137 @@ where
             State::Running(ColdcardCommand::MiniscriptAddress { .. }) => {
                 let data = self.encryption.decrypt(data)?;
                 self.state = State::Finished(api::response::miniscript_address(&data)?);
+                Ok(None)
+            }
+            State::Running(ColdcardCommand::SignPsbt { .. }) => unreachable!("handled in start"),
+            State::UploadingPsbt { bytes, offset } => {
+                let data = self.encryption.decrypt(data)?;
+                let acknowledged = api::response::upload(&data)? as usize;
+                if acknowledged != *offset {
+                    return Err(ColdcardError::Serialization(format!(
+                        "unexpected upload offset {acknowledged}, wanted {offset}"
+                    ))
+                    .into());
+                }
+
+                let next_offset = (*offset + api::request::MAX_UPLOAD_CHUNK_LEN).min(bytes.len());
+                if next_offset < bytes.len() {
+                    let req = request(psbt_upload_request(bytes, next_offset)?, self.encryption)?;
+                    *offset = next_offset;
+                    return Ok(Some(req.into()));
+                }
+
+                let length = bytes.len();
+                let expected_sha = sha256::Hash::hash(bytes).to_byte_array();
+                self.state = State::VerifyingPsbtUpload {
+                    length,
+                    expected_sha,
+                };
+                Ok(Some(
+                    request(api::request::sha256(), self.encryption)?.into(),
+                ))
+            }
+            State::VerifyingPsbtUpload {
+                length,
+                expected_sha,
+            } => {
+                let data = self.encryption.decrypt(data)?;
+                let length = *length;
+                let expected_sha = *expected_sha;
+                let actual_sha = api::response::sha256(&data)?;
+                if actual_sha != expected_sha {
+                    return Err(ColdcardError::Serialization(
+                        "coldcard upload sha mismatch".to_string(),
+                    )
+                    .into());
+                }
+
+                let length = u32::try_from(length)
+                    .map_err(|_| ColdcardError::Serialization("psbt too large".to_string()))?;
+                self.state = State::SigningPsbt;
+                Ok(Some(
+                    request(
+                        api::request::sign_transaction(length, &expected_sha),
+                        self.encryption,
+                    )?
+                    .into(),
+                ))
+            }
+            State::SigningPsbt => {
+                let data = self.encryption.decrypt(data)?;
+                let res = api::response::sign_transaction(&data)?;
+                if let ColdcardResponse::Ok | ColdcardResponse::Busy = res {
+                    self.state = State::PollingSignedPsbt;
+                    return Ok(Some(
+                        request(api::request::get_signed_transaction(), self.encryption)?.into(),
+                    ));
+                }
+                Ok(None)
+            }
+            State::PollingSignedPsbt => {
+                let data = self.encryption.decrypt(data)?;
+                match api::response::signed_transaction(&data)? {
+                    api::response::SignedTransactionStatus::Pending => {
+                        self.state = State::PollingSignedPsbt;
+                        Ok(Some(
+                            request(api::request::get_signed_transaction(), self.encryption)?
+                                .into(),
+                        ))
+                    }
+                    api::response::SignedTransactionStatus::Complete { length, sha } => {
+                        let total_len = usize::try_from(length).map_err(|_| {
+                            ColdcardError::Serialization(
+                                "signed psbt length cannot fit usize".to_string(),
+                            )
+                        })?;
+                        self.state = State::DownloadingSignedPsbt {
+                            expected_sha: sha,
+                            bytes: Vec::with_capacity(total_len),
+                            offset: 0,
+                            total_len,
+                        };
+                        Ok(Some(
+                            request(download_request(0, total_len)?, self.encryption)?.into(),
+                        ))
+                    }
+                }
+            }
+            State::DownloadingSignedPsbt {
+                expected_sha,
+                bytes,
+                offset,
+                total_len,
+            } => {
+                let data = self.encryption.decrypt(data)?;
+                let chunk = api::response::download(&data)?;
+                if chunk.is_empty() {
+                    return Err(ColdcardError::Serialization(
+                        "empty signed psbt download chunk".into(),
+                    )
+                    .into());
+                }
+                bytes.extend_from_slice(&chunk);
+                *offset += chunk.len();
+                if *offset < *total_len {
+                    let req = request(download_request(*offset, *total_len)?, self.encryption)?;
+                    return Ok(Some(req.into()));
+                }
+                if *offset != *total_len {
+                    return Err(ColdcardError::Serialization(format!(
+                        "downloaded signed psbt length {offset}, wanted {total_len}"
+                    ))
+                    .into());
+                }
+                let actual_sha = sha256::Hash::hash(bytes).to_byte_array();
+                if actual_sha != *expected_sha {
+                    return Err(ColdcardError::Serialization(
+                        "coldcard signed psbt sha mismatch".to_string(),
+                    )
+                    .into());
+                }
+                let signed = Psbt::deserialize(bytes)
+                    .map_err(|e| ColdcardError::Serialization(e.to_string()))?;
+                self.state = State::Finished(ColdcardResponse::SignedPsbt(signed));
                 Ok(None)
             }
             State::Finished(..) => Ok(None),
@@ -267,9 +448,14 @@ impl TryFrom<Command> for ColdcardCommand {
             Command::RegisterWallet { .. } => Err(ColdcardError::MissingCommandInfo(
                 "RegisterWallet not supported by Coldcard",
             )),
-            Command::SignTx(_, _) => Err(ColdcardError::MissingCommandInfo(
-                "SignTx not supported by Coldcard",
-            )),
+            Command::SignTx(psbt, context) => {
+                if context.is_some() {
+                    return Err(ColdcardError::MissingCommandInfo(
+                        "Coldcard SignTx does not support device context",
+                    ));
+                }
+                Ok(Self::SignPsbt { psbt })
+            }
         }
     }
 }
@@ -296,6 +482,7 @@ impl From<ColdcardResponse> for Response {
             ColdcardResponse::Ok => Response::TaskDone,
             ColdcardResponse::Busy => Response::TaskBusy,
             ColdcardResponse::Address(address) => Response::Address(address),
+            ColdcardResponse::SignedPsbt(psbt) => Response::SignedPsbt(psbt),
         }
     }
 }

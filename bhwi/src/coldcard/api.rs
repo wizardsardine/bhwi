@@ -2,6 +2,8 @@
 pub mod request {
     use bitcoin::bip32::DerivationPath;
 
+    pub const MAX_UPLOAD_CHUNK_LEN: usize = 2048;
+
     pub fn start_encryption(version: Option<u32>, key: &[u8; 64]) -> Vec<u8> {
         let mut data = "ncry".as_bytes().to_owned();
         data.extend(version.unwrap_or(1).to_le_bytes());
@@ -78,6 +80,39 @@ pub mod request {
         b"smok".to_vec()
     }
 
+    pub fn upload(offset: u32, total_size: u32, data: &[u8]) -> Vec<u8> {
+        assert!(data.len() <= MAX_UPLOAD_CHUNK_LEN);
+        let mut rv = b"upld".to_vec();
+        rv.extend(offset.to_le_bytes());
+        rv.extend(total_size.to_le_bytes());
+        rv.extend(data);
+        rv
+    }
+
+    pub fn sha256() -> Vec<u8> {
+        b"sha2".to_vec()
+    }
+
+    pub fn sign_transaction(length: u32, file_sha: &[u8; 32]) -> Vec<u8> {
+        let mut rv = b"stxn".to_vec();
+        rv.extend(length.to_le_bytes());
+        rv.extend(0u32.to_le_bytes());
+        rv.extend(file_sha);
+        rv
+    }
+
+    pub fn get_signed_transaction() -> Vec<u8> {
+        b"stok".to_vec()
+    }
+
+    pub fn download(offset: u32, length: u32, file_number: u32) -> Vec<u8> {
+        let mut rv = b"dwld".to_vec();
+        rv.extend(offset.to_le_bytes());
+        rv.extend(length.to_le_bytes());
+        rv.extend(file_number.to_le_bytes());
+        rv
+    }
+
     pub fn get_version() -> Vec<u8> {
         b"vers".to_vec()
     }
@@ -94,6 +129,56 @@ mod tests {
         let path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();
         assert_eq!("48'/1'/0'/2'", path.to_string());
     }
+
+    #[test]
+    fn upload_request_encodes_offset_total_and_data() {
+        let req = super::request::upload(7, 11, b"psbt");
+        assert_eq!(&req[..4], b"upld");
+        assert_eq!(u32::from_le_bytes(req[4..8].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(req[8..12].try_into().unwrap()), 11);
+        assert_eq!(&req[12..], b"psbt");
+    }
+
+    #[test]
+    fn sign_transaction_request_encodes_length_flags_and_hash() {
+        let hash = [3u8; 32];
+        let req = super::request::sign_transaction(99, &hash);
+        assert_eq!(&req[..4], b"stxn");
+        assert_eq!(u32::from_le_bytes(req[4..8].try_into().unwrap()), 99);
+        assert_eq!(u32::from_le_bytes(req[8..12].try_into().unwrap()), 0);
+        assert_eq!(&req[12..], &hash);
+    }
+
+    #[test]
+    fn upload_response_decodes_acknowledged_offset() {
+        let mut res = b"int1".to_vec();
+        res.extend(42u32.to_le_bytes());
+        assert_eq!(super::response::upload(&res).unwrap(), 42);
+    }
+
+    #[test]
+    fn signed_transaction_response_decodes_length_and_hash() {
+        let mut res = b"strx".to_vec();
+        res.extend(123u32.to_le_bytes());
+        res.extend([9u8; 32]);
+        match super::response::signed_transaction(&res).unwrap() {
+            super::response::SignedTransactionStatus::Complete { length, sha } => {
+                assert_eq!(length, 123);
+                assert_eq!(sha, [9u8; 32]);
+            }
+            super::response::SignedTransactionStatus::Pending => {
+                panic!("expected complete transaction")
+            }
+        }
+    }
+
+    #[test]
+    fn signed_transaction_response_treats_busy_as_pending() {
+        assert!(matches!(
+            super::response::signed_transaction(b"busy").unwrap(),
+            super::response::SignedTransactionStatus::Pending
+        ));
+    }
 }
 
 pub mod response {
@@ -104,6 +189,11 @@ pub mod response {
     use bitcoin::secp256k1::ecdsa::Signature;
 
     use crate::coldcard::{ColdcardError, ColdcardResponse};
+
+    pub enum SignedTransactionStatus {
+        Pending,
+        Complete { length: u32, sha: [u8; 32] },
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ResponseMessage {
@@ -260,6 +350,56 @@ pub mod response {
 
     pub fn get_xpub(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         Ok(ColdcardResponse::Xpub(xpub(res)?))
+    }
+
+    pub fn upload(res: &[u8]) -> Result<u32, ColdcardError> {
+        let data = ResponseHandler::expect_response(res, ResponseMessage::Int1)?;
+        decode_u32(Some(data))
+    }
+
+    pub fn sha256(res: &[u8]) -> Result<[u8; 32], ColdcardError> {
+        let data = ResponseHandler::expect_response(res, ResponseMessage::Biny)?;
+        data.try_into()
+            .map_err(|_| ColdcardError::Serialization("sha256".to_string()))
+    }
+
+    pub fn sign_transaction(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
+        match ResponseHandler::parse_response(res)? {
+            (ResponseMessage::Okay, _) => Ok(ColdcardResponse::Ok),
+            (ResponseMessage::Busy, _) => Ok(ColdcardResponse::Busy),
+            (msg, _) => Err(ColdcardError::unexpected_response_message(
+                msg,
+                &[ResponseMessage::Okay, ResponseMessage::Busy],
+            )),
+        }
+    }
+
+    pub fn signed_transaction(res: &[u8]) -> Result<SignedTransactionStatus, ColdcardError> {
+        match ResponseHandler::parse_response(res)? {
+            (ResponseMessage::Okay, _) | (ResponseMessage::Busy, _) => {
+                Ok(SignedTransactionStatus::Pending)
+            }
+            (ResponseMessage::Strx, data) => {
+                let (len, sha) = split(data, 4)?;
+                let length = decode_u32(Some(len))?;
+                let sha = sha
+                    .try_into()
+                    .map_err(|_| ColdcardError::Serialization("signed transaction sha".into()))?;
+                Ok(SignedTransactionStatus::Complete { length, sha })
+            }
+            (msg, _) => Err(ColdcardError::unexpected_response_message(
+                msg,
+                &[
+                    ResponseMessage::Okay,
+                    ResponseMessage::Busy,
+                    ResponseMessage::Strx,
+                ],
+            )),
+        }
+    }
+
+    pub fn download(res: &[u8]) -> Result<Vec<u8>, ColdcardError> {
+        Ok(ResponseHandler::expect_response(res, ResponseMessage::Biny)?.to_vec())
     }
 
     pub fn version(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {

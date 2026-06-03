@@ -24,21 +24,37 @@ impl DeviceControl {
         self.client.exchange(b"XKEYy", false).await.unwrap();
         Ok(())
     }
+
+    pub async fn approve_after(&mut self, delay: std::time::Duration) -> Result<()> {
+        tokio::time::sleep(delay).await;
+        self.client.exchange(b"XKEYy", false).await.unwrap();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64, Encoding};
     use bhwi_async::{DisplayAddress, HWI, transport::coldcard::DEFAULT_CKCC_SOCKET};
-    use bitcoin::Network;
+    use bitcoin::{
+        Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
+        Witness,
+        absolute::LockTime,
+        address::Address,
+        bip32::{ChildNumber, DerivationPath},
+        psbt::{Input, Output, Psbt},
+        secp256k1::Secp256k1,
+        transaction::Version as TxVersion,
+    };
 
     use super::*;
 
     async fn device() -> (ColdcardDevice, DeviceControl) {
         let mut rng = rand_core::OsRng;
         let client = EmulatorClient::new(DEFAULT_CKCC_SOCKET).await.unwrap();
-        let mut dev = ColdcardDevice::new(ColdcardTransportHID::new(client.clone()), &mut rng);
-        let control = DeviceControl::new(client);
+        let control_client = EmulatorClient::new(DEFAULT_CKCC_SOCKET).await.unwrap();
+        let mut dev = ColdcardDevice::new(ColdcardTransportHID::new(client), &mut rng);
+        let control = DeviceControl::new(control_client);
         dev.unlock(Network::Testnet).await.expect("can't unlock");
         (dev, control)
     }
@@ -133,5 +149,90 @@ mod tests {
         // The simulator returns err_Unknown cmd for msas, so we expect an error.
         // On real hardware with a registered descriptor, this would succeed.
         assert!(display_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn can_sign_psbt() {
+        let (mut dev, mut control) = device().await;
+        let fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let xpub = dev
+            .get_extended_pubkey("84'/1'/0'".parse().unwrap(), false)
+            .await
+            .unwrap();
+        let secp = Secp256k1::verification_only();
+        let input_path: DerivationPath = "84'/1'/0'/0/0".parse().unwrap();
+        let change_path: DerivationPath = "84'/1'/0'/1/0".parse().unwrap();
+        let input_child_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(0).unwrap(),
+            ChildNumber::from_normal_idx(0).unwrap(),
+        ]);
+        let change_child_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(1).unwrap(),
+            ChildNumber::from_normal_idx(0).unwrap(),
+        ]);
+        let input_xpub = xpub.derive_pub(&secp, &input_child_path).unwrap();
+        let change_xpub = xpub.derive_pub(&secp, &change_child_path).unwrap();
+        let input_pubkey = PublicKey::new(input_xpub.public_key);
+        let change_pubkey = PublicKey::new(change_xpub.public_key);
+        let input_script = Address::p2wpkh(&input_xpub.to_pub(), Network::Testnet).script_pubkey();
+        let change_script =
+            Address::p2wpkh(&change_xpub.to_pub(), Network::Testnet).script_pubkey();
+        let prev_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: input_script.clone(),
+            }],
+        };
+        let unsigned_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: prev_tx.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: change_script,
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        psbt.inputs[0] = Input {
+            non_witness_utxo: Some(prev_tx),
+            witness_utxo: Some(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: input_script,
+            }),
+            bip32_derivation: [(input_pubkey.inner, (fingerprint, input_path))].into(),
+            ..Default::default()
+        };
+        psbt.outputs[0] = Output {
+            bip32_derivation: [(change_pubkey.inner, (fingerprint, change_path))].into(),
+            ..Default::default()
+        };
+
+        let sign_task = dev.sign_tx(psbt, None);
+        let (signed, approve_res) = tokio::join!(
+            sign_task,
+            control.approve_after(std::time::Duration::from_secs(1))
+        );
+        let signed = signed.expect("failed to sign psbt");
+        approve_res.unwrap();
+
+        assert_eq!(signed.inputs.len(), 1);
+        assert_eq!(signed.inputs[0].partial_sigs.len(), 1);
+        assert!(signed.inputs[0].partial_sigs.contains_key(&input_pubkey));
     }
 }
