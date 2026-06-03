@@ -39,6 +39,7 @@ pub trait HWI {
         address: DisplayAddress,
         context: Option<DeviceContext>,
     ) -> Result<String, JsValue>;
+    async fn register_wallet(&mut self, name: &str, policy: &str) -> Result<Vec<u8>, JsValue>;
     async fn get_info(&mut self) -> Result<JsValue, JsValue>;
 }
 
@@ -75,6 +76,13 @@ impl<T: AsyncHWI> HWI for T {
         AsyncHWI::display_address(self, address, context)
             .await
             .map_err(|e| JsValue::from_str(&format!("Failed to display address: {:?}", e)))
+    }
+
+    async fn register_wallet(&mut self, name: &str, policy: &str) -> Result<Vec<u8>, JsValue> {
+        AsyncHWI::register_wallet(self, name, policy)
+            .await
+            .map(|hmac| hmac.to_vec())
+            .map_err(|e| JsValue::from_str(&format!("Failed to register wallet: {:?}", e)))
     }
 
     async fn get_info(&mut self) -> Result<JsValue, JsValue> {
@@ -214,6 +222,26 @@ impl Client {
     ) -> Result<String, JsValue> {
         match &mut self.device {
             Some(d) => d.as_mut().get_xpub(path, display).await,
+            None => Err(JsValue::from_str("Device not connected")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub async fn register_wallet(
+        &mut self,
+        name: &str,
+        policy: &str,
+    ) -> Result<Option<String>, JsValue> {
+        match &mut self.device {
+            Some(Device::Ledger(l)) => {
+                let hmac = AsyncHWI::register_wallet(l, name, policy).await
+                    .map_err(|e| JsValue::from_str(&format!("Failed to register wallet: {:?}", e)))?;
+                Ok(Some(hex::encode(hmac)))
+            }
+            Some(d) => {
+                d.as_mut().register_wallet(name, policy).await?;
+                Ok(None)
+            }
             None => Err(JsValue::from_str("Device not connected")),
         }
     }
