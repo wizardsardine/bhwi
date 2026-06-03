@@ -1,11 +1,10 @@
+use crate::miniscript::descriptor::WalletPolicy;
+use crate::{coldcard, jade, ledger};
 use bitcoin::Network;
 use bitcoin::address::AddressType;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::Signature;
-use miniscript::descriptor::WalletPolicy;
-
-use crate::{coldcard, jade, ledger};
 
 #[derive(Default)]
 pub struct UnlockOptions {
@@ -40,12 +39,7 @@ pub enum Command {
         name: String,
         policy: WalletPolicy,
     },
-    SignTx {
-        policy_name: Option<String>,
-        psbt: Psbt,
-        policy: Option<WalletPolicy>,
-        hmac: Option<[u8; 32]>,
-    },
+    SignTx(Psbt, Option<DeviceContext>),
     SignMessage {
         message: Vec<u8>,
         path: DerivationPath,

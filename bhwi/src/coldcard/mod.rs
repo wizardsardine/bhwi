@@ -267,7 +267,7 @@ impl TryFrom<Command> for ColdcardCommand {
             Command::RegisterWallet { .. } => Err(ColdcardError::MissingCommandInfo(
                 "RegisterWallet not supported by Coldcard",
             )),
-            Command::SignTx { .. } => Err(ColdcardError::MissingCommandInfo(
+            Command::SignTx(_, _) => Err(ColdcardError::MissingCommandInfo(
                 "SignTx not supported by Coldcard",
             )),
         }

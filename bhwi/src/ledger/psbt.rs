@@ -524,6 +524,7 @@ mod serialize {
     }
 
     /// A trait for deserializing a value from raw data in PSBT key-value maps.
+    #[allow(dead_code)]
     pub(crate) trait Deserialize: Sized {
         /// Deserialize a value from raw data.
         fn deserialize(bytes: &[u8]) -> Result<Self, Error>;

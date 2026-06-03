@@ -313,7 +313,17 @@ mod tests {
             .await
             .unwrap();
         let signed = dev
-            .sign_tx(psbt, Some(name), Some(&policy), Some(hmac))
+            .sign_tx(
+                psbt,
+                Some(DeviceContext::Ledger {
+                    wallet_policy: LedgerWalletPolicy::new(
+                        name.to_string(),
+                        Version::V2,
+                        WalletPolicy::from_str(&policy).unwrap(),
+                    ),
+                    wallet_hmac: Some(hmac),
+                }),
+            )
             .await
             .expect("failed to sign psbt");
 
