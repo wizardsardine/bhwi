@@ -85,3 +85,6 @@ where
 ```
 
 Check [docs/VISION.md](docs/VISION.md) to have a better explanation of the thought process leading to **BHWI**.
+
+For upstream protocol references and notes for adding a new hardware wallet, see
+[docs/DEVICE_ONBOARDING.md](docs/DEVICE_ONBOARDING.md).
