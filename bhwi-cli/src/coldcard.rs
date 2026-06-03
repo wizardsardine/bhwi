@@ -94,7 +94,10 @@ impl DeviceEnumerator for ColdcardDevice {
 
 #[cfg(unix)]
 pub mod emulator {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use anyhow::Result;
     use async_trait::async_trait;
@@ -104,7 +107,7 @@ pub mod emulator {
     };
     use tokio::net::UnixDatagram;
 
-    const CLIENT_SOCKET: &str = "/tmp/bhwi-ckcc-client.sock";
+    static CLIENT_SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     pub type ColdcardSocketDevice = Coldcard<ColdcardTransportHID<EmulatorClient>>;
 
@@ -116,8 +119,13 @@ pub mod emulator {
 
     impl EmulatorClient {
         pub async fn new(socket_path: &str) -> Result<Self> {
-            let _ = std::fs::remove_file(CLIENT_SOCKET);
-            let socket = UnixDatagram::bind(CLIENT_SOCKET)?;
+            let socket_id = CLIENT_SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let client_socket = format!(
+                "/tmp/bhwi-ckcc-client-{}-{socket_id}.sock",
+                std::process::id()
+            );
+            let _ = std::fs::remove_file(&client_socket);
+            let socket = UnixDatagram::bind(client_socket)?;
             socket.connect(socket_path)?;
             Ok(Self {
                 socket: Arc::new(socket),
