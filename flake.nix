@@ -61,6 +61,66 @@
           pythonPackages.zopfli
         ]);
         rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        rustPlatformWasm = pkgs.makeRustPlatform {
+          cargo = rust;
+          rustc = rust;
+        };
+        bhwi-wasm-pkg = rustPlatformWasm.buildRustPackage {
+          name = "bhwi-wasm-pkg";
+          src = ./.;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes = {
+              "miniscript-13.0.0" = "sha256-sCxv3/haaN6AJn1ot4gqnAoJJypKAv5nUh/rSDTS3YI=";
+            };
+          };
+          nativeBuildInputs = [
+            pkgs.wasm-bindgen-cli
+            pkgs.binaryen
+            pkgs.llvmPackages.clang-unwrapped
+            pkgs.llvmPackages.libclang
+          ];
+          buildPhase = ''
+            runHook preBuild
+            export CC_wasm32_unknown_unknown=${pkgs.llvmPackages.clang-unwrapped}/bin/clang
+            export CFLAGS_wasm32_unknown_unknown="-I ${pkgs.llvmPackages.libclang.lib}/lib/clang/21.1.8/include/"
+            cargo build --release --target wasm32-unknown-unknown -p bhwi-wasm
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out
+            wasm-bindgen --out-dir $out --target web --out-name bhwi_wasm \
+              target/wasm32-unknown-unknown/release/bhwi_wasm.wasm
+            wasm-opt -O $out/bhwi_wasm_bg.wasm -o $out/bhwi_wasm_bg.wasm
+            cat > $out/package.json << 'EOF'
+            {
+              "name": "bhwi-wasm",
+              "type": "module",
+              "version": "0.0.1",
+              "main": "bhwi_wasm.js",
+              "types": "bhwi_wasm.d.ts"
+            }
+            EOF
+            runHook postInstall
+          '';
+          doCheck = false;
+        };
+        mkWebsite = pkgs.callPackage ({buildNpmPackage, nodejs_20, base ? "/"}: buildNpmPackage {
+          name = "bhwi-website";
+          src = ./website;
+          nodejs = nodejs_20;
+          npmDepsHash = "sha256-FasM+ZLqSgfWNJlTHappXsAjE0uFHnbv3GOZtyaaGe0=";
+          postPatch = ''
+            cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} pkg
+          '';
+          npmBuildFlags = ["--" "--base" base];
+          installPhase = ''
+            runHook preInstall
+            cp -r dist $out
+            runHook postInstall
+          '';
+        });
         inputs = [
           rust
           pkgs.rust-analyzer
@@ -325,6 +385,8 @@
 
             nativeBuildInputs = inputs;
           };
+          website = mkWebsite {};
+          website-ghpages = mkWebsite { base = "/bhwi/"; };
         } // linuxPackages;
 
         devShells = {
@@ -343,11 +405,9 @@
           website = {
             type = "app";
             program = toString (pkgs.writeShellScript "run-website" ''
-              export PATH="${pkgs.lib.makeBinPath inputs}:$PATH"
-              export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-              export CC_wasm32_unknown_unknown=${pkgs.llvmPackages.clang-unwrapped}/bin/clang
-              export CFLAGS_wasm32_unknown_unknown="-I ${pkgs.llvmPackages.libclang.lib}/lib/clang/21.1.8/include/"
-              wasm-pack build bhwi-wasm --out-dir ../website/pkg --target web
+              export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.corepack_20]}:$PATH"
+              rm -rf website/pkg
+              cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} website/pkg
               cd website && npm install && npm run dev
             '');
           };

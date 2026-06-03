@@ -234,8 +234,11 @@ impl Client {
     ) -> Result<Option<String>, JsValue> {
         match &mut self.device {
             Some(Device::Ledger(l)) => {
-                let hmac = AsyncHWI::register_wallet(l, name, policy).await
-                    .map_err(|e| JsValue::from_str(&format!("Failed to register wallet: {:?}", e)))?;
+                let hmac = AsyncHWI::register_wallet(l, name, policy)
+                    .await
+                    .map_err(|e| {
+                        JsValue::from_str(&format!("Failed to register wallet: {:?}", e))
+                    })?;
                 Ok(Some(hex::encode(hmac)))
             }
             Some(d) => {
