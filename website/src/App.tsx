@@ -17,7 +17,7 @@ interface XpubResult {
 }
 
 type AddressFormat = 'legacy' | 'nested-segwit' | 'native-segwit' | 'taproot';
-type AddressMode = 'by-type' | 'by-path';
+type AddressMode = 'by-type' | 'by-path' | 'by-descriptor';
 
 const ADDRESS_FORMAT_PURPOSE: Record<AddressFormat, number> = {
     'legacy': 44,
@@ -25,6 +25,12 @@ const ADDRESS_FORMAT_PURPOSE: Record<AddressFormat, number> = {
     'native-segwit': 84,
     'taproot': 86,
 };
+
+interface RegisterWalletResult {
+    name: string;
+    policy: string;
+    hmac: string | null;
+}
 
 interface AddressResult {
     derivationPath: string;
@@ -45,8 +51,17 @@ const App = () => {
     const [addressPath, setAddressPath] = useState("m/84'/0'/0'/0/0");
     const [addressFormat, setAddressFormat] = useState<AddressFormat>('native-segwit');
     const [addressIndex, setAddressIndex] = useState(0);
+    const [descriptorName, setDescriptorName] = useState('');
+    const [descriptorIndex, setDescriptorIndex] = useState(0);
+    const [descriptorChange, setDescriptorChange] = useState(false);
+    const [descriptorHmac, setDescriptorHmac] = useState('');
+    const [descriptorPolicy, setDescriptorPolicy] = useState('');
     const [addressResults, setAddressResults] = useState<AddressResult[]>([]);
     const [fetchingAddress, setFetchingAddress] = useState(false);
+    const [walletName, setWalletName] = useState('');
+    const [walletPolicy, setWalletPolicy] = useState('');
+    const [registerWalletResults, setRegisterWalletResults] = useState<RegisterWalletResult[]>([]);
+    const [registeringWallet, setRegisteringWallet] = useState(false);
     const [processing, setProcessing] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -171,6 +186,54 @@ const App = () => {
             console.error("Error displaying address:", err);
         } finally {
             setFetchingAddress(false);
+            setProcessing(false);
+        }
+    };
+
+    const fetchAddressByDescriptor = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!device || processing) return;
+
+        setFetchingAddress(true);
+        setProcessing(true);
+        try {
+            const hmac = descriptorHmac.trim() || undefined;
+            const policy = descriptorPolicy.trim() || undefined;
+            const address = await device.client.display_address_by_descriptor(
+                descriptorName,
+                descriptorIndex,
+                descriptorChange,
+                true,
+                hmac,
+                policy,
+            );
+            const label = `${descriptorName} [${descriptorChange ? '1' : '0'}/${descriptorIndex}]`;
+            setAddressResults(prev => [{ derivationPath: label, address }, ...prev]);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to display address";
+            showError(message);
+            console.error("Error displaying address by descriptor:", err);
+        } finally {
+            setFetchingAddress(false);
+            setProcessing(false);
+        }
+    };
+
+    const registerWallet = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!device || processing) return;
+
+        setRegisteringWallet(true);
+        setProcessing(true);
+        try {
+            const hmac = await device.client.register_wallet(walletName, walletPolicy);
+            setRegisterWalletResults(prev => [{ name: walletName, policy: walletPolicy, hmac: hmac ?? null }, ...prev]);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to register wallet";
+            showError(message);
+            console.error("Error registering wallet:", err);
+        } finally {
+            setRegisteringWallet(false);
             setProcessing(false);
         }
     };
@@ -304,64 +367,142 @@ const App = () => {
                                     >
                                         By Path
                                     </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setAddressMode('by-descriptor')}
+                                        className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${addressMode === 'by-descriptor' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
+                                    >
+                                        By Descriptor
+                                    </button>
                                 </div>
 
-                                <form onSubmit={fetchAddress}>
-                                    {addressMode === 'by-type' ? (
-                                        <>
-                                            <label htmlFor="address-format" className="block text-sm text-gray-400 mb-2">
-                                                Address Type
-                                            </label>
-                                            <select
-                                                id="address-format"
-                                                value={addressFormat}
-                                                onChange={(e) => setAddressFormat(e.target.value as AddressFormat)}
-                                                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500 mb-4"
-                                            >
-                                                <option value="legacy">Legacy (P2PKH) — m/44'/{coinType}'/0'/0/i</option>
-                                                <option value="nested-segwit">Nested SegWit (P2SH-P2WPKH) — m/49'/{coinType}'/0'/0/i</option>
-                                                <option value="native-segwit">Native SegWit (P2WPKH) — m/84'/{coinType}'/0'/0/i</option>
-                                                <option value="taproot">Taproot (P2TR) — m/86'/{coinType}'/0'/0/i</option>
-                                            </select>
-                                            <label htmlFor="address-index" className="block text-sm text-gray-400 mb-2">
-                                                Index
-                                            </label>
-                                            <input
-                                                id="address-index"
-                                                type="number"
-                                                min={0}
-                                                value={addressIndex}
-                                                onChange={(e) => setAddressIndex(parseInt(e.target.value) || 0)}
-                                                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
-                                            />
-                                        </>
-                                    ) : (
-                                        <>
-                                            <label htmlFor="address-path" className="block text-sm text-gray-400 mb-2">
-                                                Derivation Path
-                                            </label>
-                                            <input
-                                                id="address-path"
-                                                type="text"
-                                                value={addressPath}
-                                                onChange={(e) => setAddressPath(e.target.value)}
-                                                placeholder="m/84'/0'/0'/0/0"
-                                                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-1"
-                                            />
-                                            {getPathNetworkWarning(addressPath) && (
-                                                <p className="text-amber-400 text-xs mb-3">{getPathNetworkWarning(addressPath)}</p>
-                                            )}
-                                            {!getPathNetworkWarning(addressPath) && <div className="mb-3" />}
-                                        </>
-                                    )}
-                                    <button
-                                        type="submit"
-                                        disabled={processing}
-                                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-lg font-medium transition-colors"
-                                    >
-                                        {fetchingAddress ? 'Displaying...' : 'Display'}
-                                    </button>
-                                </form>
+                                {addressMode === 'by-descriptor' ? (
+                                    <form onSubmit={fetchAddressByDescriptor}>
+                                        <label htmlFor="descriptor-name" className="block text-sm text-gray-400 mb-2">
+                                            Descriptor Name
+                                        </label>
+                                        <input
+                                            id="descriptor-name"
+                                            type="text"
+                                            value={descriptorName}
+                                            onChange={(e) => setDescriptorName(e.target.value)}
+                                            placeholder="My Wallet"
+                                            className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                        />
+                                        <div className="flex gap-4 mb-4">
+                                            <div className="flex-1">
+                                                <label htmlFor="descriptor-index" className="block text-sm text-gray-400 mb-2">
+                                                    Index
+                                                </label>
+                                                <input
+                                                    id="descriptor-index"
+                                                    type="number"
+                                                    min={0}
+                                                    value={descriptorIndex}
+                                                    onChange={(e) => setDescriptorIndex(parseInt(e.target.value) || 0)}
+                                                    className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500"
+                                                />
+                                            </div>
+                                            <div className="flex items-end pb-2">
+                                                <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={descriptorChange}
+                                                        onChange={(e) => setDescriptorChange(e.target.checked)}
+                                                        className="w-4 h-4 accent-blue-600"
+                                                    />
+                                                    Change
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <label htmlFor="descriptor-hmac" className="block text-sm text-gray-400 mb-2">
+                                            Wallet HMAC (hex, Ledger only)
+                                        </label>
+                                        <input
+                                            id="descriptor-hmac"
+                                            type="text"
+                                            value={descriptorHmac}
+                                            onChange={(e) => setDescriptorHmac(e.target.value)}
+                                            placeholder="Optional — 64 hex characters"
+                                            className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                        />
+                                        <label htmlFor="descriptor-policy" className="block text-sm text-gray-400 mb-2">
+                                            Wallet Descriptor (Ledger only)
+                                        </label>
+                                        <textarea
+                                            id="descriptor-policy"
+                                            value={descriptorPolicy}
+                                            onChange={(e) => setDescriptorPolicy(e.target.value)}
+                                            placeholder="Optional — e.g. wsh(sortedmulti(2,@0/**,@1/**))"
+                                            rows={2}
+                                            className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                        />
+                                        <button
+                                            type="submit"
+                                            disabled={processing}
+                                            className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-lg font-medium transition-colors"
+                                        >
+                                            {fetchingAddress ? 'Displaying...' : 'Display'}
+                                        </button>
+                                    </form>
+                                ) : (
+                                    <form onSubmit={fetchAddress}>
+                                        {addressMode === 'by-type' ? (
+                                            <>
+                                                <label htmlFor="address-format" className="block text-sm text-gray-400 mb-2">
+                                                    Address Type
+                                                </label>
+                                                <select
+                                                    id="address-format"
+                                                    value={addressFormat}
+                                                    onChange={(e) => setAddressFormat(e.target.value as AddressFormat)}
+                                                    className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                                >
+                                                    <option value="legacy">Legacy (P2PKH) — m/44'/{coinType}'/0'/0/i</option>
+                                                    <option value="nested-segwit">Nested SegWit (P2SH-P2WPKH) — m/49'/{coinType}'/0'/0/i</option>
+                                                    <option value="native-segwit">Native SegWit (P2WPKH) — m/84'/{coinType}'/0'/0/i</option>
+                                                    <option value="taproot">Taproot (P2TR) — m/86'/{coinType}'/0'/0/i</option>
+                                                </select>
+                                                <label htmlFor="address-index" className="block text-sm text-gray-400 mb-2">
+                                                    Index
+                                                </label>
+                                                <input
+                                                    id="address-index"
+                                                    type="number"
+                                                    min={0}
+                                                    value={addressIndex}
+                                                    onChange={(e) => setAddressIndex(parseInt(e.target.value) || 0)}
+                                                    className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                                />
+                                            </>
+                                        ) : (
+                                            <>
+                                                <label htmlFor="address-path" className="block text-sm text-gray-400 mb-2">
+                                                    Derivation Path
+                                                </label>
+                                                <input
+                                                    id="address-path"
+                                                    type="text"
+                                                    value={addressPath}
+                                                    onChange={(e) => setAddressPath(e.target.value)}
+                                                    placeholder="m/84'/0'/0'/0/0"
+                                                    className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-1"
+                                                />
+                                                {getPathNetworkWarning(addressPath) && (
+                                                    <p className="text-amber-400 text-xs mb-3">{getPathNetworkWarning(addressPath)}</p>
+                                                )}
+                                                {!getPathNetworkWarning(addressPath) && <div className="mb-3" />}
+                                            </>
+                                        )}
+                                        <button
+                                            type="submit"
+                                            disabled={processing}
+                                            className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-lg font-medium transition-colors"
+                                        >
+                                            {fetchingAddress ? 'Displaying...' : 'Display'}
+                                        </button>
+                                    </form>
+                                )}
 
                                 {addressResults.length > 0 && (
                                     <div className="mt-6 pt-6 border-t border-gray-700 space-y-4">
@@ -369,6 +510,63 @@ const App = () => {
                                             <div key={index} className="bg-gray-700/50 rounded-lg p-4">
                                                 <div className="text-sm text-gray-400 mb-1">{result.derivationPath}</div>
                                                 <div className="font-mono text-sm break-all">{result.address}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </details>
+
+                        <details className="bg-gray-800 rounded-lg shadow-lg group">
+                            <summary className="p-6 cursor-pointer list-none flex justify-between items-center">
+                                <h2 className="text-lg font-semibold text-gray-400">Register Wallet</h2>
+                                <span className="text-gray-400 group-open:rotate-180 transition-transform">▼</span>
+                            </summary>
+                            <div className="px-6 pb-6">
+                                <form onSubmit={registerWallet}>
+                                    <label htmlFor="wallet-name" className="block text-sm text-gray-400 mb-2">
+                                        Wallet Name
+                                    </label>
+                                    <input
+                                        id="wallet-name"
+                                        type="text"
+                                        value={walletName}
+                                        onChange={(e) => setWalletName(e.target.value)}
+                                        placeholder="My Wallet"
+                                        className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                    />
+                                    <label htmlFor="wallet-policy" className="block text-sm text-gray-400 mb-2">
+                                        Wallet Descriptor
+                                    </label>
+                                    <textarea
+                                        id="wallet-policy"
+                                        value={walletPolicy}
+                                        onChange={(e) => setWalletPolicy(e.target.value)}
+                                        placeholder="wsh(sortedmulti(2,@0/**,@1/**))"
+                                        rows={3}
+                                        className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                    />
+                                    <button
+                                        type="submit"
+                                        disabled={processing}
+                                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-lg font-medium transition-colors"
+                                    >
+                                        {registeringWallet ? 'Registering...' : 'Register'}
+                                    </button>
+                                </form>
+
+                                {registerWalletResults.length > 0 && (
+                                    <div className="mt-6 pt-6 border-t border-gray-700 space-y-4">
+                                        {registerWalletResults.map((result, index) => (
+                                            <div key={index} className="bg-gray-700/50 rounded-lg p-4">
+                                                <div className="text-sm text-gray-400 mb-1">{result.name}</div>
+                                                <div className="font-mono text-sm break-all mb-1">{result.policy}</div>
+                                                {result.hmac && (
+                                                    <div className="text-sm">
+                                                        <span className="text-gray-400">HMAC: </span>
+                                                        <span className="font-mono text-sm break-all">{result.hmac}</span>
+                                                    </div>
+                                                )}
                                             </div>
                                         ))}
                                     </div>

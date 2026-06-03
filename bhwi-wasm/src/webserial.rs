@@ -7,7 +7,7 @@ use futures::future::{Either, select};
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{ReadableStreamDefaultReader, SerialOptions, SerialPort, SerialPortRequestOptions};
+use web_sys::{ReadableStreamDefaultReader, SerialPort};
 
 use crate::WasmError;
 
@@ -26,17 +26,19 @@ impl WebSerialDevice {
         let navigator = web_sys::window()?.navigator();
         let serial = navigator.serial();
 
-        let options = SerialPortRequestOptions::new();
+        let options: JsValue = js_sys::Object::new().into();
 
-        let port = match JsFuture::from(serial.request_port_with_options(&options)).await {
+        let port = match JsFuture::from(serial.request_port_with_options(&options.into())).await {
             Ok(port) => port.dyn_into::<SerialPort>().unwrap(),
             Err(_) => return None,
         };
 
         log::info!("found serial device");
 
-        let port_options = SerialOptions::new(baud_rate);
-        let open_future = JsFuture::from(port.open(&port_options));
+        let port_options = js_sys::Object::new();
+        js_sys::Reflect::set(&port_options, &"baudRate".into(), &JsValue::from(baud_rate)).unwrap();
+        let port_options: JsValue = port_options.into();
+        let open_future = JsFuture::from(port.open(&port_options.into()));
         if open_future.await.is_err() {
             return None;
         }

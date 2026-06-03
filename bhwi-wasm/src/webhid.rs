@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{HidDevice, HidDeviceRequestOptions};
+use web_sys::HidDevice;
 
 #[wasm_bindgen]
 pub struct WebHidDevice {
@@ -33,11 +33,10 @@ impl WebHidDevice {
         }
         filters.push(&filter.into());
 
-        let devices = match JsFuture::from(
-            hid.request_device(&HidDeviceRequestOptions::new(&filters.into())),
-        )
-        .await
-        {
+        let options = js_sys::Object::new();
+        js_sys::Reflect::set(&options, &"filters".into(), &filters.into()).unwrap();
+        let options: JsValue = options.into();
+        let devices = match JsFuture::from(hid.request_device(&options.into())).await {
             Ok(devices) => devices.dyn_into::<js_sys::Array>().unwrap(),
             Err(_) => return None,
         };
