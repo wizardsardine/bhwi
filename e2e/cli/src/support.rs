@@ -59,7 +59,19 @@ pub(crate) struct CommandCase<'a> {
 
 pub(crate) enum ExpectedOutput<'a> {
     Exact(&'a str),
-    DescriptorPubkeys { fingerprint: &'a str, account: u32 },
+    DescriptorPubkeys {
+        fingerprint: &'a str,
+        account: u32,
+    },
+    Keypool {
+        fingerprint: &'a str,
+        purpose: u32,
+        account: u32,
+        branch: u32,
+        start: u32,
+        end: u32,
+        internal: bool,
+    },
 }
 
 impl ExpectedOutput<'_> {
@@ -70,6 +82,27 @@ impl ExpectedOutput<'_> {
                 fingerprint,
                 account,
             } => assert_descriptor_pubkeys(name, stdout, fingerprint, *account)?,
+            Self::Keypool {
+                fingerprint,
+                purpose,
+                account,
+                branch,
+                start,
+                end,
+                internal,
+            } => assert_keypool(
+                name,
+                stdout,
+                KeypoolExpectation {
+                    fingerprint,
+                    purpose: *purpose,
+                    account: *account,
+                    branch: *branch,
+                    start: *start,
+                    end: *end,
+                    internal: *internal,
+                },
+            )?,
         }
         Ok(())
     }
@@ -200,4 +233,56 @@ fn descriptor_xpub(fingerprint: &str, purpose: u32, account: u32) -> Result<Stri
         .run_ok(["xpub", "get", &format!("m/{purpose}'/1'/{account}'")])?
         .trim()
         .to_string())
+}
+
+struct KeypoolExpectation<'a> {
+    fingerprint: &'a str,
+    purpose: u32,
+    account: u32,
+    branch: u32,
+    start: u32,
+    end: u32,
+    internal: bool,
+}
+
+fn assert_keypool(name: &str, stdout: &str, expected: KeypoolExpectation<'_>) -> Result<()> {
+    let xpub = descriptor_xpub(expected.fingerprint, expected.purpose, expected.account)?;
+    let origin = format!(
+        "[{}/{}'/1'/{}']",
+        expected.fingerprint, expected.purpose, expected.account
+    );
+    let suffix = format!("/{branch}/*", branch = expected.branch);
+    let metadata = format!(
+        " range={}-{} internal={} keypool=true",
+        expected.start, expected.end, expected.internal
+    );
+
+    assert!(
+        stdout.ends_with('\n'),
+        "{name}: stdout should end with newline"
+    );
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "{name}: keypool descriptor count");
+    let line = lines[0];
+    assert!(
+        line.starts_with("wpkh("),
+        "{name}: keypool descriptor `{line}` should start with `wpkh(`"
+    );
+    assert!(
+        line.contains(&origin),
+        "{name}: keypool descriptor `{line}` should contain origin `{origin}`"
+    );
+    assert!(
+        line.contains(&xpub),
+        "{name}: keypool descriptor `{line}` should contain xpub `{xpub}`"
+    );
+    assert!(
+        line.contains(&suffix),
+        "{name}: keypool descriptor `{line}` should contain suffix `{suffix}`"
+    );
+    assert!(
+        line.ends_with(&metadata),
+        "{name}: keypool descriptor `{line}` should end with metadata `{metadata}`"
+    );
+    Ok(())
 }
