@@ -285,6 +285,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bhwi-e2e-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "hex",
+ "reqwest",
+ "serde_json",
+]
+
+[[package]]
 name = "bhwi-e2e-coldcard"
 version = "0.1.0"
 dependencies = [
@@ -1779,7 +1790,9 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
