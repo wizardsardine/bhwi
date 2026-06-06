@@ -64,9 +64,9 @@ enum Commands {
         /// Name of the wallet
         #[arg(long)]
         name: String,
-        /// Miniscript wallet policy descriptor (e.g. "wpkh(@0/**)")
-        #[arg(long, value_parser = clap::value_parser!(WalletPolicy))]
-        descriptor: WalletPolicy,
+        /// Miniscript wallet policy descriptor
+        #[arg(long)]
+        descriptor: String,
     },
     /// Sign a PSBT with the selected device
     SignPsbt {
@@ -240,10 +240,7 @@ async fn main() -> Result<()> {
         }
         Commands::RegisterWallet { name, descriptor } => {
             if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
-                let hmac = d
-                    .device()
-                    .register_wallet(&name, &descriptor.to_string())
-                    .await?;
+                let hmac = d.device().register_wallet(&name, &descriptor).await?;
                 println!("{}", hex::encode(hmac));
             }
         }

@@ -52,6 +52,15 @@ jobs:
             exit 1
           }
           kill "$(cat coldcard-tail.pid)" || true
+      - name: Run Coldcard CLI e2e
+        run: |
+          set -o pipefail
+          nix develop .#coldcard -c cargo build -p bhwi-cli --bin bhwi
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#coldcard -c cargo test -p bhwi-e2e-cli coldcard -- --test-threads=1 2>&1 | tee coldcard-cli-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Coldcard CLI e2e log" coldcard-cli-e2e.log
+            cat coldcard-cli-e2e.log || true
+            exit 1
+          }
       - name: Run Coldcard e2e
         run: |
           set -o pipefail
@@ -96,6 +105,15 @@ jobs:
             exit 1
           }
           kill "$(cat ledger-tail.pid)" || true
+      - name: Run Ledger CLI e2e
+        run: |
+          set -o pipefail
+          nix develop .#ledger -c cargo build -p bhwi-cli --bin bhwi
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#ledger -c cargo test -p bhwi-e2e-cli ledger -- --test-threads=1 2>&1 | tee ledger-cli-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger CLI e2e log" ledger-cli-e2e.log
+            cat ledger-cli-e2e.log || true
+            exit 1
+          }
       - name: Run Ledger e2e
         run: |
           set -o pipefail
@@ -152,6 +170,15 @@ jobs:
           nix run .#jade-init > jade-init.log 2>&1 || {
             bash nix/scripts/emit-gh-error-log.sh "Jade init log" jade-init.log
             cat jade-init.log || true
+            exit 1
+          }
+      - name: Run Jade CLI e2e
+        run: |
+          set -o pipefail
+          nix develop .#jade -c cargo build -p bhwi-cli --bin bhwi
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#jade -c cargo test -p bhwi-e2e-cli jade -- --test-threads=1 2>&1 | tee jade-cli-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Jade CLI e2e log" jade-cli-e2e.log
+            cat jade-cli-e2e.log || true
             exit 1
           }
       - name: Run Jade e2e
