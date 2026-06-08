@@ -21,7 +21,6 @@ use miniscript::descriptor::WalletPolicy;
 struct Args {
     #[command(subcommand)]
     command: Commands,
-    #[arg(long)]
     /// default will be the first connected device with the master fingerprint matching.
     #[arg(long, alias = "fg", value_parser = clap::value_parser!(bitcoin::bip32::Fingerprint))]
     fingerprint: Option<Fingerprint>,
@@ -64,9 +63,9 @@ enum Commands {
         /// Name of the wallet
         #[arg(long)]
         name: String,
-        /// Miniscript wallet policy descriptor (e.g. "wpkh(@0/**)")
-        #[arg(long, value_parser = clap::value_parser!(WalletPolicy))]
-        descriptor: WalletPolicy,
+        /// Miniscript wallet policy descriptor
+        #[arg(long)]
+        descriptor: String,
     },
     /// Sign a PSBT with the selected device
     SignPsbt {
@@ -240,10 +239,7 @@ async fn main() -> Result<()> {
         }
         Commands::RegisterWallet { name, descriptor } => {
             if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
-                let hmac = d
-                    .device()
-                    .register_wallet(&name, &descriptor.to_string())
-                    .await?;
+                let hmac = d.device().register_wallet(&name, &descriptor).await?;
                 println!("{}", hex::encode(hmac));
             }
         }
@@ -322,4 +318,88 @@ fn parse_hmac(hmac: &str) -> Result<[u8; 32]> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("hmac must be 32 bytes / 64 hex characters"))?;
     Ok(hmac)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser, error::ErrorKind};
+
+    use super::*;
+
+    #[test]
+    fn register_wallet_preserves_descriptor_text() {
+        let descriptor = "wpkh([f5acc2fd/84'/1'/0']tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/<0;1>/*)";
+        let args = Args::parse_from([
+            "bhwi",
+            "register-wallet",
+            "--name",
+            "clitestwallet",
+            "--descriptor",
+            descriptor,
+        ]);
+
+        let Commands::RegisterWallet {
+            name,
+            descriptor: parsed,
+        } = args.command
+        else {
+            panic!("expected register-wallet command");
+        };
+        assert_eq!(name, "clitestwallet");
+        assert_eq!(parsed, descriptor);
+    }
+
+    #[test]
+    fn address_path_and_descriptor_conflict_in_parser() {
+        let error = Args::try_parse_from([
+            "bhwi",
+            "address",
+            "get",
+            "--from-path",
+            "m/84'/1'/0'/0/0",
+            "--from-descriptor",
+            "wallet",
+        ])
+        .expect_err("path and descriptor are mutually exclusive");
+
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parses_representative_global_and_signing_args() {
+        let args = Args::parse_from([
+            "bhwi",
+            "--network",
+            "testnet",
+            "--fingerprint",
+            "f5acc2fd",
+            "--format",
+            "json",
+            "sign-message",
+            "--message",
+            "hello",
+            "--path",
+            "m/44'/1'/0'/0",
+        ]);
+
+        assert_eq!(args.network, Network::Testnet);
+        assert_eq!(
+            args.fingerprint.expect("fingerprint").to_string().as_str(),
+            "f5acc2fd"
+        );
+        assert!(matches!(args.format, Some(OutputFormat::Json)));
+        assert!(matches!(
+            args.command,
+            Commands::SignMessage {
+                message,
+                path,
+                output: None,
+            } if message == "hello" && path.to_string() == "44'/1'/0'/0"
+        ));
+    }
+
+    #[test]
+    fn clap_definition_is_valid() {
+        Args::command().debug_assert();
+    }
 }
