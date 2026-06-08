@@ -1,7 +1,10 @@
 use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi_async::DeviceContext;
-use bhwi_cli::{DeviceManager, OutputFormat, address::AddressTarget, config::Config};
+use bhwi_cli::{
+    DeviceManager, OutputFormat, address::AddressTarget, config::Config,
+    get_descriptors::GetKeypoolOptions,
+};
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -13,8 +16,8 @@ use bitcoin::{
     bip32::{DerivationPath, Fingerprint},
     psbt::Psbt,
 };
-use clap::{Parser, Subcommand};
-use miniscript::descriptor::WalletPolicy;
+use clap::{Parser, Subcommand, ValueEnum};
+use miniscript::descriptor::{DescriptorType, WalletPolicy};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -139,6 +142,25 @@ enum DeviceCommands {
     List,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum KeypoolAddressFormat {
+    P2pkh,
+    P2sh,
+    P2wpkh,
+    P2tr,
+}
+
+impl From<KeypoolAddressFormat> for DescriptorType {
+    fn from(format: KeypoolAddressFormat) -> Self {
+        match format {
+            KeypoolAddressFormat::P2pkh => DescriptorType::Pkh,
+            KeypoolAddressFormat::P2sh => DescriptorType::ShWpkh,
+            KeypoolAddressFormat::P2wpkh => DescriptorType::Wpkh,
+            KeypoolAddressFormat::P2tr => DescriptorType::Tr,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Subcommand)]
 enum XpubCommands {
     Get {
@@ -147,13 +169,31 @@ enum XpubCommands {
     },
 }
 
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum DescriptorCommands {
     /// Get pubkey descriptors from device
     #[command()]
     Pubkeys {
         #[arg(long, short)]
         account: Option<u32>,
+    },
+    /// Get a ranged keypool descriptor from the selected device
+    Keypool {
+        /// BIP account or parent derivation path (e.g. m/84'/0'/0')
+        #[arg(long, value_parser = clap::value_parser!(DerivationPath))]
+        path: DerivationPath,
+        /// First child index included in this keypool range
+        #[arg(long)]
+        start: u32,
+        /// Last child index included in this keypool range
+        #[arg(long)]
+        end: u32,
+        /// Address format for the descriptor (p2pkh, p2sh, p2wpkh, p2tr)
+        #[arg(long, value_enum, default_value_t = KeypoolAddressFormat::P2wpkh)]
+        address_format: KeypoolAddressFormat,
+        /// Use the internal/change branch
+        #[arg(long, default_value_t = false)]
+        internal: bool,
     },
 }
 
@@ -198,6 +238,23 @@ async fn main() -> Result<()> {
         },
         Commands::Descriptor(DescriptorCommands::Pubkeys { account }) => {
             dev_man.get_pubkey_descriptors(account).await?
+        }
+        Commands::Descriptor(DescriptorCommands::Keypool {
+            path,
+            start,
+            end,
+            address_format,
+            internal,
+        }) => {
+            let options = GetKeypoolOptions {
+                path,
+                start,
+                end,
+                internal,
+                descriptor_type: address_format.into(),
+                network: dev_man.config.network,
+            };
+            dev_man.get_keypool(options).await?;
         }
         Commands::Device(DeviceCommands::List) => {
             let mut devices = dev_man.enumerate().await?;

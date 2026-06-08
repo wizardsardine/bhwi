@@ -39,6 +39,33 @@ fn jade_descriptor_pubkeys() -> Result<()> {
 }
 
 #[test]
+fn jade_keypool_get() -> Result<()> {
+    assert_command(CommandCase {
+        name: "descriptor keypool m/84'/1'/0' 0-4",
+        cli: Cli::for_device(JADE_FINGERPRINT),
+        args: &[
+            "descriptor",
+            "keypool",
+            "--path",
+            "m/84'/1'/0'",
+            "--start",
+            "0",
+            "--end",
+            "4",
+        ],
+        expected: ExpectedOutput::Keypool {
+            fingerprint: JADE_FINGERPRINT,
+            purpose: 84,
+            account: 0,
+            branch: 0,
+            start: 0,
+            end: 4,
+            internal: false,
+        },
+    })
+}
+
+#[test]
 fn jade_sign_message() -> Result<()> {
     assert_command(CommandCase {
         name: "sign message hello",
