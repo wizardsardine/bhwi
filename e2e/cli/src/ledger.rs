@@ -35,6 +35,16 @@ fn ledger_device_list() -> Result<()> {
 }
 
 #[test]
+fn ledger_no_matching_fingerprint_selects_no_device() -> Result<()> {
+    let stdout = Cli::for_device("ffffffff").run_ok(["xpub", "get", "m/84'/1'/0'"])?;
+    assert!(
+        stdout.is_empty(),
+        "expected no output when no device matches, got:\n{stdout}"
+    );
+    Ok(())
+}
+
+#[test]
 fn ledger_xpub_get() -> Result<()> {
     assert_command(CommandCase {
         name: "xpub get m/44'/1'/0'",
