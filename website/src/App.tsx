@@ -1,7 +1,16 @@
 import { useEffect, useState } from 'react'
 import initWasm, { initialize_logging, Client } from 'bhwi-wasm';
+import coldcardIcon from './assets/devices/coldcard.svg';
+import jadeIcon from './assets/devices/blockstream-jade.svg';
+import ledgerIcon from './assets/devices/ledger-nano.svg';
 
 type DeviceType = 'Coldcard' | 'Jade' | 'Ledger';
+
+const DEVICE_ICONS: Record<DeviceType, string> = {
+    'Coldcard': coldcardIcon,
+    'Jade': jadeIcon,
+    'Ledger': ledgerIcon,
+};
 type Network = 'bitcoin' | 'testnet';
 
 interface ConnectedDevice {
@@ -289,9 +298,12 @@ const App = () => {
                         <div className="bg-gray-800 rounded-lg p-6 shadow-lg">
                             <h2 className="text-lg font-semibold text-gray-400 mb-4">Connected Device</h2>
                             <div className="space-y-3">
-                                <div className="flex justify-between">
+                                <div className="flex justify-between items-center">
                                     <span className="text-gray-400">Type</span>
-                                    <span className="font-medium">{device.type}</span>
+                                    <span className="flex items-center gap-2 font-medium">
+                                        <img src={DEVICE_ICONS[device.type]} alt="" className="h-6 w-6 object-contain" />
+                                        {device.type}
+                                    </span>
                                 </div>
                                 <div className="flex justify-between">
                                     <span className="text-gray-400">Master Fingerprint</span>
@@ -586,6 +598,7 @@ const App = () => {
                                     onChange={() => setSelectedDevice('Coldcard')}
                                     className="w-4 h-4 accent-blue-600"
                                 />
+                                <img src={DEVICE_ICONS['Coldcard']} alt="" className="h-10 w-10 object-contain" />
                                 <span className="font-medium">Coldcard</span>
                             </label>
 
@@ -597,6 +610,7 @@ const App = () => {
                                     onChange={() => setSelectedDevice('Jade')}
                                     className="w-4 h-4 accent-blue-600"
                                 />
+                                <img src={DEVICE_ICONS['Jade']} alt="" className="h-10 w-10 object-contain" />
                                 <span className="font-medium">Jade</span>
                                 <select
                                     value={jadeNetwork}
@@ -620,6 +634,7 @@ const App = () => {
                                     onChange={() => setSelectedDevice('Ledger')}
                                     className="w-4 h-4 accent-blue-600"
                                 />
+                                <img src={DEVICE_ICONS['Ledger']} alt="" className="h-10 w-10 object-contain" />
                                 <span className="font-medium">Ledger</span>
                             </label>
                         </div>
