@@ -134,9 +134,11 @@ impl DeviceManager {
             if let Some(fingerprint) = self.config.fingerprint {
                 if fingerprint == d.fingerprint().await? {
                     target_dev = Some(d);
+                    break;
                 }
             } else {
                 target_dev = Some(d);
+                break;
             }
         }
         let Some(mut dev) = target_dev else {
