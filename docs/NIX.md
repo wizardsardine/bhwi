@@ -33,6 +33,7 @@ Apps:
 - `nix run .#coldcard`
 - `nix run .#ledger`
 - `nix run .#ledger-build-app`
+- `nix run .#hwi-upstream-suite`
 - `nix run .#jade-pinserver`
 - `nix run .#jade`
 - `nix run .#jade-init`
@@ -47,6 +48,8 @@ Packages/checks:
 
 - `nix build .#speculos`
 - `nix build .#coldcard-simulator`
+- `nix build .#hwi-reference`
+- `nix build .#hwi-upstream-suite`
 - `nix build .#ledger-app`
 - `nix build .#jade-qemu`
 - `nix build .#checks.x86_64-linux.emulator-scripts`
@@ -100,6 +103,42 @@ test -S /tmp/ckcc-simulator.sock
 nc -z localhost 9999 && nc -z localhost 5000
 nc -z localhost 8096 && nc -z localhost 30121
 ```
+
+## Upstream HWI Suite
+
+BHWI pins Bitcoin Core HWI 3.2.0 and exposes two parity helpers:
+
+- `hwi-reference`: runs Python HWI directly.
+- `hwi-upstream-suite`: runs HWI's upstream `test/` suite in `--interface=cli`
+  mode against a BHWI binary named by `HWI_BIN`.
+
+The upstream suite is the final parity gate for every HWI-supported device that
+BHWI claims to support. New device onboarding should enable that device's
+upstream HWI suite once BHWI has the matching device support.
+
+Ledger can use the existing pinned app-builder and Speculos wrapper:
+
+```sh
+cargo build -p bhwi-cli --bin hwi
+HWI_BIN="$PWD/target/debug/hwi" nix run .#hwi-upstream-suite -- ledger
+```
+
+Coldcard and Jade need HWI-compatible simulator artifacts because upstream HWI's
+tests start their own emulator processes:
+
+```sh
+cargo build -p bhwi-cli --bin hwi
+HWI_BIN="$PWD/target/debug/hwi" \
+HWI_COLDCARD_SIMULATOR=/path/to/firmware/unix/simulator.py \
+nix run .#hwi-upstream-suite -- coldcard
+
+HWI_BIN="$PWD/target/debug/hwi" \
+HWI_JADE_SIMULATOR_DIR=/path/to/hwi-style/jade/simulator \
+nix run .#hwi-upstream-suite -- jade
+```
+
+The runner also accepts `HWI_BITCOIND` to override the `bitcoind` used by the
+upstream suite, and `HWI_LEDGER_APP_ELF` to use a prebuilt Ledger app.
 
 ## Device Details
 

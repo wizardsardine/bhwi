@@ -310,6 +310,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bhwi-e2e-hwi-parity"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "bhwi-e2e-jade"
 version = "0.1.0"
 dependencies = [

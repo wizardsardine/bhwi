@@ -19,6 +19,10 @@
       url = "github:Blockstream/blind_pin_server/0205d38e75cb47f187db2efda5846cc898a85039";
       flake = false;
     };
+    python-hwi = {
+      url = "github:bitcoin-core/HWI/3.2.0";
+      flake = false;
+    };
     nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
     nixpkgs-coldcard.url = "github:NixOS/nixpkgs/nixos-24.05";
     rust-overlay = {
@@ -34,6 +38,7 @@
     coldcard-firmware,
     jade-firmware,
     jade-pinserver,
+    python-hwi,
     nixpkgs,
     nixpkgs-coldcard,
     nixpkgs-esp-dev,
@@ -43,7 +48,12 @@
     flake-utils.lib.eachDefaultSystem (
       system: let
         overlays = [rust-overlay.overlays.default];
-        pkgs = import nixpkgs {inherit system overlays;};
+        pkgs = import nixpkgs {
+          inherit system overlays;
+          config.permittedInsecurePackages = [
+            "python3.12-ecdsa-0.19.1"
+          ];
+        };
         coldcardPkgs = import nixpkgs-coldcard {inherit system;};
         emulatorSystem = system == "x86_64-linux";
         espPkgs = import nixpkgs-esp-dev.inputs.nixpkgs {
@@ -59,6 +69,19 @@
         };
         jadePython = pkgs.python3.withPackages (pythonPackages: [
           pythonPackages.zopfli
+        ]);
+        hwiPython = pkgs.python312.withPackages (pythonPackages: [
+          pythonPackages.cbor2
+          pythonPackages.ecdsa
+          pythonPackages.hidapi
+          pythonPackages.libusb1
+          pythonPackages.mnemonic
+          pythonPackages.noiseprotocol
+          pythonPackages.protobuf
+          pythonPackages.pyaes
+          pythonPackages.pyserial
+          pythonPackages.semver
+          pythonPackages.typing-extensions
         ]);
         rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         rustPlatformWasm = pkgs.makeRustPlatform {
@@ -304,6 +327,36 @@
           export JADE_PINSERVER_URL="https://github.com/Blockstream/blind_pin_server.git"
           export JADE_PINSERVER_PYTHON="${pkgs.python311}/bin/python3"
         '' ./nix/scripts/start-jade-pinserver.sh;
+        hwiReference = pkgs.writeShellApplication {
+          name = "hwi-reference";
+          runtimeInputs = [hwiPython];
+          text = ''
+            export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+            exec ${hwiPython}/bin/python ${python-hwi}/hwi.py "$@"
+          '';
+        };
+        hwiUpstreamSuite = pkgs.writeShellApplication {
+          name = "hwi-upstream-suite";
+          runtimeInputs =
+            inputs
+            ++ ledgerInputs
+            ++ [
+              hwiPython
+              pkgs.bitcoin
+            ];
+          text = ''
+            export HWI_UPSTREAM_SRC="${python-hwi}"
+            export HWI_BITCOIND="''${HWI_BITCOIND:-${pkgs.bitcoin}/bin/bitcoind}"
+            export HWI_LEDGER_SPECULOS_BIN="''${HWI_LEDGER_SPECULOS_BIN:-${speculos}/bin/speculos}"
+            export LEDGER_BUILD_APP_SCRIPT="''${LEDGER_BUILD_APP_SCRIPT:-${./nix/scripts/build-ledger-app.sh}}"
+            export APP_BITCOIN_NEW_SRC="${app-bitcoin-new}"
+            export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
+            export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
+            export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+
+            exec ${pkgs.bash}/bin/bash ${./nix/scripts/run-hwi-upstream-suite.sh} "$@"
+          '';
+        };
         linuxPackages =
           pkgs.lib.optionalAttrs emulatorSystem {
             inherit speculos;
@@ -316,6 +369,7 @@
             coldcard = mkApp coldcardRunner;
             ledger = mkApp ledgerRunner;
             ledger-build-app = mkApp ledgerAppBuilder;
+            hwi-upstream-suite = mkApp hwiUpstreamSuite;
             jade = mkApp jadeRunner;
             jade-init = mkApp jadeInitRunner;
             jade-pinserver = mkApp jadePinserverRunner;
@@ -375,6 +429,8 @@
           };
       in {
         packages = {
+          hwi-reference = hwiReference;
+          hwi-upstream-suite = hwiUpstreamSuite;
           default = pkgs.rustPlatform.buildRustPackage {
             name = "bhwi";
             src = ./.;

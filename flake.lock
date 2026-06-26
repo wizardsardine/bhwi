@@ -168,6 +168,23 @@
         "type": "github"
       }
     },
+    "python-hwi": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1770690416,
+        "narHash": "sha256-utNt0qaHNP6tzkhDnAMjwwNCKoMo3504oozdRpXnDEw=",
+        "owner": "bitcoin-core",
+        "repo": "HWI",
+        "rev": "a4d66f8bc18fc2658704fc5875e9d3b33cf22b2a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bitcoin-core",
+        "ref": "3.2.0",
+        "repo": "HWI",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "app-bitcoin-new": "app-bitcoin-new",
@@ -178,6 +195,7 @@
         "nixpkgs": "nixpkgs",
         "nixpkgs-coldcard": "nixpkgs-coldcard",
         "nixpkgs-esp-dev": "nixpkgs-esp-dev",
+        "python-hwi": "python-hwi",
         "rust-overlay": "rust-overlay"
       }
     },
