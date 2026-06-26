@@ -1,4 +1,7 @@
 #[cfg(test)]
+mod multisig;
+
+#[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
@@ -25,9 +28,9 @@ mod tests {
     use serde_json::Value;
     use tokio::net::TcpStream;
 
-    pub type SpeculosDevice = Ledger<LedgerTransportTcp<SpeculosTcpChannel>>;
+    pub(crate) type SpeculosDevice = Ledger<LedgerTransportTcp<SpeculosTcpChannel>>;
 
-    struct SpeculosReqwestClient {
+    pub(crate) struct SpeculosReqwestClient {
         endpoint: String,
         inner: Client,
     }
@@ -50,7 +53,7 @@ mod tests {
             Ok(())
         }
 
-        async fn set_automation<T: Serialize>(&self, automation_json: &T) -> Result<()> {
+        pub(crate) async fn set_automation<T: Serialize>(&self, automation_json: &T) -> Result<()> {
             self.post(&format!("{}/automation", self.endpoint), automation_json)
                 .await
         }
@@ -62,7 +65,7 @@ mod tests {
         }
     }
 
-    async fn init() -> (SpeculosDevice, SpeculosReqwestClient) {
+    pub(crate) async fn init() -> (SpeculosDevice, SpeculosReqwestClient) {
         (
             SpeculosDevice::new(LedgerTransportTcp::new(SpeculosTcpChannel::new(
                 TcpStream::connect("localhost:9999").await.unwrap(),
