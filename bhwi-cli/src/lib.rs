@@ -7,19 +7,25 @@ use futures::future::join_all;
 use serde::{Serialize, Serializer};
 use strum::{EnumIter, IntoEnumIterator};
 
-use crate::{coldcard::ColdcardDevice, config::Config, jade::JadeDevice, ledger::LedgerDevice};
+use crate::{
+    coldcard::ColdcardDevice, config::DeviceSelector, jade::JadeDevice, ledger::LedgerDevice,
+};
 
 pub mod address;
 pub mod coldcard;
 pub mod config;
 pub mod get_descriptors;
 pub mod hid;
+pub mod hwi;
 pub mod jade;
 pub mod ledger;
 
 #[derive(Serialize)]
 pub struct Device {
     name: String,
+    device_type: DeviceType,
+    path: String,
+    model: String,
     #[serde(skip)]
     device: Box<dyn HWIDevice>,
     is_emulated: bool,
@@ -58,9 +64,19 @@ impl From<bhwi_async::Info> for Info {
 }
 
 impl Device {
-    pub async fn new(name: &str, device: Box<dyn HWIDevice>, is_emulated: bool) -> Result<Self> {
+    pub async fn new(
+        name: &str,
+        device_type: DeviceType,
+        path: impl Into<String>,
+        model: impl Into<String>,
+        device: Box<dyn HWIDevice>,
+        is_emulated: bool,
+    ) -> Result<Self> {
         Ok(Self {
             name: name.into(),
+            device_type,
+            path: path.into(),
+            model: model.into(),
             device,
             is_emulated,
             fingerprint: None,
@@ -70,6 +86,18 @@ impl Device {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn device_type(&self) -> DeviceType {
+        self.device_type
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     pub fn device(&mut self) -> &mut Box<dyn HWIDevice> {
@@ -101,7 +129,9 @@ impl Device {
     }
 }
 
-#[derive(Debug, EnumIter, strum::Display)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, EnumIter, ValueEnum, Serialize, strum::Display)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum DeviceType {
     Coldcard,
     Jade,
@@ -109,29 +139,29 @@ pub enum DeviceType {
 }
 
 impl DeviceType {
-    pub async fn enumerate(self, config: &Config) -> Result<Vec<Device>> {
+    pub async fn enumerate(self, selector: &DeviceSelector) -> Result<Vec<Device>> {
         Ok(match self {
-            DeviceType::Ledger => LedgerDevice::enumerate(config).await?,
-            DeviceType::Coldcard => ColdcardDevice::enumerate(config).await?,
-            DeviceType::Jade => JadeDevice::enumerate(config).await?,
+            DeviceType::Ledger => LedgerDevice::enumerate(selector).await?,
+            DeviceType::Coldcard => ColdcardDevice::enumerate(selector).await?,
+            DeviceType::Jade => JadeDevice::enumerate(selector).await?,
         })
     }
 }
 
 pub struct DeviceManager {
-    pub config: Config,
+    pub selector: DeviceSelector,
 }
 
 impl DeviceManager {
-    pub fn new(config: Config) -> Self {
-        Self { config }
+    pub fn new(selector: DeviceSelector) -> Self {
+        Self { selector }
     }
 
     pub async fn get_device_with_fingerprint(&self) -> Result<Option<Device>> {
         let mut target_dev = None;
         for mut d in self.enumerate().await? {
-            d.device.unlock(self.config.network).await?;
-            if let Some(fingerprint) = self.config.fingerprint {
+            d.device.unlock(self.selector.network).await?;
+            if let Some(fingerprint) = self.selector.fingerprint {
                 if fingerprint == d.fingerprint().await? {
                     target_dev = Some(d);
                     break;
@@ -146,7 +176,7 @@ impl DeviceManager {
         };
         let info = dev.info().await?;
         let networks = &info.networks;
-        let net = self.config.network;
+        let net = self.selector.network;
         if !networks.is_empty() && !networks.contains(&net) {
             eprintln!(
                 "Warning: device {} is on {}, expected {net}",
@@ -158,17 +188,26 @@ impl DeviceManager {
     }
 
     pub async fn enumerate(&self) -> Result<Vec<Device>> {
-        let res = join_all(DeviceType::iter().map(|t| t.enumerate(&self.config)))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+        let device_types: Vec<DeviceType> = self
+            .selector
+            .device_type
+            .map(|device_type| vec![device_type])
+            .unwrap_or_else(|| DeviceType::iter().collect());
+        let res = join_all(
+            device_types
+                .into_iter()
+                .map(|device_type| device_type.enumerate(&self.selector)),
+        )
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
         Ok(res.into_iter().flatten().collect())
     }
 }
 
 #[async_trait(?Send)]
 pub trait DeviceEnumerator {
-    async fn enumerate(config: &Config) -> Result<Vec<Device>>;
+    async fn enumerate(selector: &DeviceSelector) -> Result<Vec<Device>>;
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

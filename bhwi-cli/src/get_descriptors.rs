@@ -163,7 +163,11 @@ impl DeviceManager {
     }
 
     /// Output a ranged descriptor suitable for Bitcoin Core keypool import.
-    pub async fn get_keypool(&self, options: GetKeypoolOptions) -> Result<()> {
+    pub async fn get_keypool(
+        &self,
+        options: GetKeypoolOptions,
+        format: Option<OutputFormat>,
+    ) -> Result<()> {
         let Some(mut device) = self.get_device_with_fingerprint().await? else {
             return Ok(());
         };
@@ -171,7 +175,7 @@ impl DeviceManager {
         let keypool = self
             .get_keypool_descriptor(device.device(), master_fingerprint, options)
             .await?;
-        match self.config.format {
+        match format {
             Some(OutputFormat::Json) => println!("{}", serde_json::to_string(&keypool)?),
             Some(OutputFormat::Pretty) => {
                 println!("{:<9} | {:<8} | {:<10}", "Range", "Internal", "Descriptor");
@@ -195,12 +199,15 @@ impl DeviceManager {
     /// to the Python HWI when uses with JSON formatting.
     // TODO: Python HWI outputs using h instead of ' for hardened paths but
     // rust-miniscript doesn't allow this when displaying an entire Descriptor.
-    pub async fn get_pubkey_descriptors(&self, account: Option<u32>) -> Result<()> {
+    pub async fn get_pubkey_descriptors(
+        &self,
+        account: Option<u32>,
+        format: Option<OutputFormat>,
+    ) -> Result<()> {
         let Some(mut device) = self.get_device_with_fingerprint().await? else {
             return Ok(());
         };
-        let network = self.config.network;
-        let format = self.config.format;
+        let network = self.selector.network;
         let fingerprint = device.fingerprint().await?;
         let dev = device.device();
         let mut receive = vec![];

@@ -12,6 +12,10 @@ description = "cli tool to talk to hardware wallet"
 name = "bhwi"
 path = "src/bin/bhwi.rs"
 
+[[bin]]
+name = "hwi"
+path = "src/bin/hwi.rs"
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
