@@ -80,6 +80,7 @@
           pythonPackages.protobuf
           pythonPackages.pyaes
           pythonPackages.pyserial
+          pythonPackages.requests
           pythonPackages.semver
           pythonPackages.typing-extensions
         ]);
@@ -246,6 +247,46 @@
           type = "app";
           program = pkgs.lib.getExe program;
         };
+        commonE2eEnv = ''
+          export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
+          export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
+          export RUST_TEST_THREADS=1
+        '';
+        coldcardE2eEnv = ''
+          export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
+          export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
+            coldcardPkgs.SDL2
+            coldcardPkgs.gcc13.cc.lib
+            coldcardPkgs.glibc
+            coldcardPkgs.libffi
+            coldcardPkgs.openssl.out
+            coldcardPkgs.pcsclite
+            coldcardPkgs.systemd
+          ]}"
+          export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
+          export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
+          export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
+          export PYSDL2_DLL_PATH="${coldcardPkgs.SDL2}/lib"
+          export CFLAGS="-I${coldcardPkgs.pcsclite.dev}/include/PCSC ''${CFLAGS:-}"
+          export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
+          export RUST_TEST_THREADS=1
+        '';
+        mkHwiParityRunner = name: device: runtimeInputs: env:
+          pkgs.writeShellApplication {
+            inherit name runtimeInputs;
+            text =
+              env
+              + ''
+
+                set -euo pipefail
+                export REFERENCE_HWI_BIN="${pkgs.lib.getExe hwiReferenceBhwi}"
+                export HWI_BIN="''${HWI_BIN:-$PWD/target/debug/hwi}"
+                export HWI_PARITY_DEVICE_TYPE="${device}"
+
+                cargo build -p bhwi-cli --bins
+                exec cargo test -p bhwi-e2e-hwi-parity "$@"
+              '';
+          };
         mkRunnerWith = runnerPkgs: name: runtimeInputs: env: script:
           runnerPkgs.writeShellApplication {
             inherit name runtimeInputs;
@@ -341,11 +382,22 @@
           text = ''
             export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
             exec ${hwiPython}/bin/python - "$@" <<'PY'
-import sys
-
 from hwilib import commands
+from hwilib.devices.jadepy import jade_tcp
 
 commands.all_devs = ["ledger", "coldcard", "jade"]
+
+# XXX: HWI 3.2.0's Jade TCP backend treats read(n) as an
+# exact-fill operation. cbor2 can request a large buffer while the Jade
+# QEMU emulator has already sent a complete, shorter CBOR response, so
+# HWI blocks until timeout despite the response being available. Jade's
+# current upstream jadepy returns one recv() result here instead.
+def _bhwi_jade_tcp_read(self, n):
+    if not n:
+        return bytes()
+    return self.tcp_sock.recv(n)
+
+jade_tcp.JadeTCPImpl.read = _bhwi_jade_tcp_read
 
 from hwilib._cli import main
 
@@ -375,6 +427,9 @@ PY
             exec ${pkgs.bash}/bin/bash ${./nix/scripts/run-hwi-upstream-suite.sh} "$@"
           '';
         };
+        hwiParityColdcard = mkHwiParityRunner "bhwi-hwi-parity-coldcard" "coldcard" (coldcardInputs ++ inputs) coldcardE2eEnv;
+        hwiParityLedger = mkHwiParityRunner "bhwi-hwi-parity-ledger" "ledger" (ledgerInputs ++ inputs) commonE2eEnv;
+        hwiParityJade = mkHwiParityRunner "bhwi-hwi-parity-jade" "jade" (jadeInputs ++ inputs) commonE2eEnv;
         linuxPackages =
           pkgs.lib.optionalAttrs emulatorSystem {
             inherit speculos;
@@ -388,6 +443,9 @@ PY
             ledger = mkApp ledgerRunner;
             ledger-build-app = mkApp ledgerAppBuilder;
             hwi-upstream-suite = mkApp hwiUpstreamSuite;
+            hwi-parity-coldcard = mkApp hwiParityColdcard;
+            hwi-parity-ledger = mkApp hwiParityLedger;
+            hwi-parity-jade = mkApp hwiParityJade;
             jade = mkApp jadeRunner;
             jade-init = mkApp jadeInitRunner;
             jade-pinserver = mkApp jadePinserverRunner;
@@ -396,41 +454,15 @@ PY
           pkgs.lib.optionalAttrs emulatorSystem {
             coldcard = pkgs.mkShell {
               packages = coldcardInputs ++ inputs;
-              shellHook = ''
-                export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-                export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
-                  coldcardPkgs.SDL2
-                  coldcardPkgs.gcc13.cc.lib
-                  coldcardPkgs.glibc
-                  coldcardPkgs.libffi
-                  coldcardPkgs.openssl.out
-                  coldcardPkgs.pcsclite
-                  coldcardPkgs.systemd
-                ]}"
-                export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
-                export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
-                export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
-                export PYSDL2_DLL_PATH="${coldcardPkgs.SDL2}/lib"
-                export CFLAGS="-I${coldcardPkgs.pcsclite.dev}/include/PCSC ''${CFLAGS:-}"
-                export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
-                export RUST_TEST_THREADS=1
-              '';
+              shellHook = coldcardE2eEnv;
             };
             ledger = pkgs.mkShell {
               packages = inputs ++ ledgerInputs;
-              shellHook = ''
-                export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-                export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
-                export RUST_TEST_THREADS=1
-              '';
+              shellHook = commonE2eEnv;
             };
             jade = pkgs.mkShell {
               packages = inputs ++ jadeInputs;
-              shellHook = ''
-                export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-                export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
-                export RUST_TEST_THREADS=1
-              '';
+              shellHook = commonE2eEnv;
             };
           };
         linuxChecks =

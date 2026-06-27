@@ -24,7 +24,11 @@ pub type JadeSerialDevice = Jade<SerialTransport, PinServerClient>;
 pub type JadeQemuDevice = Jade<TcpTransport<TcpClient>, PinServerClient>;
 
 pub const DEFAULT_JADE_BAUD_RATE: u32 = 115200;
-pub const DEFAULT_JADE_QEMU_ADDRESS: &str = "localhost:30121";
+pub const DEFAULT_JADE_QEMU_ADDRESS: &str = "tcp:127.0.0.1:30121";
+
+fn jade_tcp_addr(path: &str) -> &str {
+    path.strip_prefix("tcp:").unwrap_or(path)
+}
 
 pub struct SerialTransport {
     stream: Arc<Mutex<SerialStream>>,
@@ -136,8 +140,9 @@ impl DeviceEnumerator for JadeDevice {
             .try_collect()
             .await?;
         if selector.include_emulators
-            && selector.matches(DeviceType::Jade, DEFAULT_JADE_QEMU_ADDRESS)
-            && let Ok(stream) = TcpStream::connect(DEFAULT_JADE_QEMU_ADDRESS).await
+            && (selector.matches(DeviceType::Jade, DEFAULT_JADE_QEMU_ADDRESS)
+                || selector.matches(DeviceType::Jade, jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS)))
+            && let Ok(stream) = TcpStream::connect(jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS)).await
         {
             devices.push(Self::qemu_device(selector.network, stream).await?);
         }

@@ -58,10 +58,17 @@ jobs:
             exit 1
           }
           kill "$(cat coldcard-tail.pid)" || true
+      - name: Run HWI parity tests
+        run: |
+          set -o pipefail
+          nix run .#hwi-parity-coldcard 2>&1 | tee coldcard-hwi-parity.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Coldcard HWI parity log" coldcard-hwi-parity.log
+            cat coldcard-hwi-parity.log || true
+            exit 1
+          }
       - name: Run Coldcard CLI e2e
         run: |
           set -o pipefail
-          nix develop .#coldcard -c cargo build -p bhwi-cli --bin bhwi
           BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#coldcard -c cargo test -p bhwi-e2e-cli coldcard -- --test-threads=1 2>&1 | tee coldcard-cli-e2e.log || {
             bash nix/scripts/emit-gh-error-log.sh "Coldcard CLI e2e log" coldcard-cli-e2e.log
             cat coldcard-cli-e2e.log || true
@@ -111,10 +118,17 @@ jobs:
             exit 1
           }
           kill "$(cat ledger-tail.pid)" || true
+      - name: Run HWI parity tests
+        run: |
+          set -o pipefail
+          nix run .#hwi-parity-ledger 2>&1 | tee ledger-hwi-parity.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger HWI parity log" ledger-hwi-parity.log
+            cat ledger-hwi-parity.log || true
+            exit 1
+          }
       - name: Run Ledger CLI e2e
         run: |
           set -o pipefail
-          nix develop .#ledger -c cargo build -p bhwi-cli --bin bhwi
           BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#ledger -c cargo test -p bhwi-e2e-cli ledger -- --test-threads=1 2>&1 | tee ledger-cli-e2e.log || {
             bash nix/scripts/emit-gh-error-log.sh "Ledger CLI e2e log" ledger-cli-e2e.log
             cat ledger-cli-e2e.log || true
@@ -178,10 +192,17 @@ jobs:
             cat jade-init.log || true
             exit 1
           }
+      - name: Run HWI parity tests
+        run: |
+          set -o pipefail
+          nix run .#hwi-parity-jade 2>&1 | tee jade-hwi-parity.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Jade HWI parity log" jade-hwi-parity.log
+            cat jade-hwi-parity.log || true
+            exit 1
+          }
       - name: Run Jade CLI e2e
         run: |
           set -o pipefail
-          nix develop .#jade -c cargo build -p bhwi-cli --bin bhwi
           BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#jade -c cargo test -p bhwi-e2e-cli jade -- --test-threads=1 2>&1 | tee jade-cli-e2e.log || {
             bash nix/scripts/emit-gh-error-log.sh "Jade CLI e2e log" jade-cli-e2e.log
             cat jade-cli-e2e.log || true

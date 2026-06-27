@@ -65,6 +65,10 @@ impl LedgerDevice {
     }
 }
 
+fn speculos_tcp_addr(path: &str) -> &str {
+    path.strip_prefix("tcp:").unwrap_or(path)
+}
+
 #[async_trait(?Send)]
 impl DeviceEnumerator for LedgerDevice {
     async fn enumerate(selector: &DeviceSelector) -> Result<Vec<Device>> {
@@ -93,8 +97,12 @@ impl DeviceEnumerator for LedgerDevice {
             .await?;
         if selector.include_emulators
             && let Some(path) = emulator_path
-            && selector.matches(DeviceType::Ledger, path)
-            && let Ok(stream) = TcpStream::connect(path).await
+            && {
+                let addr = speculos_tcp_addr(path);
+                selector.matches(DeviceType::Ledger, path)
+                    || selector.matches(DeviceType::Ledger, addr)
+            }
+            && let Ok(stream) = TcpStream::connect(speculos_tcp_addr(path)).await
         {
             devices.push(Self::speculos_device(path, stream).await?);
         }
