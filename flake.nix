@@ -388,20 +388,21 @@
             exec ${hwiPython}/bin/python ${python-hwi}/hwi.py "$@"
           '';
         };
+        hwiReferenceBhwiMain = pkgs.writeText "hwi-reference-bhwi.py" ''
+          from hwilib import commands
+
+          commands.all_devs = ["ledger", "coldcard", "jade"]
+
+          from hwilib._cli import main
+
+          main()
+        '';
         hwiReferenceBhwi = pkgs.writeShellApplication {
           name = "hwi-reference-bhwi";
           runtimeInputs = [hwiPython];
           text = ''
             export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
-            exec ${hwiPython}/bin/python - "$@" <<'PY'
-from hwilib import commands
-
-commands.all_devs = ["ledger", "coldcard", "jade"]
-
-from hwilib._cli import main
-
-main()
-PY
+            exec ${hwiPython}/bin/python ${hwiReferenceBhwiMain} "$@"
           '';
         };
         hwiUpstreamSuite = pkgs.writeShellApplication {

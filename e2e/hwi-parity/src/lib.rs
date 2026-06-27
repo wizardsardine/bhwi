@@ -1,7 +1,8 @@
 use std::{
     env,
     ffi::OsStr,
-    process::{Command, Output},
+    io::Write,
+    process::{Command, Output, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
@@ -50,6 +51,32 @@ impl HwiBinary {
             .output()
             .with_context(|| format!("failed to spawn {} hwi at {}", self.label, self.path))?;
         parse_output(self.label, output)
+    }
+
+    pub fn run_with_stdin<I, S>(&self, args: I, stdin: &str) -> Result<HwiOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut child = Command::new(&self.path)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to spawn {} hwi at {}", self.label, self.path))?;
+
+        {
+            let mut child_stdin = child
+                .stdin
+                .take()
+                .with_context(|| format!("failed to open {} hwi stdin", self.label))?;
+            child_stdin
+                .write_all(stdin.as_bytes())
+                .with_context(|| format!("failed to write {} hwi stdin", self.label))?;
+        }
+
+        parse_output(self.label, child.wait_with_output()?)
     }
 }
 
@@ -143,6 +170,34 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn candidate_enumerate_accepts_python_hwi_global_args() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        let (base_args, _) = enumerate_args_from_env()?;
+        let reference = HwiBinary::reference()?.run(base_args)?;
+        assert_success("reference", &reference)?;
+        let reference_device =
+            assert_enumerate_contains_device("reference", &reference.json, &device_type)?;
+        let device_path = assert_string_field("reference", reference_device, "path")?.to_owned();
+        let fingerprint =
+            assert_string_field("reference", reference_device, "fingerprint")?.to_owned();
+
+        for args in enumerate_python_hwi_arg_cases(&device_type, &device_path, &fingerprint) {
+            assert_enumerate_parity(args.clone(), Some(&device_type))
+                .with_context(|| format!("enumerate parity failed for args: {args:?}"))?;
+        }
+
+        assert_enumerate_stdin_parity(&device_type)?;
+        Ok(())
+    }
+
     fn assert_enumerate_parity(
         args: Vec<String>,
         expected_device_type: Option<&str>,
@@ -156,13 +211,44 @@ mod tests {
         assert_enumerate_array("candidate", &candidate.json)?;
 
         if let Some(device_type) = expected_device_type {
-            assert_enumerate_contains_device("reference", &reference.json, device_type)?;
-            assert_enumerate_contains_device("candidate", &candidate.json, device_type)?;
+            let reference_device =
+                assert_enumerate_contains_device("reference", &reference.json, device_type)?;
+            let candidate_device =
+                assert_enumerate_contains_device("candidate", &candidate.json, device_type)?;
+            assert_enumerate_device_shape("reference", reference_device, None)?;
+            assert_enumerate_device_shape("candidate", candidate_device, Some(reference_device))?;
         }
 
         if reference.json != candidate.json {
             bail!(
                 "HWI JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(&reference.json)?,
+                serde_json::to_string_pretty(&candidate.json)?
+            );
+        }
+
+        Ok(())
+    }
+
+    fn assert_enumerate_stdin_parity(device_type: &str) -> Result<()> {
+        let stdin = format!("--emulators --device-type {device_type} enumerate\n\n");
+        let reference = HwiBinary::reference()?.run_with_stdin(["--stdin"], &stdin)?;
+        assert_success("reference", &reference)?;
+        assert_enumerate_array("reference", &reference.json)?;
+        let reference_device =
+            assert_enumerate_contains_device("reference", &reference.json, device_type)?;
+        assert_enumerate_device_shape("reference", reference_device, None)?;
+
+        let candidate = HwiBinary::candidate()?.run_with_stdin(["--stdin"], &stdin)?;
+        assert_success("candidate", &candidate)?;
+        assert_enumerate_array("candidate", &candidate.json)?;
+        let candidate_device =
+            assert_enumerate_contains_device("candidate", &candidate.json, device_type)?;
+        assert_enumerate_device_shape("candidate", candidate_device, Some(reference_device))?;
+
+        if reference.json != candidate.json {
+            bail!(
+                "HWI JSON mismatch for stdin enumerate\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
                 serde_json::to_string_pretty(&candidate.json)?
             );
@@ -181,13 +267,13 @@ mod tests {
         Ok(())
     }
 
-    fn assert_enumerate_contains_device(
+    fn assert_enumerate_contains_device<'a>(
         label: &str,
-        json: &Value,
+        json: &'a Value,
         device_type: &str,
-    ) -> Result<()> {
-        if enumerate_contains_device(json, device_type)? {
-            return Ok(());
+    ) -> Result<&'a Value> {
+        if let Some(device) = enumerate_device(json, device_type)? {
+            return Ok(device);
         }
 
         bail!(
@@ -196,32 +282,243 @@ mod tests {
         );
     }
 
-    fn enumerate_contains_device(json: &Value, device_type: &str) -> Result<bool> {
+    fn enumerate_device<'a>(json: &'a Value, device_type: &str) -> Result<Option<&'a Value>> {
         let devices = json
             .as_array()
             .with_context(|| "HWI enumerate output was not an array")?;
         Ok(devices
             .iter()
-            .any(|device| device.get("type").and_then(Value::as_str) == Some(device_type)))
+            .find(|device| device.get("type").and_then(Value::as_str) == Some(device_type)))
+    }
+
+    fn assert_enumerate_device_shape(
+        label: &str,
+        device: &Value,
+        reference: Option<&Value>,
+    ) -> Result<()> {
+        let Some(object) = device.as_object() else {
+            bail!(
+                "{label} hwi enumerate device entry was not an object:\n{}",
+                serde_json::to_string_pretty(device)?
+            );
+        };
+
+        assert_string_field(label, device, "type")?;
+        assert_string_field(label, device, "model")?;
+        assert_string_field(label, device, "path")?;
+        assert_fingerprint_field(label, device)?;
+        assert_false_field(label, device, "needs_pin_sent")?;
+        assert_false_field(label, device, "needs_passphrase_sent")?;
+
+        if object.contains_key("error") || object.contains_key("code") {
+            bail!(
+                "{label} hwi enumerate successful device entry included error fields:\n{}",
+                serde_json::to_string_pretty(device)?
+            );
+        }
+
+        if let Some(reference) = reference {
+            assert_matching_optional_field(label, device, reference, "label")?;
+            for field in [
+                "type",
+                "model",
+                "path",
+                "fingerprint",
+                "needs_pin_sent",
+                "needs_passphrase_sent",
+            ] {
+                if device.get(field) != reference.get(field) {
+                    bail!(
+                        "{label} hwi enumerate field {field:?} did not match reference\nreference:\n{}\ncandidate:\n{}",
+                        serde_json::to_string_pretty(reference)?,
+                        serde_json::to_string_pretty(device)?
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn assert_string_field<'a>(label: &str, device: &'a Value, field: &str) -> Result<&'a str> {
+        let Some(value) = device.get(field).and_then(Value::as_str) else {
+            bail!(
+                "{label} hwi enumerate field {field:?} was not a string:\n{}",
+                serde_json::to_string_pretty(device)?
+            );
+        };
+
+        if value.is_empty() {
+            bail!(
+                "{label} hwi enumerate field {field:?} was empty:\n{}",
+                serde_json::to_string_pretty(device)?
+            );
+        }
+
+        Ok(value)
+    }
+
+    fn assert_fingerprint_field(label: &str, device: &Value) -> Result<()> {
+        let fingerprint = assert_string_field(label, device, "fingerprint")?;
+        let valid = fingerprint.len() == 8
+            && fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !valid {
+            bail!(
+                "{label} hwi enumerate fingerprint was not 8 lowercase hex chars:\n{}",
+                serde_json::to_string_pretty(device)?
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_false_field(label: &str, device: &Value, field: &str) -> Result<()> {
+        if device.get(field).and_then(Value::as_bool) != Some(false) {
+            bail!(
+                "{label} hwi enumerate field {field:?} was not false:\n{}",
+                serde_json::to_string_pretty(device)?
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_matching_optional_field(
+        label: &str,
+        device: &Value,
+        reference: &Value,
+        field: &str,
+    ) -> Result<()> {
+        if device.get(field) != reference.get(field) {
+            bail!(
+                "{label} hwi enumerate optional field {field:?} did not match reference presence/value\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(reference)?,
+                serde_json::to_string_pretty(device)?
+            );
+        }
+        Ok(())
     }
 
     fn enumerate_args_from_env() -> Result<(Vec<String>, Option<String>)> {
+        match expected_device_type_from_env()? {
+            Some(device_type) => Ok((
+                vec![
+                    "--emulators".to_owned(),
+                    "--device-type".to_owned(),
+                    device_type.clone(),
+                    "enumerate".to_owned(),
+                ],
+                Some(device_type),
+            )),
+            None => Ok((vec!["enumerate".to_owned()], None)),
+        }
+    }
+
+    fn expected_device_type_from_env() -> Result<Option<String>> {
         match env::var("HWI_PARITY_DEVICE_TYPE") {
-            Ok(device_type) => {
-                let device_type = normalize_device_type(&device_type)?;
-                Ok((
-                    vec![
-                        "--emulators".to_owned(),
-                        "--device-type".to_owned(),
-                        device_type.clone(),
-                        "enumerate".to_owned(),
-                    ],
-                    Some(device_type),
-                ))
-            }
-            Err(env::VarError::NotPresent) => Ok((vec!["enumerate".to_owned()], None)),
+            Ok(device_type) => Ok(Some(normalize_device_type(&device_type)?)),
+            Err(env::VarError::NotPresent) => Ok(None),
             Err(err) => Err(err).context("failed to read HWI_PARITY_DEVICE_TYPE"),
         }
+    }
+
+    fn enumerate_python_hwi_arg_cases(
+        device_type: &str,
+        device_path: &str,
+        fingerprint: &str,
+    ) -> Vec<Vec<String>> {
+        vec![
+            args(["--emulators", "--device-type", device_type, "enumerate"]),
+            args(["--emulators", "-t", device_type, "enumerate"]),
+            args([
+                "--emulators",
+                "--device-type",
+                device_type,
+                "--device-path",
+                device_path,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "--device-type",
+                device_type,
+                "-d",
+                device_path,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "--device-type",
+                device_type,
+                "--fingerprint",
+                fingerprint,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "--device-type",
+                device_type,
+                "-f",
+                fingerprint,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "--debug",
+                "--device-type",
+                device_type,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "--expert",
+                "--device-type",
+                device_type,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "--interactive",
+                "--device-type",
+                device_type,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "-i",
+                "--device-type",
+                device_type,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "--password",
+                "unused",
+                "--device-type",
+                device_type,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "-p",
+                "unused",
+                "--device-type",
+                device_type,
+                "enumerate",
+            ]),
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "enumerate",
+            ]),
+        ]
+    }
+
+    fn args<const N: usize>(items: [&str; N]) -> Vec<String> {
+        items.into_iter().map(str::to_owned).collect()
     }
 
     fn normalize_device_type(device_type: &str) -> Result<String> {

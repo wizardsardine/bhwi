@@ -1,4 +1,9 @@
-use std::{ffi::OsString, process::ExitCode, str::FromStr};
+use std::{
+    ffi::OsString,
+    io::{self, BufRead},
+    process::ExitCode,
+    str::FromStr,
+};
 
 use bitcoin::{Network, bip32::Fingerprint};
 use clap::{Parser, Subcommand, error::ErrorKind};
@@ -13,16 +18,26 @@ type HwiResult<T> = std::result::Result<T, HwiError>;
 pub struct HwiCli {
     #[command(subcommand)]
     command: HwiCliCommand,
-    #[arg(long = "device-type")]
+    #[arg(long = "device-type", short = 't')]
     device_type: Option<String>,
-    #[arg(long = "device-path")]
+    #[arg(long = "device-path", short = 'd')]
     device_path: Option<String>,
-    #[arg(long, alias = "fingerprint")]
+    #[arg(long, short = 'f')]
     fingerprint: Option<Fingerprint>,
+    #[arg(long, short = 'p')]
+    password: Option<String>,
     #[arg(long, default_value = "main")]
     chain: String,
     #[arg(long)]
+    debug: bool,
+    #[arg(long)]
     emulators: bool,
+    #[arg(long)]
+    stdin: bool,
+    #[arg(long, short = 'i')]
+    interactive: bool,
+    #[arg(long)]
+    expert: bool,
     #[arg(long, hide = true)]
     stdinpass: bool,
 }
@@ -132,6 +147,15 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let args = match args_from_stdin(args) {
+        Ok(args) => args,
+        Err(err) => {
+            return print_response(HwiResponse::Error(HwiError::new(
+                HwiErrorCode::BadArgument,
+                err.to_string(),
+            )));
+        }
+    };
     let request = match HwiCli::try_parse_from(args) {
         Ok(args) => match request_from_cli(args) {
             Ok(request) => request,
@@ -153,6 +177,27 @@ where
         }
     };
     print_response(process_request(request).await)
+}
+
+fn args_from_stdin<I, T>(args: I) -> io::Result<Vec<OsString>>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let mut args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    if !args.iter().any(|arg| arg == "--stdin") {
+        return Ok(args);
+    }
+
+    for line in io::stdin().lock().lines() {
+        let line = line?;
+        if line.is_empty() {
+            break;
+        }
+        args.extend(line.split_whitespace().map(OsString::from));
+    }
+
+    Ok(args)
 }
 
 async fn enumerate(selector: DeviceSelector) -> HwiResponse {
@@ -239,6 +284,14 @@ fn parse_device_type(value: &str) -> HwiResult<DeviceType> {
 }
 
 fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
+    let _accepted_python_hwi_globals = (
+        args.password,
+        args.debug,
+        args.stdin,
+        args.interactive,
+        args.expert,
+        args.stdinpass,
+    );
     let device_type = args
         .device_type
         .as_deref()
@@ -302,11 +355,11 @@ mod tests {
             "hwi",
             "--chain",
             "test",
-            "--fingerprint",
+            "-f",
             "f5acc2fd",
-            "--device-type",
+            "-t",
             "ledger",
-            "--device-path",
+            "-d",
             "tcp:localhost:9999",
             "--emulators",
             "enumerate",
@@ -321,6 +374,56 @@ mod tests {
         );
         assert!(request.selector.include_emulators);
         assert_eq!(request.command, HwiCommand::Enumerate);
+    }
+
+    #[test]
+    fn parses_enumerate_python_hwi_global_flags() {
+        let request = parse_args([
+            "hwi",
+            "--password",
+            "passphrase",
+            "--debug",
+            "--stdin",
+            "--interactive",
+            "--expert",
+            "--stdinpass",
+            "enumerate",
+        ])
+        .expect("request");
+
+        assert_eq!(request.command, HwiCommand::Enumerate);
+    }
+
+    #[test]
+    fn parses_enumerate_python_hwi_short_flags() {
+        let request = parse_args([
+            "hwi",
+            "-p",
+            "passphrase",
+            "-i",
+            "-f",
+            "f5acc2fd",
+            "-t",
+            "ledger",
+            "-d",
+            "tcp:localhost:9999",
+            "enumerate",
+        ])
+        .expect("request");
+
+        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(
+            request.selector.device_path.as_deref(),
+            Some("tcp:localhost:9999")
+        );
+        assert_eq!(request.command, HwiCommand::Enumerate);
+    }
+
+    #[test]
+    fn accepts_python_hwi_version_flag() {
+        let error = HwiCli::try_parse_from(["hwi", "--version"]).expect_err("version exits");
+
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
     }
 
     #[test]
