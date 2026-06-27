@@ -38,7 +38,7 @@ impl LedgerDevice {
                 &name,
                 DeviceType::Ledger,
                 path,
-                "ledger",
+                ledger_model(dev.product_id, false),
                 Box::new(LedgerHidDevice::new(LedgerTransportHID::new(
                     HidChannel::new(dev.open().await?),
                 ))),
@@ -53,7 +53,7 @@ impl LedgerDevice {
             "Ledger Speculos Emulator",
             DeviceType::Ledger,
             path,
-            "ledger",
+            ledger_model(0x1000, true),
             Box::new(LedgerSpeculosDevice::new(LedgerTransportTcp::new(
                 SpeculosTcpChannel {
                     stream: Arc::new(Mutex::new(stream)),
@@ -105,6 +105,18 @@ impl DeviceEnumerator for LedgerDevice {
 fn hid_path(dev: &HidDevice) -> String {
     let suffix = dev.serial_number.as_deref().unwrap_or(&dev.name);
     format!("hid:{:04x}:{:04x}:{suffix}", dev.vendor_id, dev.product_id)
+}
+
+fn ledger_model(product_id: u16, is_emulated: bool) -> &'static str {
+    match (product_id >> 8, product_id, is_emulated) {
+        (0x10, _, true) => "ledger_nano_s_simulator",
+        (0x10, _, false) | (_, 0x0001, false) => "ledger_nano_s",
+        (0x40, _, false) | (_, 0x0004, false) => "ledger_nano_x",
+        (0x50, _, false) => "ledger_nano_s_plus",
+        (0x60, _, false) => "ledger_stax",
+        (0x70, _, false) => "ledger_flex",
+        _ => "ledger",
+    }
 }
 
 pub struct SpeculosTcpChannel {

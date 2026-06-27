@@ -33,7 +33,7 @@ impl HwiBinary {
     }
 
     pub fn reference() -> Result<Self> {
-        Self::from_env("reference", "REFERENCE_HWI_BIN", Some("hwi-reference"))
+        Self::from_env("reference", "REFERENCE_HWI_BIN", Some("hwi-reference-bhwi"))
     }
 
     pub fn candidate() -> Result<Self> {

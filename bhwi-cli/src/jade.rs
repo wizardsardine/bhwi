@@ -106,7 +106,7 @@ impl JadeDevice {
             "Jade QEMU Emulator",
             DeviceType::Jade,
             DEFAULT_JADE_QEMU_ADDRESS,
-            "jade",
+            "jade_simulator",
             Box::new(JadeQemuDevice::new(
                 network,
                 TcpTransport::new(TcpClient::new(stream)),

@@ -84,7 +84,13 @@ pub struct HwiEnumeratedDevice {
     pub device_type: String,
     pub model: String,
     pub path: String,
-    #[serde(default, serialize_with = "option_fingerprint")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<Option<String>>,
+    #[serde(
+        default,
+        serialize_with = "option_fingerprint",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub fingerprint: Option<Fingerprint>,
     pub needs_pin_sent: bool,
     pub needs_passphrase_sent: bool,
@@ -183,6 +189,7 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
             device_type: device.device_type().to_string(),
             model: device.model().to_owned(),
             path: device.path().to_owned(),
+            label: label_for(device.device_type()),
             fingerprint,
             needs_pin_sent: false,
             needs_passphrase_sent: false,
@@ -191,6 +198,13 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
         });
     }
     HwiResponse::Enumerate(response)
+}
+
+fn label_for(device_type: DeviceType) -> Option<Option<String>> {
+    match device_type {
+        DeviceType::Coldcard | DeviceType::Ledger => Some(None),
+        DeviceType::Jade => None,
+    }
 }
 
 fn print_response(response: HwiResponse) -> ExitCode {
@@ -327,5 +341,58 @@ mod tests {
             request.command,
             HwiCommand::Unsupported("getxpub".to_owned())
         );
+    }
+
+    #[test]
+    fn ledger_and_coldcard_labels_are_serialized_as_null() {
+        assert_eq!(
+            serde_json::to_value(HwiEnumeratedDevice {
+                device_type: "ledger".to_owned(),
+                model: "ledger_nano_s".to_owned(),
+                path: "tcp:localhost:9999".to_owned(),
+                label: label_for(DeviceType::Ledger),
+                fingerprint: None,
+                needs_pin_sent: false,
+                needs_passphrase_sent: false,
+                error: None,
+                code: None,
+            })
+            .expect("json")["label"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            serde_json::to_value(HwiEnumeratedDevice {
+                device_type: "coldcard".to_owned(),
+                model: "coldcard".to_owned(),
+                path: "/tmp/ckcc-simulator.sock".to_owned(),
+                label: label_for(DeviceType::Coldcard),
+                fingerprint: None,
+                needs_pin_sent: false,
+                needs_passphrase_sent: false,
+                error: None,
+                code: None,
+            })
+            .expect("json")["label"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn jade_label_and_missing_fingerprint_are_omitted() {
+        let json = serde_json::to_value(HwiEnumeratedDevice {
+            device_type: "jade".to_owned(),
+            model: "jade".to_owned(),
+            path: "localhost:30121".to_owned(),
+            label: label_for(DeviceType::Jade),
+            fingerprint: None,
+            needs_pin_sent: false,
+            needs_passphrase_sent: false,
+            error: Some("connection failed".to_owned()),
+            code: Some(HwiErrorCode::DeviceConnectionError.code()),
+        })
+        .expect("json");
+
+        assert!(json.get("label").is_none());
+        assert!(json.get("fingerprint").is_none());
     }
 }

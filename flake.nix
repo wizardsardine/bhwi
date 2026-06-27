@@ -335,6 +335,24 @@
             exec ${hwiPython}/bin/python ${python-hwi}/hwi.py "$@"
           '';
         };
+        hwiReferenceBhwi = pkgs.writeShellApplication {
+          name = "hwi-reference-bhwi";
+          runtimeInputs = [hwiPython];
+          text = ''
+            export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+            exec ${hwiPython}/bin/python - "$@" <<'PY'
+import sys
+
+from hwilib import commands
+
+commands.all_devs = ["ledger", "coldcard", "jade"]
+
+from hwilib._cli import main
+
+main()
+PY
+          '';
+        };
         hwiUpstreamSuite = pkgs.writeShellApplication {
           name = "hwi-upstream-suite";
           runtimeInputs =
@@ -430,6 +448,7 @@
       in {
         packages = {
           hwi-reference = hwiReference;
+          hwi-reference-bhwi = hwiReferenceBhwi;
           hwi-upstream-suite = hwiUpstreamSuite;
           default = pkgs.rustPlatform.buildRustPackage {
             name = "bhwi";

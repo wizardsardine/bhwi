@@ -26,6 +26,12 @@ jobs:
         run: nix flake show --allow-import-from-derivation
       - name: Build script check
         run: nix build .#checks.x86_64-linux.emulator-scripts
+      - name: Run HWI parity tests
+        run: |
+          ref="$(nix build --no-link --print-out-paths .#hwi-reference-bhwi)"
+          nix develop -c cargo build -p bhwi-cli --bin hwi
+          REFERENCE_HWI_BIN="$ref/bin/hwi-reference-bhwi" HWI_BIN="$PWD/target/debug/hwi" \
+            nix develop -c cargo test -p bhwi-e2e-hwi-parity
 
   coldcard-e2e:
     needs: nix-flake

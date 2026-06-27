@@ -50,7 +50,7 @@ impl ColdcardDevice {
                 "Coldcard Emulator",
                 DeviceType::Coldcard,
                 path,
-                "coldcard",
+                "coldcard_simulator",
                 Box::new(Coldcard::new(ColdcardTransportHID::new(client), rng)),
                 true,
             )
