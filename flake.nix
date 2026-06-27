@@ -70,8 +70,20 @@
         jadePython = pkgs.python3.withPackages (pythonPackages: [
           pythonPackages.zopfli
         ]);
+        hwiCbor2 = pkgs.python312Packages.cbor2.overridePythonAttrs (_old: rec {
+          version = "5.9.0";
+          src = pkgs.fetchPypi {
+            pname = "cbor2";
+            inherit version;
+            hash = "sha256-hcekYnmsjyJuEFknUiHms9DjcNK7a9BQD5eAeBYVvOo=";
+          };
+        });
         hwiPython = pkgs.python312.withPackages (pythonPackages: [
-          pythonPackages.cbor2
+          # HWI 3.2.0 times out against Jade with cbor2 5.8.0 because its
+          # larger stream reads expose HWI's exact-fill Jade TCP read loop.
+          # Upstream HWI is relaxing its cbor2 cap to permit 5.9.0:
+          # https://github.com/bitcoin-core/HWI/pull/832
+          hwiCbor2
           pythonPackages.ecdsa
           pythonPackages.hidapi
           pythonPackages.libusb1
@@ -383,21 +395,8 @@
             export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
             exec ${hwiPython}/bin/python - "$@" <<'PY'
 from hwilib import commands
-from hwilib.devices.jadepy import jade_tcp
 
 commands.all_devs = ["ledger", "coldcard", "jade"]
-
-# XXX: HWI 3.2.0's Jade TCP backend treats read(n) as an
-# exact-fill operation. cbor2 can request a large buffer while the Jade
-# QEMU emulator has already sent a complete, shorter CBOR response, so
-# HWI blocks until timeout despite the response being available. Jade's
-# current upstream jadepy returns one recv() result here instead.
-def _bhwi_jade_tcp_read(self, n):
-    if not n:
-        return bytes()
-    return self.tcp_sock.recv(n)
-
-jade_tcp.JadeTCPImpl.read = _bhwi_jade_tcp_read
 
 from hwilib._cli import main
 
