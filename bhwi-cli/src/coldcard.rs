@@ -12,10 +12,9 @@ use bhwi_async::{
 };
 use futures::StreamExt;
 use futures::TryStreamExt;
-use futures::stream::iter;
 use rand_core::OsRng;
 
-use crate::{Device, DeviceEnumerator, config::Config, hid::HidChannel};
+use crate::{Device, DeviceEnumerator, DeviceType, config::DeviceSelector, hid::HidChannel};
 
 pub type ColdcardHidDevice = Coldcard<ColdcardTransportHID<HidChannel>>;
 
@@ -23,9 +22,14 @@ pub struct ColdcardDevice;
 
 impl ColdcardDevice {
     async fn hid_device(hid_dev: HidDevice, rng: &mut OsRng) -> Result<Option<Device>> {
+        let path = hid_path(&hid_dev);
+        let name = hid_dev.name.clone();
         Ok(Some(
             Device::new(
-                &hid_dev.name,
+                &name,
+                DeviceType::Coldcard,
+                path,
+                "coldcard",
                 Box::new(Coldcard::new(
                     ColdcardTransportHID::new(HidChannel::new(hid_dev.open().await?)),
                     rng,
@@ -44,6 +48,9 @@ impl ColdcardDevice {
             };
             let device = Device::new(
                 "Coldcard Emulator",
+                DeviceType::Coldcard,
+                path,
+                "coldcard_simulator",
                 Box::new(Coldcard::new(ColdcardTransportHID::new(client), rng)),
                 true,
             )
@@ -62,7 +69,7 @@ impl ColdcardDevice {
 
 #[async_trait(?Send)]
 impl DeviceEnumerator for ColdcardDevice {
-    async fn enumerate(_config: &Config) -> Result<Vec<Device>> {
+    async fn enumerate(selector: &DeviceSelector) -> Result<Vec<Device>> {
         let DeviceId {
             vid,
             pid,
@@ -70,26 +77,37 @@ impl DeviceEnumerator for ColdcardDevice {
             ..
         } = COLDCARD_DEVICE_ID;
         let mut rng = OsRng;
-        let devices = HidBackend::default()
+        let mut devices: Vec<Device> = HidBackend::default()
             .enumerate()
             .await?
             .map(Ok)
             .try_filter_map(|dev| async move {
-                if dev.vendor_id == vid && dev.product_id == pid.context("coldcard pid not set")? {
+                let path = hid_path(&dev);
+                if selector.matches(DeviceType::Coldcard, &path)
+                    && dev.vendor_id == vid
+                    && dev.product_id == pid.context("coldcard pid not set")?
+                {
                     Self::hid_device(dev, &mut rng).await
                 } else {
                     Ok(None)
                 }
             })
-            .chain(
-                iter(emulator_path.map(Ok).into_iter()).try_filter_map(|path| async move {
-                    Self::emulator_device(path, &mut rng).await
-                }),
-            )
             .try_collect()
             .await?;
+        if selector.include_emulators
+            && let Some(path) = emulator_path
+            && selector.matches(DeviceType::Coldcard, path)
+            && let Some(device) = Self::emulator_device(path, &mut rng).await?
+        {
+            devices.push(device);
+        }
         Ok(devices)
     }
+}
+
+fn hid_path(dev: &HidDevice) -> String {
+    let suffix = dev.serial_number.as_deref().unwrap_or(&dev.name);
+    format!("hid:{:04x}:{:04x}:{suffix}", dev.vendor_id, dev.product_id)
 }
 
 #[cfg(unix)]

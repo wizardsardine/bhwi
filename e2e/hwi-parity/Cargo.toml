@@ -1,0 +1,10 @@
+[package]
+name = "bhwi-e2e-hwi-parity"
+version = "0.1.0"
+edition = "2024"
+authors.workspace = true
+license-file.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true

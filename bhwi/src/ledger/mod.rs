@@ -24,7 +24,7 @@ use crate::device::DeviceId;
 
 pub const LEDGER_DEVICE_ID: DeviceId = DeviceId::new(0x2c97)
     .with_usage_page(0xffa0)
-    .with_emulator_path("localhost:9999");
+    .with_emulator_path("tcp:127.0.0.1:9999");
 
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {

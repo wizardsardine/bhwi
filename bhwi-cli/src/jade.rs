@@ -18,13 +18,17 @@ use tokio_serial::{
     SerialPort, SerialPortBuilderExt, SerialPortType, SerialStream, UsbPortInfo, available_ports,
 };
 
-use crate::{Device, DeviceEnumerator, config::Config};
+use crate::{Device, DeviceEnumerator, DeviceType, config::DeviceSelector};
 
 pub type JadeSerialDevice = Jade<SerialTransport, PinServerClient>;
 pub type JadeQemuDevice = Jade<TcpTransport<TcpClient>, PinServerClient>;
 
 pub const DEFAULT_JADE_BAUD_RATE: u32 = 115200;
-pub const DEFAULT_JADE_QEMU_ADDRESS: &str = "localhost:30121";
+pub const DEFAULT_JADE_QEMU_ADDRESS: &str = "tcp:127.0.0.1:30121";
+
+fn jade_tcp_addr(path: &str) -> &str {
+    path.strip_prefix("tcp:").unwrap_or(path)
+}
 
 pub struct SerialTransport {
     stream: Arc<Mutex<SerialStream>>,
@@ -87,6 +91,9 @@ impl JadeDevice {
                     info.product.unwrap_or_else(|| "Jade".into()),
                     info.manufacturer.unwrap_or_else(|| "Blockstream".into())
                 ),
+                DeviceType::Jade,
+                port_name,
+                "jade",
                 Box::new(JadeSerialDevice::new(
                     network,
                     SerialTransport::new(port_name)?,
@@ -101,6 +108,9 @@ impl JadeDevice {
     async fn qemu_device(network: Network, stream: TcpStream) -> Result<Device> {
         Device::new(
             "Jade QEMU Emulator",
+            DeviceType::Jade,
+            DEFAULT_JADE_QEMU_ADDRESS,
+            "jade_simulator",
             Box::new(JadeQemuDevice::new(
                 network,
                 TcpTransport::new(TcpClient::new(stream)),
@@ -114,20 +124,27 @@ impl JadeDevice {
 
 #[async_trait(?Send)]
 impl DeviceEnumerator for JadeDevice {
-    async fn enumerate(config: &Config) -> Result<Vec<Device>> {
+    async fn enumerate(selector: &DeviceSelector) -> Result<Vec<Device>> {
         let mut devices: Vec<Device> = iter(available_ports()?.into_iter().map(Ok))
             .try_filter_map(|info| async move {
                 match info.port_type {
-                    SerialPortType::UsbPort(usb) if Self::valid_usb(&usb) => {
-                        Self::serial_device(config.network, &info.port_name, usb).await
+                    SerialPortType::UsbPort(usb)
+                        if selector.matches(DeviceType::Jade, &info.port_name)
+                            && Self::valid_usb(&usb) =>
+                    {
+                        Self::serial_device(selector.network, &info.port_name, usb).await
                     }
                     _ => Ok(None),
                 }
             })
             .try_collect()
             .await?;
-        if let Ok(stream) = TcpStream::connect(DEFAULT_JADE_QEMU_ADDRESS).await {
-            devices.push(Self::qemu_device(config.network, stream).await?);
+        if selector.include_emulators
+            && (selector.matches(DeviceType::Jade, DEFAULT_JADE_QEMU_ADDRESS)
+                || selector.matches(DeviceType::Jade, jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS)))
+            && let Ok(stream) = TcpStream::connect(jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS)).await
+        {
+            devices.push(Self::qemu_device(selector.network, stream).await?);
         }
         Ok(devices)
     }

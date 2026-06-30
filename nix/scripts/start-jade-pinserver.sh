@@ -20,7 +20,10 @@ if [[ ! -d "$work" ]]; then
   echo "Preparing Jade pinserver source in $work" >&2
   rm -rf "$package_parent"
   mkdir -p "$package_parent"
-  if [[ -n "${JADE_PINSERVER_URL:-}" && "$pinserver_rev" != "locked" ]]; then
+  if [[ -d "$pinserver_src" ]]; then
+    mkdir -p "$work"
+    cp -R "$pinserver_src"/. "$work"/
+  elif [[ -n "${JADE_PINSERVER_URL:-}" && "$pinserver_rev" != "locked" ]]; then
     git clone "$JADE_PINSERVER_URL" "$work"
     git -C "$work" checkout "$pinserver_rev"
   else

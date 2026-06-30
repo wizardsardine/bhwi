@@ -2,7 +2,7 @@ use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi_async::DeviceContext;
 use bhwi_cli::{
-    DeviceManager, OutputFormat, address::AddressTarget, config::Config,
+    DeviceManager, OutputFormat, address::AddressTarget, config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
 };
 
@@ -35,19 +35,20 @@ struct Args {
     format: Option<OutputFormat>,
 }
 
-impl From<Args> for Config {
-    fn from(args: Args) -> Self {
-        let Args {
-            network,
-            fingerprint,
-            format,
-            ..
-        } = args;
-        Self {
-            network,
-            fingerprint,
-            format,
+impl Args {
+    fn device_selector(&self) -> DeviceSelector {
+        DeviceSelector {
+            network: self.network,
+            fingerprint: self.fingerprint,
+            include_emulators: true,
+            ..DeviceSelector::default()
         }
+    }
+}
+
+impl From<&Args> for DeviceSelector {
+    fn from(args: &Args) -> Self {
+        args.device_selector()
     }
 }
 
@@ -202,8 +203,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let command = args.command.to_owned();
     let format = args.format;
-    let config: Config = args.into();
-    let dev_man = DeviceManager::new(config);
+    let selector = DeviceSelector::from(&args);
+    let dev_man = DeviceManager::new(selector);
     match command {
         Commands::Address(AddressCommands::Get {
             from_path,
@@ -237,7 +238,7 @@ async fn main() -> Result<()> {
             _ => anyhow::bail!("either --from-path or --from-descriptor must be specified"),
         },
         Commands::Descriptor(DescriptorCommands::Pubkeys { account }) => {
-            dev_man.get_pubkey_descriptors(account).await?
+            dev_man.get_pubkey_descriptors(account, format).await?
         }
         Commands::Descriptor(DescriptorCommands::Keypool {
             path,
@@ -252,15 +253,15 @@ async fn main() -> Result<()> {
                 end,
                 internal,
                 descriptor_type: address_format.into(),
-                network: dev_man.config.network,
+                network: dev_man.selector.network,
             };
-            dev_man.get_keypool(options).await?;
+            dev_man.get_keypool(options, format).await?;
         }
         Commands::Device(DeviceCommands::List) => {
             let mut devices = dev_man.enumerate().await?;
             for (i, device) in devices.iter_mut().enumerate() {
                 // XXX: Coldcard always needs unlocking
-                device.device().unlock(dev_man.config.network).await?;
+                device.device().unlock(dev_man.selector.network).await?;
                 let fingerprint = device.fingerprint().await?;
                 let name = device.name().to_string();
                 let is_emulated = device.is_emulated();
@@ -453,6 +454,20 @@ mod tests {
                 output: None,
             } if message == "hello" && path.to_string() == "44'/1'/0'/0"
         ));
+    }
+
+    #[test]
+    fn native_cli_rejects_hwi_only_selector_flags() {
+        let error = Args::try_parse_from([
+            "bhwi",
+            "--device-path",
+            "tcp:localhost:9999",
+            "device",
+            "list",
+        ])
+        .expect_err("native CLI must not accept HWI compatibility flags");
+
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]

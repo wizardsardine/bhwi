@@ -19,6 +19,10 @@
       url = "github:Blockstream/blind_pin_server/0205d38e75cb47f187db2efda5846cc898a85039";
       flake = false;
     };
+    python-hwi = {
+      url = "github:bitcoin-core/HWI/3.2.0";
+      flake = false;
+    };
     nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
     nixpkgs-coldcard.url = "github:NixOS/nixpkgs/nixos-24.05";
     rust-overlay = {
@@ -34,6 +38,7 @@
     coldcard-firmware,
     jade-firmware,
     jade-pinserver,
+    python-hwi,
     nixpkgs,
     nixpkgs-coldcard,
     nixpkgs-esp-dev,
@@ -43,7 +48,12 @@
     flake-utils.lib.eachDefaultSystem (
       system: let
         overlays = [rust-overlay.overlays.default];
-        pkgs = import nixpkgs {inherit system overlays;};
+        pkgs = import nixpkgs {
+          inherit system overlays;
+          config.permittedInsecurePackages = [
+            "python3.12-ecdsa-0.19.1"
+          ];
+        };
         coldcardPkgs = import nixpkgs-coldcard {inherit system;};
         emulatorSystem = system == "x86_64-linux";
         espPkgs = import nixpkgs-esp-dev.inputs.nixpkgs {
@@ -59,6 +69,32 @@
         };
         jadePython = pkgs.python3.withPackages (pythonPackages: [
           pythonPackages.zopfli
+        ]);
+        hwiCbor2 = pkgs.python312Packages.cbor2.overridePythonAttrs (_old: rec {
+          version = "5.9.0";
+          src = pkgs.fetchPypi {
+            pname = "cbor2";
+            inherit version;
+            hash = "sha256-hcekYnmsjyJuEFknUiHms9DjcNK7a9BQD5eAeBYVvOo=";
+          };
+        });
+        hwiPython = pkgs.python312.withPackages (pythonPackages: [
+          # HWI 3.2.0 times out against Jade with cbor2 5.8.0 because its
+          # larger stream reads expose HWI's exact-fill Jade TCP read loop.
+          # Upstream HWI is relaxing its cbor2 cap to permit 5.9.0:
+          # https://github.com/bitcoin-core/HWI/pull/832
+          hwiCbor2
+          pythonPackages.ecdsa
+          pythonPackages.hidapi
+          pythonPackages.libusb1
+          pythonPackages.mnemonic
+          pythonPackages.noiseprotocol
+          pythonPackages.protobuf
+          pythonPackages.pyaes
+          pythonPackages.pyserial
+          pythonPackages.requests
+          pythonPackages.semver
+          pythonPackages.typing-extensions
         ]);
         rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         rustPlatformWasm = pkgs.makeRustPlatform {
@@ -223,6 +259,46 @@
           type = "app";
           program = pkgs.lib.getExe program;
         };
+        commonE2eEnv = ''
+          export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
+          export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
+          export RUST_TEST_THREADS=1
+        '';
+        coldcardE2eEnv = ''
+          export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
+          export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
+            coldcardPkgs.SDL2
+            coldcardPkgs.gcc13.cc.lib
+            coldcardPkgs.glibc
+            coldcardPkgs.libffi
+            coldcardPkgs.openssl.out
+            coldcardPkgs.pcsclite
+            coldcardPkgs.systemd
+          ]}"
+          export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
+          export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
+          export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
+          export PYSDL2_DLL_PATH="${coldcardPkgs.SDL2}/lib"
+          export CFLAGS="-I${coldcardPkgs.pcsclite.dev}/include/PCSC ''${CFLAGS:-}"
+          export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
+          export RUST_TEST_THREADS=1
+        '';
+        mkHwiParityRunner = name: device: runtimeInputs: env:
+          pkgs.writeShellApplication {
+            inherit name runtimeInputs;
+            text =
+              env
+              + ''
+
+                set -euo pipefail
+                export REFERENCE_HWI_BIN="${pkgs.lib.getExe hwiReferenceBhwi}"
+                export HWI_BIN="''${HWI_BIN:-$PWD/target/debug/hwi}"
+                export HWI_PARITY_DEVICE_TYPE="${device}"
+
+                cargo build -p bhwi-cli --bins
+                exec cargo test -p bhwi-e2e-hwi-parity "$@"
+              '';
+          };
         mkRunnerWith = runnerPkgs: name: runtimeInputs: env: script:
           runnerPkgs.writeShellApplication {
             inherit name runtimeInputs;
@@ -304,6 +380,56 @@
           export JADE_PINSERVER_URL="https://github.com/Blockstream/blind_pin_server.git"
           export JADE_PINSERVER_PYTHON="${pkgs.python311}/bin/python3"
         '' ./nix/scripts/start-jade-pinserver.sh;
+        hwiReference = pkgs.writeShellApplication {
+          name = "hwi-reference";
+          runtimeInputs = [hwiPython];
+          text = ''
+            export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+            exec ${hwiPython}/bin/python ${python-hwi}/hwi.py "$@"
+          '';
+        };
+        hwiReferenceBhwiMain = pkgs.writeText "hwi-reference-bhwi.py" ''
+          from hwilib import commands
+
+          commands.all_devs = ["ledger", "coldcard", "jade"]
+
+          from hwilib._cli import main
+
+          main()
+        '';
+        hwiReferenceBhwi = pkgs.writeShellApplication {
+          name = "hwi-reference-bhwi";
+          runtimeInputs = [hwiPython];
+          text = ''
+            export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+            exec ${hwiPython}/bin/python ${hwiReferenceBhwiMain} "$@"
+          '';
+        };
+        hwiUpstreamSuite = pkgs.writeShellApplication {
+          name = "hwi-upstream-suite";
+          runtimeInputs =
+            inputs
+            ++ ledgerInputs
+            ++ [
+              hwiPython
+              pkgs.bitcoin
+            ];
+          text = ''
+            export HWI_UPSTREAM_SRC="${python-hwi}"
+            export HWI_BITCOIND="''${HWI_BITCOIND:-${pkgs.bitcoin}/bin/bitcoind}"
+            export HWI_LEDGER_SPECULOS_BIN="''${HWI_LEDGER_SPECULOS_BIN:-${speculos}/bin/speculos}"
+            export LEDGER_BUILD_APP_SCRIPT="''${LEDGER_BUILD_APP_SCRIPT:-${./nix/scripts/build-ledger-app.sh}}"
+            export APP_BITCOIN_NEW_SRC="${app-bitcoin-new}"
+            export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
+            export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
+            export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+
+            exec ${pkgs.bash}/bin/bash ${./nix/scripts/run-hwi-upstream-suite.sh} "$@"
+          '';
+        };
+        hwiParityColdcard = mkHwiParityRunner "bhwi-hwi-parity-coldcard" "coldcard" (coldcardInputs ++ inputs) coldcardE2eEnv;
+        hwiParityLedger = mkHwiParityRunner "bhwi-hwi-parity-ledger" "ledger" (ledgerInputs ++ inputs) commonE2eEnv;
+        hwiParityJade = mkHwiParityRunner "bhwi-hwi-parity-jade" "jade" (jadeInputs ++ inputs) commonE2eEnv;
         linuxPackages =
           pkgs.lib.optionalAttrs emulatorSystem {
             inherit speculos;
@@ -316,6 +442,10 @@
             coldcard = mkApp coldcardRunner;
             ledger = mkApp ledgerRunner;
             ledger-build-app = mkApp ledgerAppBuilder;
+            hwi-upstream-suite = mkApp hwiUpstreamSuite;
+            hwi-parity-coldcard = mkApp hwiParityColdcard;
+            hwi-parity-ledger = mkApp hwiParityLedger;
+            hwi-parity-jade = mkApp hwiParityJade;
             jade = mkApp jadeRunner;
             jade-init = mkApp jadeInitRunner;
             jade-pinserver = mkApp jadePinserverRunner;
@@ -324,41 +454,15 @@
           pkgs.lib.optionalAttrs emulatorSystem {
             coldcard = pkgs.mkShell {
               packages = coldcardInputs ++ inputs;
-              shellHook = ''
-                export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-                export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
-                  coldcardPkgs.SDL2
-                  coldcardPkgs.gcc13.cc.lib
-                  coldcardPkgs.glibc
-                  coldcardPkgs.libffi
-                  coldcardPkgs.openssl.out
-                  coldcardPkgs.pcsclite
-                  coldcardPkgs.systemd
-                ]}"
-                export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
-                export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
-                export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
-                export PYSDL2_DLL_PATH="${coldcardPkgs.SDL2}/lib"
-                export CFLAGS="-I${coldcardPkgs.pcsclite.dev}/include/PCSC ''${CFLAGS:-}"
-                export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
-                export RUST_TEST_THREADS=1
-              '';
+              shellHook = coldcardE2eEnv;
             };
             ledger = pkgs.mkShell {
               packages = inputs ++ ledgerInputs;
-              shellHook = ''
-                export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-                export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
-                export RUST_TEST_THREADS=1
-              '';
+              shellHook = commonE2eEnv;
             };
             jade = pkgs.mkShell {
               packages = inputs ++ jadeInputs;
-              shellHook = ''
-                export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-                export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
-                export RUST_TEST_THREADS=1
-              '';
+              shellHook = commonE2eEnv;
             };
           };
         linuxChecks =
@@ -375,6 +479,9 @@
           };
       in {
         packages = {
+          hwi-reference = hwiReference;
+          hwi-reference-bhwi = hwiReferenceBhwi;
+          hwi-upstream-suite = hwiUpstreamSuite;
           default = pkgs.rustPlatform.buildRustPackage {
             name = "bhwi";
             src = ./.;
