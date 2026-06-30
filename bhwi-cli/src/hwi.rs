@@ -5,7 +5,10 @@ use std::{
     str::FromStr,
 };
 
-use bitcoin::{Network, bip32::Fingerprint};
+use bitcoin::{
+    Network, NetworkKind,
+    bip32::{DerivationPath, Fingerprint, Xpub},
+};
 use clap::{Parser, Subcommand, error::ErrorKind};
 use serde::{Serialize, Serializer};
 
@@ -45,6 +48,10 @@ pub struct HwiCli {
 #[derive(Debug, Clone, Subcommand)]
 pub enum HwiCliCommand {
     Enumerate,
+    Getxpub {
+        #[arg(value_parser = clap::value_parser!(DerivationPath))]
+        path: DerivationPath,
+    },
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -58,6 +65,7 @@ pub struct HwiRequest {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum HwiCommand {
     Enumerate,
+    GetXpub { path: DerivationPath, expert: bool },
     Unsupported(String),
 }
 
@@ -69,6 +77,7 @@ pub struct HwiError {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HwiErrorCode {
+    NoDeviceType,
     BadArgument,
     UnsupportedCommand,
     DeviceConnectionError,
@@ -77,9 +86,10 @@ pub enum HwiErrorCode {
 impl HwiErrorCode {
     fn code(self) -> i32 {
         match self {
+            HwiErrorCode::NoDeviceType => -1,
             HwiErrorCode::BadArgument => -7,
             HwiErrorCode::UnsupportedCommand => -9,
-            HwiErrorCode::DeviceConnectionError => -10,
+            HwiErrorCode::DeviceConnectionError => -3,
         }
     }
 }
@@ -119,7 +129,31 @@ pub struct HwiEnumeratedDevice {
 #[serde(untagged)]
 pub enum HwiResponse {
     Enumerate(Vec<HwiEnumeratedDevice>),
+    GetXpub(HwiGetXpubResponse),
     Error(HwiError),
+}
+
+#[derive(Debug, Serialize)]
+pub struct HwiGetXpubResponse {
+    pub xpub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub testnet: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u8>,
+    #[serde(
+        default,
+        serialize_with = "option_fingerprint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_fingerprint: Option<Fingerprint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_num: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chaincode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pubkey: Option<String>,
 }
 
 pub fn parse_args<I, T>(args: I) -> HwiResult<HwiRequest>
@@ -135,6 +169,7 @@ where
 pub async fn process_request(request: HwiRequest) -> HwiResponse {
     match request.command {
         HwiCommand::Enumerate => enumerate(request.selector).await,
+        HwiCommand::GetXpub { path, expert } => get_xpub(request.selector, path, expert).await,
         HwiCommand::Unsupported(command) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             format!("Unsupported HWI command: {command}"),
@@ -245,6 +280,66 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
     HwiResponse::Enumerate(response)
 }
 
+async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    match device.device().get_extended_pubkey(path, false).await {
+        Ok(xpub) => HwiResponse::GetXpub(get_xpub_response(xpub, expert)),
+        Err(err) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            err.to_string(),
+        )),
+    }
+}
+
+fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
+    if !expert {
+        return HwiGetXpubResponse {
+            xpub: xpub.to_string(),
+            testnet: None,
+            private: None,
+            depth: None,
+            parent_fingerprint: None,
+            child_num: None,
+            chaincode: None,
+            pubkey: None,
+        };
+    }
+
+    HwiGetXpubResponse {
+        xpub: xpub.to_string(),
+        testnet: Some(xpub.network == NetworkKind::Test),
+        private: Some(false),
+        depth: Some(xpub.depth),
+        parent_fingerprint: Some(xpub.parent_fingerprint),
+        child_num: Some(u32::from(xpub.child_number)),
+        chaincode: Some(hex::encode(xpub.chain_code)),
+        pubkey: Some(hex::encode(xpub.public_key.serialize())),
+    }
+}
+
 fn label_for(device_type: DeviceType) -> Option<Option<String>> {
     match device_type {
         DeviceType::BitBox02 | DeviceType::Coldcard | DeviceType::Ledger => Some(None),
@@ -290,9 +385,9 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         args.debug,
         args.stdin,
         args.interactive,
-        args.expert,
         args.stdinpass,
     );
+    let expert = args.expert;
     let device_type = args
         .device_type
         .as_deref()
@@ -301,6 +396,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
     let network = parse_chain(&args.chain)?;
     let command = match args.command {
         HwiCliCommand::Enumerate => HwiCommand::Enumerate,
+        HwiCliCommand::Getxpub { path } => HwiCommand::GetXpub { path, expert },
         HwiCliCommand::External(argv) => {
             let command = argv
                 .first()
@@ -421,6 +517,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_getxpub_with_expert_flag() {
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--expert",
+            "--device-type",
+            "ledger",
+            "--emulators",
+            "getxpub",
+            "m/44h/1h/0h/0/3",
+        ])
+        .expect("request");
+
+        assert_eq!(request.selector.network, Network::Testnet);
+        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert!(request.selector.include_emulators);
+        assert_eq!(
+            request.command,
+            HwiCommand::GetXpub {
+                path: DerivationPath::from_str("m/44h/1h/0h/0/3").unwrap(),
+                expert: true,
+            }
+        );
+    }
+
+    #[test]
     fn accepts_python_hwi_version_flag() {
         let error = HwiCli::try_parse_from(["hwi", "--version"]).expect_err("version exits");
 
@@ -446,12 +569,11 @@ mod tests {
 
     #[test]
     fn captures_unsupported_commands() {
-        let request =
-            parse_args(["hwi", "getxpub", "m/84h/0h/0h"]).expect("unsupported command request");
+        let request = parse_args(["hwi", "getmasterxpub"]).expect("unsupported command request");
 
         assert_eq!(
             request.command,
-            HwiCommand::Unsupported("getxpub".to_owned())
+            HwiCommand::Unsupported("getmasterxpub".to_owned())
         );
     }
 
@@ -506,5 +628,44 @@ mod tests {
 
         assert!(json.get("label").is_none());
         assert!(json.get("fingerprint").is_none());
+    }
+
+    #[test]
+    fn getxpub_non_expert_serializes_only_xpub() {
+        let xpub = sample_xpub();
+
+        let json = serde_json::to_value(HwiResponse::GetXpub(get_xpub_response(xpub, false)))
+            .expect("json");
+
+        assert_eq!(json, serde_json::json!({ "xpub": xpub.to_string() }));
+    }
+
+    #[test]
+    fn getxpub_expert_serializes_python_hwi_field_names() {
+        let xpub = sample_xpub();
+
+        let json =
+            serde_json::to_value(HwiResponse::GetXpub(get_xpub_response(xpub, true))).unwrap();
+        let object = json.as_object().expect("expert getxpub object");
+
+        assert_eq!(object.len(), 8);
+        assert_eq!(json["xpub"], xpub.to_string());
+        assert_eq!(json["testnet"], true);
+        assert_eq!(json["private"], false);
+        assert_eq!(json["depth"], xpub.depth);
+        assert_eq!(
+            json["parent_fingerprint"],
+            xpub.parent_fingerprint.to_string()
+        );
+        assert_eq!(json["child_num"], u32::from(xpub.child_number));
+        assert_eq!(json["chaincode"], hex::encode(xpub.chain_code));
+        assert_eq!(json["pubkey"], hex::encode(xpub.public_key.serialize()));
+        assert!(!object.contains_key("child_index"));
+        assert!(!object.contains_key("chain_code"));
+    }
+
+    fn sample_xpub() -> Xpub {
+        Xpub::from_str("tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT")
+            .expect("sample xpub")
     }
 }
