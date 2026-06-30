@@ -20,7 +20,7 @@ use bitcoin::{
     },
     psbt::Input,
 };
-use clap::{Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use miniscript::{
     Descriptor, DescriptorPublicKey,
     descriptor::{DescriptorType, WalletPolicy, checksum},
@@ -88,6 +88,24 @@ pub enum HwiCliCommand {
         #[arg(long, default_value_t = 0)]
         account: u32,
     },
+    Getkeypool {
+        start: u32,
+        end: u32,
+        #[arg(long, action = ArgAction::SetTrue, conflicts_with = "nokeypool")]
+        keypool: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        nokeypool: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        internal: bool,
+        #[arg(long = "addr-type", value_enum, conflicts_with = "all")]
+        addr_type: Option<HwiAddressType>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        all: bool,
+        #[arg(long, default_value_t = 0)]
+        account: u32,
+        #[arg(long)]
+        path: Option<String>,
+    },
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -118,6 +136,16 @@ pub enum HwiCommand {
     },
     GetDescriptors {
         account: u32,
+    },
+    GetKeypool {
+        start: u32,
+        end: u32,
+        internal: bool,
+        keypool: bool,
+        account: u32,
+        addr_type: HwiAddressType,
+        all: bool,
+        path: Option<String>,
     },
     Unsupported(String),
 }
@@ -196,6 +224,7 @@ pub enum HwiResponse {
     Enumerate(Vec<HwiEnumeratedDevice>),
     GetXpub(HwiGetXpubResponse),
     GetDescriptors(HwiGetDescriptorsResponse),
+    GetKeypool(Vec<HwiGetKeypoolEntry>),
     SignTx(HwiSignTxResponse),
     SignMessage(HwiSignMessageResponse),
     Error(HwiError),
@@ -241,6 +270,17 @@ pub struct HwiGetDescriptorsResponse {
     pub internal: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct HwiGetKeypoolEntry {
+    pub desc: String,
+    pub range: [u32; 2],
+    pub timestamp: &'static str,
+    pub internal: bool,
+    pub keypool: bool,
+    pub active: bool,
+    pub watchonly: bool,
+}
+
 pub fn parse_args<I, T>(args: I) -> HwiResult<HwiRequest>
 where
     I: IntoIterator<Item = T>,
@@ -263,6 +303,31 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
         }
         HwiCommand::GetXpub { path, expert } => get_xpub(request.selector, path, expert).await,
         HwiCommand::GetDescriptors { account } => get_descriptors(request.selector, account).await,
+        HwiCommand::GetKeypool {
+            start,
+            end,
+            internal,
+            keypool,
+            account,
+            addr_type,
+            all,
+            path,
+        } => {
+            get_keypool(
+                request.selector,
+                HwiGetKeypoolRequest {
+                    start,
+                    end,
+                    internal,
+                    keypool,
+                    account,
+                    addr_type,
+                    all,
+                    path,
+                },
+            )
+            .await
+        }
         HwiCommand::Unsupported(command) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             format!("Unsupported HWI command: {command}"),
@@ -631,6 +696,134 @@ async fn get_descriptors(selector: DeviceSelector, account: u32) -> HwiResponse 
     HwiResponse::GetDescriptors(response)
 }
 
+struct HwiGetKeypoolRequest {
+    start: u32,
+    end: u32,
+    internal: bool,
+    keypool: bool,
+    account: u32,
+    addr_type: HwiAddressType,
+    all: bool,
+    path: Option<String>,
+}
+
+async fn get_keypool(selector: DeviceSelector, request: HwiGetKeypoolRequest) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+    if request.start > request.end {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "keypool start index must be less than or equal to end index",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    let fingerprint = match device.fingerprint().await {
+        Ok(fingerprint) => fingerprint,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+    let device_type = device.device_type();
+    let model = device.model().to_owned();
+    let network = manager.selector.network;
+    let addr_types = if request.all {
+        hwi_descriptor_addr_types(device_type, &model)
+    } else if request.addr_type == HwiAddressType::Tap && !hwi_can_sign_taproot(device_type, &model)
+    {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            "Device does not support Taproot",
+        ));
+    } else {
+        vec![request.addr_type]
+    };
+
+    let branches = if request.path.is_none() && !request.internal {
+        vec![false, true]
+    } else {
+        vec![request.internal]
+    };
+
+    let mut entries = Vec::new();
+    for addr_type in addr_types {
+        for internal in branches.iter().copied() {
+            let descriptor_type = descriptor_type_for(addr_type);
+            let options = match request.path.as_deref() {
+                Some(path) => match keypool_path_descriptor_options(
+                    fingerprint,
+                    path,
+                    internal,
+                    descriptor_type,
+                    network,
+                ) {
+                    Ok(options) => options,
+                    Err(error) => return HwiResponse::Error(error),
+                },
+                None => GetDescriptorOptions::with_account(
+                    fingerprint,
+                    request.account,
+                    internal,
+                    descriptor_type,
+                    network,
+                ),
+            };
+            let descriptor = match manager.get_descriptor(device.device(), options).await {
+                Ok(descriptor) => descriptor,
+                Err(err) => {
+                    return HwiResponse::Error(HwiError::new(
+                        HwiErrorCode::DeviceConnectionError,
+                        err.to_string(),
+                    ));
+                }
+            };
+            let desc = match hwi_descriptor_string(&descriptor) {
+                Ok(descriptor) => descriptor,
+                Err(err) => {
+                    return HwiResponse::Error(HwiError::new(
+                        HwiErrorCode::BadArgument,
+                        err.to_string(),
+                    ));
+                }
+            };
+            entries.push(HwiGetKeypoolEntry {
+                desc,
+                range: [request.start, request.end],
+                timestamp: "now",
+                internal,
+                keypool: request.keypool,
+                active: request.keypool,
+                watchonly: true,
+            });
+        }
+    }
+
+    HwiResponse::GetKeypool(entries)
+}
+
 async fn ledger_signing_context(
     device: &mut Device,
     psbt: &Psbt,
@@ -993,6 +1186,36 @@ fn hwi_descriptor_string(
     Ok(format!("{descriptor}#{}", checksum.checksum()))
 }
 
+fn keypool_path_descriptor_options(
+    master_fingerprint: Fingerprint,
+    path: &str,
+    internal: bool,
+    descriptor_type: DescriptorType,
+    network: Network,
+) -> Result<GetDescriptorOptions, HwiError> {
+    if !path.starts_with("m/") {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "Path must start with m/",
+        ));
+    }
+    let Some(path) = path.strip_suffix("/*") else {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "Path must end with /*",
+        ));
+    };
+    let path = DerivationPath::from_str(path)
+        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
+    Ok(GetDescriptorOptions::with_path(
+        master_fingerprint,
+        path,
+        internal,
+        descriptor_type,
+        network,
+    ))
+}
+
 fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
     if !expert {
         return HwiGetXpubResponse {
@@ -1082,6 +1305,26 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         HwiCliCommand::Signmessage { message, path } => HwiCommand::SignMessage { message, path },
         HwiCliCommand::Getxpub { path } => HwiCommand::GetXpub { path, expert },
         HwiCliCommand::Getdescriptors { account } => HwiCommand::GetDescriptors { account },
+        HwiCliCommand::Getkeypool {
+            start,
+            end,
+            keypool: _keypool,
+            nokeypool,
+            internal,
+            addr_type,
+            all,
+            account,
+            path,
+        } => HwiCommand::GetKeypool {
+            start,
+            end,
+            internal,
+            keypool: !nokeypool,
+            account,
+            addr_type: addr_type.unwrap_or(HwiAddressType::Wit),
+            all,
+            path,
+        },
         HwiCliCommand::External(argv) => {
             let command = argv
                 .first()
@@ -1349,6 +1592,107 @@ mod tests {
     }
 
     #[test]
+    fn parses_getkeypool_defaults() {
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "--emulators",
+            "getkeypool",
+            "0",
+            "10",
+        ])
+        .expect("request");
+
+        assert_eq!(request.selector.network, Network::Testnet);
+        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert!(request.selector.include_emulators);
+        assert_eq!(
+            request.command,
+            HwiCommand::GetKeypool {
+                start: 0,
+                end: 10,
+                internal: false,
+                keypool: true,
+                account: 0,
+                addr_type: HwiAddressType::Wit,
+                all: false,
+                path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_getkeypool_all_options() {
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "getkeypool",
+            "--nokeypool",
+            "--internal",
+            "--all",
+            "--account",
+            "2",
+            "--path",
+            "m/84h/1h/0h/1/*",
+            "5",
+            "8",
+        ])
+        .expect("request");
+
+        assert_eq!(
+            request.command,
+            HwiCommand::GetKeypool {
+                start: 5,
+                end: 8,
+                internal: true,
+                keypool: false,
+                account: 2,
+                addr_type: HwiAddressType::Wit,
+                all: true,
+                path: Some("m/84h/1h/0h/1/*".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_getkeypool_addr_type() {
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "getkeypool",
+            "--addr-type",
+            "sh_wit",
+            "--keypool",
+            "5",
+            "8",
+        ])
+        .expect("request");
+
+        assert_eq!(
+            request.command,
+            HwiCommand::GetKeypool {
+                start: 5,
+                end: 8,
+                internal: false,
+                keypool: true,
+                account: 0,
+                addr_type: HwiAddressType::ShWit,
+                all: false,
+                path: None,
+            }
+        );
+    }
+
+    #[test]
     fn accepts_python_hwi_version_flag() {
         let error = HwiCli::try_parse_from(["hwi", "--version"]).expect_err("version exits");
 
@@ -1470,6 +1814,35 @@ mod tests {
     }
 
     #[test]
+    fn getkeypool_serializes_importdescriptors_shape() {
+        let json = serde_json::to_value(HwiResponse::GetKeypool(vec![HwiGetKeypoolEntry {
+            desc: "wpkh(...)#keypool".to_owned(),
+            range: [0, 10],
+            timestamp: "now",
+            internal: false,
+            keypool: true,
+            active: true,
+            watchonly: true,
+        }]))
+        .expect("json");
+
+        assert_eq!(
+            json,
+            serde_json::json!([
+                {
+                    "desc": "wpkh(...)#keypool",
+                    "range": [0, 10],
+                    "timestamp": "now",
+                    "internal": false,
+                    "keypool": true,
+                    "active": true,
+                    "watchonly": true,
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn signmessage_normalizes_coldcard_header_for_python_hwi() {
         assert_eq!(python_hwi_message_header(DeviceType::Coldcard, 40), 32);
         assert_eq!(python_hwi_message_header(DeviceType::Ledger, 32), 32);
@@ -1488,6 +1861,56 @@ mod tests {
         assert!(descriptor.contains("/84h/1h/0h]"));
         assert!(!descriptor.contains('\''));
         checksum::verify_checksum(&descriptor).expect("valid checksum");
+    }
+
+    #[test]
+    fn getkeypool_path_accepts_hwi_ranged_path() {
+        let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
+
+        let options = keypool_path_descriptor_options(
+            fingerprint,
+            "m/84h/1h/0h/0/*",
+            false,
+            DescriptorType::Wpkh,
+            Network::Testnet,
+        )
+        .expect("keypool path options");
+
+        assert_eq!(options.master_fingerprint, fingerprint);
+    }
+
+    #[test]
+    fn getkeypool_path_rejects_missing_master_prefix() {
+        let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
+
+        let err = keypool_path_descriptor_options(
+            fingerprint,
+            "84h/1h/0h/0/*",
+            false,
+            DescriptorType::Wpkh,
+            Network::Testnet,
+        )
+        .expect_err("missing master prefix");
+
+        assert_eq!(err.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(err.error, "Path must start with m/");
+    }
+
+    #[test]
+    fn getkeypool_path_rejects_missing_wildcard() {
+        let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
+
+        let err = keypool_path_descriptor_options(
+            fingerprint,
+            "m/84h/1h/0h/0",
+            false,
+            DescriptorType::Wpkh,
+            Network::Testnet,
+        )
+        .expect_err("missing wildcard");
+
+        assert_eq!(err.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(err.error, "Path must end with /*");
     }
 
     #[test]

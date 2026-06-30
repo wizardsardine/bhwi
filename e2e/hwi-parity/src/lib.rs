@@ -272,6 +272,33 @@ mod tests {
     }
 
     #[test]
+    fn candidate_getkeypool_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        for case in getkeypool_arg_cases(&device_type) {
+            match case.expect {
+                ExpectedResult::Success => assert_getkeypool_parity(case.args.clone())
+                    .with_context(|| {
+                        format!("getkeypool parity failed for args: {:?}", case.args)
+                    })?,
+                ExpectedResult::Error => {
+                    assert_error_json_parity(case.args.clone()).with_context(|| {
+                        format!("getkeypool error parity failed for args: {:?}", case.args)
+                    })?
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn candidate_signtx_matches_reference() -> Result<()> {
         if env::var("HWI_BIN").is_err() {
             return Ok(());
@@ -409,6 +436,47 @@ mod tests {
         Ok(())
     }
 
+    fn assert_getkeypool_parity(args: Vec<String>) -> Result<()> {
+        let reference = HwiBinary::reference()?.run(args.clone())?;
+        assert_success("reference", &reference)?;
+        assert_getkeypool_shape("reference", &reference.json)?;
+
+        let candidate = HwiBinary::candidate()?.run(args)?;
+        assert_success("candidate", &candidate)?;
+        assert_getkeypool_shape("candidate", &candidate.json)?;
+
+        if reference.json != candidate.json {
+            bail!(
+                "HWI getkeypool JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(&reference.json)?,
+                serde_json::to_string_pretty(&candidate.json)?
+            );
+        }
+
+        Ok(())
+    }
+
+    fn assert_error_json_parity(args: Vec<String>) -> Result<()> {
+        let reference = HwiBinary::reference()?.run(args.clone())?;
+        let candidate = HwiBinary::candidate()?.run(args)?;
+
+        // Python HWI 3.2.0 sometimes exits 0 for JSON error responses; keep
+        // command parity focused on the HWI JSON contract until the dedicated
+        // error-model work standardizes process status.
+        assert_error_shape("reference", &reference.json)?;
+        assert_error_shape("candidate", &candidate.json)?;
+
+        if reference.json != candidate.json {
+            bail!(
+                "HWI error JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(&reference.json)?,
+                serde_json::to_string_pretty(&candidate.json)?
+            );
+        }
+
+        Ok(())
+    }
+
     fn assert_signmessage_parity(args: Vec<String>) -> Result<()> {
         prepare_signmessage_run(&args)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
@@ -533,6 +601,78 @@ mod tests {
         Ok(())
     }
 
+    fn assert_getkeypool_shape(label: &str, json: &Value) -> Result<()> {
+        let Some(entries) = json.as_array() else {
+            bail!(
+                "{label} hwi getkeypool output was not an array:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        };
+        if entries.is_empty() {
+            bail!(
+                "{label} hwi getkeypool output was empty:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
+
+        for entry in entries {
+            assert_exact_keys(
+                label,
+                "getkeypool entry",
+                entry,
+                &[
+                    "desc",
+                    "range",
+                    "timestamp",
+                    "internal",
+                    "keypool",
+                    "active",
+                    "watchonly",
+                ],
+            )?;
+            let descriptor = assert_string_json_field(label, entry, "desc")?;
+            if !descriptor.contains('#') || !descriptor.contains("/*") {
+                bail!(
+                    "{label} hwi getkeypool descriptor was not ranged with checksum: {descriptor}"
+                );
+            }
+            if descriptor.contains('\'') {
+                bail!(
+                    "{label} hwi getkeypool descriptor used apostrophe hardening instead of h: {descriptor}"
+                );
+            }
+            assert_range_field(label, entry)?;
+            if entry.get("timestamp").and_then(Value::as_str) != Some("now") {
+                bail!(
+                    "{label} hwi getkeypool timestamp was not \"now\":\n{}",
+                    serde_json::to_string_pretty(entry)?
+                );
+            }
+            for field in ["internal", "keypool", "active", "watchonly"] {
+                if entry.get(field).and_then(Value::as_bool).is_none() {
+                    bail!(
+                        "{label} hwi getkeypool field {field:?} was not a bool:\n{}",
+                        serde_json::to_string_pretty(entry)?
+                    );
+                }
+            }
+            if entry.get("active") != entry.get("keypool") {
+                bail!(
+                    "{label} hwi getkeypool active did not match keypool:\n{}",
+                    serde_json::to_string_pretty(entry)?
+                );
+            }
+            if entry.get("watchonly").and_then(Value::as_bool) != Some(true) {
+                bail!(
+                    "{label} hwi getkeypool watchonly was not true:\n{}",
+                    serde_json::to_string_pretty(entry)?
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     fn assert_signtx_shape(label: &str, json: &Value) -> Result<()> {
         assert_exact_keys(label, "signtx", json, &["psbt", "signed"])?;
         assert_string_json_field(label, json, "psbt")?;
@@ -644,6 +784,34 @@ mod tests {
         };
         assert_exact_keys(label, command, json, &["xpub"])?;
         assert_string_json_field(label, json, "xpub")?;
+        Ok(())
+    }
+
+    fn assert_error_shape(label: &str, json: &Value) -> Result<()> {
+        assert_exact_keys(label, "error", json, &["error", "code"])?;
+        assert_string_json_field(label, json, "error")?;
+        if json.get("code").and_then(Value::as_i64).is_none() {
+            bail!(
+                "{label} hwi error field \"code\" was not an integer:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_range_field(label: &str, json: &Value) -> Result<()> {
+        let Some(range) = json.get("range").and_then(Value::as_array) else {
+            bail!(
+                "{label} hwi field \"range\" was not an array:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        };
+        if range.len() != 2 || range.iter().any(|value| value.as_u64().is_none()) {
+            bail!(
+                "{label} hwi field \"range\" was not two unsigned integers:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
         Ok(())
     }
 
@@ -1427,6 +1595,105 @@ mod tests {
                 "1",
             ]),
         ]
+    }
+
+    enum ExpectedResult {
+        Success,
+        Error,
+    }
+
+    struct CommandCase {
+        args: Vec<String>,
+        expect: ExpectedResult,
+    }
+
+    fn getkeypool_arg_cases(device_type: &str) -> Vec<CommandCase> {
+        let mut cases = vec![
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getkeypool",
+                    "0",
+                    "2",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getkeypool",
+                    "--internal",
+                    "--nokeypool",
+                    "--addr-type",
+                    "sh_wit",
+                    "--account",
+                    "1",
+                    "5",
+                    "7",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getkeypool",
+                    "--keypool",
+                    "--path",
+                    "m/84h/1h/0h/0/*",
+                    "0",
+                    "1",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getkeypool",
+                    "--all",
+                    "0",
+                    "1",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+        ];
+
+        cases.push(CommandCase {
+            args: args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getkeypool",
+                "--addr-type",
+                "tap",
+                "0",
+                "1",
+            ]),
+            expect: if device_type == "ledger" {
+                ExpectedResult::Success
+            } else {
+                ExpectedResult::Error
+            },
+        });
+
+        cases
     }
 
     fn enumerate_python_hwi_arg_cases(
