@@ -5,14 +5,26 @@ use std::{
     str::FromStr,
 };
 
+use bhwi::{
+    bitcoin::psbt::Psbt,
+    ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
+};
+use bhwi_async::DeviceContext;
 use bitcoin::{
-    Network, NetworkKind,
-    bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
+    Network, NetworkKind, PublicKey, ScriptBuf,
+    base64::prelude::{BASE64_STANDARD, Engine as _},
+    bip32::{ChildNumber, DerivationPath, Fingerprint, KeySource, Xpub},
+    blockdata::{
+        opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_1, OP_PUSHNUM_16},
+        script::{Instruction, PushBytes},
+    },
+    psbt::Input,
 };
 use clap::{Parser, Subcommand, ValueEnum, error::ErrorKind};
+use miniscript::descriptor::WalletPolicy;
 use serde::{Serialize, Serializer};
 
-use crate::{DeviceManager, DeviceType, config::DeviceSelector};
+use crate::{Device, DeviceManager, DeviceType, config::DeviceSelector};
 
 type HwiResult<T> = std::result::Result<T, HwiError>;
 
@@ -54,6 +66,14 @@ pub enum HwiCliCommand {
         #[arg(long, default_value_t = 0)]
         account: u32,
     },
+    Signtx {
+        psbt: String,
+    },
+    Signmessage {
+        message: String,
+        #[arg(value_parser = clap::value_parser!(DerivationPath))]
+        path: DerivationPath,
+    },
     Getxpub {
         #[arg(value_parser = clap::value_parser!(DerivationPath))]
         path: DerivationPath,
@@ -74,6 +94,13 @@ pub enum HwiCommand {
     GetMasterXpub {
         addr_type: HwiAddressType,
         account: u32,
+    },
+    SignTx {
+        psbt: String,
+    },
+    SignMessage {
+        message: String,
+        path: DerivationPath,
     },
     GetXpub {
         path: DerivationPath,
@@ -155,7 +182,20 @@ pub struct HwiEnumeratedDevice {
 pub enum HwiResponse {
     Enumerate(Vec<HwiEnumeratedDevice>),
     GetXpub(HwiGetXpubResponse),
+    SignTx(HwiSignTxResponse),
+    SignMessage(HwiSignMessageResponse),
     Error(HwiError),
+}
+
+#[derive(Debug, Serialize)]
+pub struct HwiSignTxResponse {
+    pub psbt: String,
+    pub signed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HwiSignMessageResponse {
+    pub signature: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,6 +236,10 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
         HwiCommand::Enumerate => enumerate(request.selector).await,
         HwiCommand::GetMasterXpub { addr_type, account } => {
             get_master_xpub(request.selector, addr_type, account).await
+        }
+        HwiCommand::SignTx { psbt } => sign_tx(request.selector, psbt).await,
+        HwiCommand::SignMessage { message, path } => {
+            sign_message(request.selector, message, path).await
         }
         HwiCommand::GetXpub { path, expert } => get_xpub(request.selector, path, expert).await,
         HwiCommand::Unsupported(command) => HwiResponse::Error(HwiError::new(
@@ -322,6 +366,135 @@ async fn get_master_xpub(
     get_xpub(selector, path, false).await
 }
 
+async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let parsed = match Psbt::from_str(psbt.trim()) {
+        Ok(psbt) => psbt,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
+        }
+    };
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    let original = parsed.to_string();
+    let context = if device.device_type() == DeviceType::Ledger {
+        match ledger_signing_context(&mut device, &parsed).await {
+            Ok(Some(context)) => Some(context),
+            Ok(None) => {
+                return HwiResponse::SignTx(HwiSignTxResponse {
+                    psbt: original,
+                    signed: false,
+                });
+            }
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err));
+            }
+        }
+    } else {
+        None
+    };
+
+    match device.device().sign_tx(parsed, context).await {
+        Ok(signed_psbt) => {
+            let signed = signed_psbt.to_string();
+            HwiResponse::SignTx(HwiSignTxResponse {
+                signed: signed != original,
+                psbt: signed,
+            })
+        }
+        Err(err) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            err.to_string(),
+        )),
+    }
+}
+
+async fn sign_message(
+    selector: DeviceSelector,
+    message: String,
+    path: DerivationPath,
+) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    let device_type = device.device_type();
+    match device.device().sign_message(message.as_bytes(), path).await {
+        Ok((header, signature)) => HwiResponse::SignMessage(HwiSignMessageResponse {
+            signature: message_signature_base64(
+                python_hwi_message_header(device_type, header),
+                &signature,
+            ),
+        }),
+        Err(err) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            err.to_string(),
+        )),
+    }
+}
+
+fn python_hwi_message_header(device_type: DeviceType, header: u8) -> u8 {
+    if device_type == DeviceType::Coldcard && header >= 8 {
+        // Python HWI normalizes Coldcard's compact-signature header by
+        // clearing the device-specific compressed/pubkey offset.
+        header - 8
+    } else {
+        header
+    }
+}
+
+fn message_signature_base64(
+    header: u8,
+    signature: &bitcoin::secp256k1::ecdsa::Signature,
+) -> String {
+    let mut payload = [0u8; 65];
+    payload[0] = header;
+    payload[1..].copy_from_slice(&signature.serialize_compact());
+    BASE64_STANDARD.encode(payload)
+}
+
 async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) -> HwiResponse {
     if selector.device_type.is_none() && selector.fingerprint.is_none() {
         return HwiResponse::Error(HwiError::new(
@@ -354,6 +527,303 @@ async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) 
             err.to_string(),
         )),
     }
+}
+
+async fn ledger_signing_context(
+    device: &mut Device,
+    psbt: &Psbt,
+) -> Result<Option<DeviceContext>, String> {
+    let fingerprint = device.fingerprint().await.map_err(|err| err.to_string())?;
+    if let Some(context) = ledger_singlesig_context(device, psbt, fingerprint).await? {
+        return Ok(Some(context));
+    }
+    if let Some(context) = ledger_multisig_context(device, psbt, fingerprint).await? {
+        return Ok(Some(context));
+    }
+    Ok(None)
+}
+
+async fn ledger_singlesig_context(
+    device: &mut Device,
+    psbt: &Psbt,
+    fingerprint: Fingerprint,
+) -> Result<Option<DeviceContext>, String> {
+    let Some(path) = ledger_singlesig_account_path(psbt, fingerprint)? else {
+        return Ok(None);
+    };
+    let xpub = device
+        .device()
+        .get_extended_pubkey(path.clone(), false)
+        .await
+        .map_err(|err| err.to_string())?;
+    let policy = singlesig_wallet_policy(&extend_account_path_for_policy(&path), fingerprint, xpub)
+        .map_err(|err| err.to_string())?;
+    Ok(Some(DeviceContext::Ledger {
+        wallet_policy: LedgerWalletPolicy::new(String::new(), Version::V2, policy),
+        wallet_hmac: None,
+    }))
+}
+
+async fn ledger_multisig_context(
+    device: &mut Device,
+    psbt: &Psbt,
+    fingerprint: Fingerprint,
+) -> Result<Option<DeviceContext>, String> {
+    let Some(policy) = ledger_multisig_policy(psbt, fingerprint)? else {
+        return Ok(None);
+    };
+    let name = ledger_multisig_wallet_name(&policy);
+    let hmac = device
+        .device()
+        .register_wallet(&name, &policy)
+        .await
+        .map_err(|err| err.to_string())?;
+    let wallet_policy = WalletPolicy::from_str(&policy).map_err(|err| err.to_string())?;
+    Ok(Some(DeviceContext::Ledger {
+        wallet_policy: LedgerWalletPolicy::new(name, Version::V2, wallet_policy),
+        wallet_hmac: Some(hmac),
+    }))
+}
+
+fn ledger_singlesig_account_path(
+    psbt: &Psbt,
+    fingerprint: Fingerprint,
+) -> Result<Option<DerivationPath>, String> {
+    let mut account_path = None;
+    for input in &psbt.inputs {
+        if multisig_script(input).is_some() {
+            continue;
+        }
+        for (origin_fingerprint, path) in input.bip32_derivation.values() {
+            if *origin_fingerprint != fingerprint || !is_standard_singlesig_path(path) {
+                continue;
+            }
+            let candidate = account_path_from_full_path(path)?;
+            match &account_path {
+                Some(existing) if existing != &candidate => {
+                    return Err("Conflicting Ledger single-sig account paths in PSBT".to_owned());
+                }
+                Some(_) => {}
+                None => account_path = Some(candidate),
+            }
+        }
+    }
+    Ok(account_path)
+}
+
+fn ledger_multisig_policy(psbt: &Psbt, fingerprint: Fingerprint) -> Result<Option<String>, String> {
+    let mut policy = None;
+    for input in &psbt.inputs {
+        let Some((address_type, script)) = multisig_script(input) else {
+            continue;
+        };
+        let Some((threshold, pubkeys)) = parse_multisig_script(&script)? else {
+            continue;
+        };
+        if !pubkeys.iter().any(|pubkey| {
+            input
+                .bip32_derivation
+                .get(&pubkey.inner)
+                .is_some_and(|(key_fingerprint, _)| *key_fingerprint == fingerprint)
+        }) {
+            continue;
+        }
+
+        let mut keys = Vec::with_capacity(pubkeys.len());
+        let mut complete = true;
+        for pubkey in pubkeys {
+            let Some(key_source) = input.bip32_derivation.get(&pubkey.inner) else {
+                complete = false;
+                break;
+            };
+            let Some(key) = global_xpub_key_expression(psbt, key_source) else {
+                complete = false;
+                break;
+            };
+            keys.push(format!("{key}/<0;1>/*"));
+        }
+        if !complete {
+            continue;
+        }
+
+        let candidate = multisig_policy_descriptor(address_type, threshold, &keys);
+        match &policy {
+            Some(existing) if existing != &candidate => {
+                return Err("Conflicting Ledger multisig policies in PSBT".to_owned());
+            }
+            Some(_) => {}
+            None => policy = Some(candidate),
+        }
+    }
+    Ok(policy)
+}
+
+fn account_path_from_full_path(path: &DerivationPath) -> Result<DerivationPath, String> {
+    let children = path.as_ref();
+    if children.len() < 3 {
+        return Err("Derivation path is too short for Ledger account policy".to_owned());
+    }
+    Ok(DerivationPath::from(children[..3].to_vec()))
+}
+
+fn extend_account_path_for_policy(path: &DerivationPath) -> DerivationPath {
+    let mut children = path.as_ref().to_vec();
+    children.push(ChildNumber::from_normal_idx(0).expect("valid receive branch"));
+    children.push(ChildNumber::from_normal_idx(0).expect("valid address index"));
+    DerivationPath::from(children)
+}
+
+fn is_standard_singlesig_path(path: &DerivationPath) -> bool {
+    let children = path.as_ref();
+    if children.len() < 5 {
+        return false;
+    }
+    matches!(
+        children[0],
+        child if child == hardened(44)
+            || child == hardened(49)
+            || child == hardened(84)
+            || child == hardened(86)
+    ) && children[1].is_hardened()
+        && children[2].is_hardened()
+        && !children[3].is_hardened()
+        && !children[4].is_hardened()
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum LedgerMultisigAddressType {
+    Legacy,
+    ShWit,
+    Wit,
+}
+
+fn multisig_script(input: &Input) -> Option<(LedgerMultisigAddressType, ScriptBuf)> {
+    if let Some(witness_script) = &input.witness_script {
+        let address_type = if input.redeem_script.as_ref().is_some_and(|s| s.is_p2wsh()) {
+            LedgerMultisigAddressType::ShWit
+        } else {
+            LedgerMultisigAddressType::Wit
+        };
+        return Some((address_type, witness_script.clone()));
+    }
+    input
+        .redeem_script
+        .as_ref()
+        .map(|script| (LedgerMultisigAddressType::Legacy, script.clone()))
+}
+
+fn parse_multisig_script(script: &ScriptBuf) -> Result<Option<(usize, Vec<PublicKey>)>, String> {
+    let mut instructions = script.instructions();
+    let Some(first) = instructions.next() else {
+        return Ok(None);
+    };
+    let threshold = match first.map_err(|err| err.to_string())? {
+        Instruction::Op(op) => pushnum(op).filter(|n| *n <= 15),
+        Instruction::PushBytes(_) => None,
+    };
+    let Some(threshold) = threshold else {
+        return Ok(None);
+    };
+
+    let mut pubkeys = Vec::new();
+    let signer_count = loop {
+        let Some(instruction) = instructions.next() else {
+            return Ok(None);
+        };
+        match instruction.map_err(|err| err.to_string())? {
+            Instruction::PushBytes(bytes) if bytes.len() == 33 => {
+                let public_key = PublicKey::from_slice(push_bytes_as_bytes(bytes))
+                    .map_err(|err| err.to_string())?;
+                pubkeys.push(public_key);
+            }
+            Instruction::Op(op) => {
+                break pushnum(op);
+            }
+            Instruction::PushBytes(_) => return Ok(None),
+        }
+    };
+
+    let Some(signer_count) = signer_count else {
+        return Ok(None);
+    };
+    let Some(last) = instructions.next() else {
+        return Ok(None);
+    };
+    if last.map_err(|err| err.to_string())? != Instruction::Op(OP_CHECKMULTISIG)
+        || instructions.next().is_some()
+        || signer_count != pubkeys.len()
+        || threshold == 0
+        || threshold > signer_count
+    {
+        return Ok(None);
+    }
+    Ok(Some((threshold, pubkeys)))
+}
+
+fn global_xpub_key_expression(psbt: &Psbt, key_source: &KeySource) -> Option<String> {
+    let (fingerprint, key_path) = key_source;
+    psbt.xpub
+        .iter()
+        .find(|(_, (xpub_fingerprint, xpub_path))| {
+            xpub_fingerprint == fingerprint && path_starts_with(key_path, xpub_path)
+        })
+        .map(|(xpub, (_, xpub_path))| {
+            let origin = xpub_path.to_string();
+            let origin = origin.trim_start_matches('m').trim_start_matches('/');
+            if origin.is_empty() {
+                format!("[{fingerprint}]{xpub}")
+            } else {
+                format!("[{fingerprint}/{origin}]{xpub}")
+            }
+        })
+}
+
+fn path_starts_with(path: &DerivationPath, prefix: &DerivationPath) -> bool {
+    path.as_ref().starts_with(prefix.as_ref())
+}
+
+fn multisig_policy_descriptor(
+    address_type: LedgerMultisigAddressType,
+    threshold: usize,
+    keys: &[String],
+) -> String {
+    let body = format!("sortedmulti({threshold},{})", keys.join(","));
+    match address_type {
+        LedgerMultisigAddressType::Legacy => format!("sh({body})"),
+        LedgerMultisigAddressType::ShWit => format!("sh(wsh({body}))"),
+        LedgerMultisigAddressType::Wit => format!("wsh({body})"),
+    }
+}
+
+fn ledger_multisig_wallet_name(policy: &str) -> String {
+    let threshold = policy
+        .split_once("sortedmulti(")
+        .and_then(|(_, rest)| rest.split_once(','))
+        .and_then(|(threshold, _)| threshold.parse::<usize>().ok())
+        .unwrap_or(0);
+    let signers = policy
+        .matches("/**")
+        .count()
+        .max(policy.matches("/<0;1>/*").count());
+    format!("{threshold} of {signers} Multisig")
+}
+
+fn pushnum(op: bitcoin::blockdata::opcodes::Opcode) -> Option<usize> {
+    if op == OP_PUSHNUM_1 {
+        return Some(1);
+    }
+    if op.to_u8() >= OP_PUSHNUM_1.to_u8() && op.to_u8() <= OP_PUSHNUM_16.to_u8() {
+        return Some((op.to_u8() - OP_PUSHNUM_1.to_u8() + 1) as usize);
+    }
+    None
+}
+
+fn push_bytes_as_bytes(bytes: &PushBytes) -> &[u8] {
+    bytes.as_bytes()
+}
+
+fn hardened(index: u32) -> ChildNumber {
+    ChildNumber::from_hardened_idx(index).expect("valid hardened child")
 }
 
 fn master_xpub_path(
@@ -468,6 +938,8 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         HwiCliCommand::Getmasterxpub { addr_type, account } => {
             HwiCommand::GetMasterXpub { addr_type, account }
         }
+        HwiCliCommand::Signtx { psbt } => HwiCommand::SignTx { psbt },
+        HwiCliCommand::Signmessage { message, path } => HwiCommand::SignMessage { message, path },
         HwiCliCommand::Getxpub { path } => HwiCommand::GetXpub { path, expert },
         HwiCliCommand::External(argv) => {
             let command = argv
@@ -517,6 +989,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::{
+        Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness,
+        absolute::LockTime,
+        blockdata::{opcodes::all::OP_CHECKMULTISIG, script::Builder},
+        secp256k1::Secp256k1,
+        transaction::Version as TxVersion,
+    };
 
     #[test]
     fn parses_enumerate_selector() {
@@ -661,6 +1140,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_signtx_psbt_argument() {
+        let psbt = "cHNidP8BAHECAAAAAf//////////////////////////////////////////AAAAAAD/////AQAAAAAAAAAAAFYAAAAAAAABAR8AAAAAAAAAAFYA";
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "signtx",
+            psbt,
+        ])
+        .expect("request");
+
+        assert_eq!(request.selector.network, Network::Testnet);
+        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(
+            request.command,
+            HwiCommand::SignTx {
+                psbt: psbt.to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_signmessage_arguments() {
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "signmessage",
+            "hello",
+            "m/44'/1'/0'/0",
+        ])
+        .expect("request");
+
+        assert_eq!(request.selector.network, Network::Testnet);
+        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(
+            request.command,
+            HwiCommand::SignMessage {
+                message: "hello".to_owned(),
+                path: DerivationPath::from_str("m/44'/1'/0'/0").unwrap(),
+            }
+        );
+    }
+
+    #[test]
     fn accepts_python_hwi_version_flag() {
         let error = HwiCli::try_parse_from(["hwi", "--version"]).expect_err("version exits");
 
@@ -686,12 +1214,9 @@ mod tests {
 
     #[test]
     fn captures_unsupported_commands() {
-        let request = parse_args(["hwi", "signmessage"]).expect("unsupported command request");
+        let request = parse_args(["hwi", "setup"]).expect("unsupported command request");
 
-        assert_eq!(
-            request.command,
-            HwiCommand::Unsupported("signmessage".to_owned())
-        );
+        assert_eq!(request.command, HwiCommand::Unsupported("setup".to_owned()));
     }
 
     #[test]
@@ -758,6 +1283,23 @@ mod tests {
     }
 
     #[test]
+    fn signmessage_serializes_only_signature() {
+        let json = serde_json::to_value(HwiResponse::SignMessage(HwiSignMessageResponse {
+            signature: "base64-signature".to_owned(),
+        }))
+        .expect("json");
+
+        assert_eq!(json, serde_json::json!({ "signature": "base64-signature" }));
+    }
+
+    #[test]
+    fn signmessage_normalizes_coldcard_header_for_python_hwi() {
+        assert_eq!(python_hwi_message_header(DeviceType::Coldcard, 40), 32);
+        assert_eq!(python_hwi_message_header(DeviceType::Ledger, 32), 32);
+        assert_eq!(python_hwi_message_header(DeviceType::Jade, 31), 31);
+    }
+
+    #[test]
     fn getxpub_expert_serializes_python_hwi_field_names() {
         let xpub = sample_xpub();
 
@@ -817,8 +1359,183 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ledger_singlesig_account_path_accepts_standard_bip84() {
+        let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
+        let path = DerivationPath::from_str("m/84'/1'/0'/0/0").unwrap();
+        let psbt = psbt_with_input(Input {
+            bip32_derivation: [(sample_child_pubkey(0).inner, (fingerprint, path))].into(),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            ledger_singlesig_account_path(&psbt, fingerprint)
+                .unwrap()
+                .unwrap()
+                .to_string(),
+            "84'/1'/0'"
+        );
+    }
+
+    #[test]
+    fn ledger_singlesig_account_path_rejects_conflicting_accounts() {
+        let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
+        let psbt = psbt_with_inputs(vec![
+            Input {
+                bip32_derivation: [(
+                    sample_child_pubkey(0).inner,
+                    (
+                        fingerprint,
+                        DerivationPath::from_str("m/84'/1'/0'/0/0").unwrap(),
+                    ),
+                )]
+                .into(),
+                ..Default::default()
+            },
+            Input {
+                bip32_derivation: [(
+                    sample_child_pubkey(1).inner,
+                    (
+                        fingerprint,
+                        DerivationPath::from_str("m/84'/1'/1'/0/0").unwrap(),
+                    ),
+                )]
+                .into(),
+                ..Default::default()
+            },
+        ]);
+
+        let err = ledger_singlesig_account_path(&psbt, fingerprint).expect_err("conflict");
+        assert!(err.contains("Conflicting Ledger single-sig account paths"));
+    }
+
+    #[test]
+    fn ledger_multisig_policy_reconstructs_hwi_like_wsh_sortedmulti() {
+        let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
+        let account_path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();
+        let xpub = sample_xpub();
+        let pubkey_a = sample_child_pubkey(0);
+        let pubkey_b = sample_child_pubkey(1);
+        let mut psbt = psbt_with_input(Input {
+            witness_script: Some(multisig_script_buf(2, &[pubkey_a, pubkey_b])),
+            bip32_derivation: [
+                (
+                    pubkey_a.inner,
+                    (
+                        fingerprint,
+                        DerivationPath::from_str("m/48'/1'/0'/2'/0/0").unwrap(),
+                    ),
+                ),
+                (
+                    pubkey_b.inner,
+                    (
+                        fingerprint,
+                        DerivationPath::from_str("m/48'/1'/0'/2'/0/1").unwrap(),
+                    ),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        });
+        psbt.xpub.insert(xpub, (fingerprint, account_path));
+
+        let policy = ledger_multisig_policy(&psbt, fingerprint)
+            .unwrap()
+            .expect("policy");
+
+        assert!(policy.starts_with("wsh(sortedmulti(2,"));
+        assert_eq!(policy.matches("/<0;1>/*").count(), 2);
+        assert!(policy.contains("[f5acc2fd/48'/1'/0'/2']"));
+    }
+
+    #[test]
+    fn ledger_multisig_policy_skips_missing_global_xpub() {
+        let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
+        let pubkey_a = sample_child_pubkey(0);
+        let pubkey_b = sample_child_pubkey(1);
+        let psbt = psbt_with_input(Input {
+            witness_script: Some(multisig_script_buf(2, &[pubkey_a, pubkey_b])),
+            bip32_derivation: [
+                (
+                    pubkey_a.inner,
+                    (
+                        fingerprint,
+                        DerivationPath::from_str("m/48'/1'/0'/2'/0/0").unwrap(),
+                    ),
+                ),
+                (
+                    pubkey_b.inner,
+                    (
+                        fingerprint,
+                        DerivationPath::from_str("m/48'/1'/0'/2'/0/1").unwrap(),
+                    ),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        });
+
+        assert!(
+            ledger_multisig_policy(&psbt, fingerprint)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     fn sample_xpub() -> Xpub {
         Xpub::from_str("tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT")
             .expect("sample xpub")
+    }
+
+    fn sample_child_pubkey(index: u32) -> PublicKey {
+        let secp = Secp256k1::verification_only();
+        let xpub = sample_xpub()
+            .derive_pub(
+                &secp,
+                &[
+                    ChildNumber::from_normal_idx(0).unwrap(),
+                    ChildNumber::from_normal_idx(index).unwrap(),
+                ],
+            )
+            .expect("derive pubkey");
+        PublicKey::new(xpub.public_key)
+    }
+
+    fn multisig_script_buf(threshold: i64, pubkeys: &[PublicKey]) -> ScriptBuf {
+        let mut builder = Builder::new().push_int(threshold);
+        for pubkey in pubkeys {
+            builder = builder.push_slice(pubkey.inner.serialize());
+        }
+        builder
+            .push_int(pubkeys.len() as i64)
+            .push_opcode(OP_CHECKMULTISIG)
+            .into_script()
+    }
+
+    fn psbt_with_input(input: Input) -> Psbt {
+        psbt_with_inputs(vec![input])
+    }
+
+    fn psbt_with_inputs(inputs: Vec<Input>) -> Psbt {
+        let unsigned_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: inputs
+                .iter()
+                .map(|_| TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("psbt");
+        psbt.inputs = inputs;
+        psbt
     }
 }

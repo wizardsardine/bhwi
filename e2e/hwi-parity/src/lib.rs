@@ -146,6 +146,25 @@ fn assert_success(label: &str, output: &HwiOutput) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        os::unix::net::UnixDatagram,
+        str::FromStr,
+        time::Duration,
+    };
+
+    use bitcoin::{
+        Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
+        Witness,
+        absolute::LockTime,
+        address::Address,
+        base64::prelude::{BASE64_STANDARD, Engine as _},
+        bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub},
+        blockdata::{opcodes::all::OP_CHECKMULTISIG, script::Builder},
+        psbt::{Input, Output as PsbtOutput, Psbt},
+        secp256k1::Secp256k1,
+        transaction::Version as TxVersion,
+    };
 
     #[test]
     fn reference_binary_enumerate_is_json_or_reports_clear_error() -> Result<()> {
@@ -234,6 +253,51 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn candidate_signtx_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        let singlesig = build_singlesig_signtx_case(&device_type)?;
+        assert_signtx_parity(signtx_args(&device_type, &singlesig.psbt), &singlesig)
+            .with_context(|| format!("signtx singlesig parity failed for {device_type}"))?;
+
+        if device_type == "ledger" {
+            let multisig = build_ledger_multisig_signtx_case(&device_type)?;
+            assert_signtx_parity(signtx_args(&device_type, &multisig.psbt), &multisig)
+                .context("signtx Ledger multisig parity failed")?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_signmessage_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        for (message, path) in signmessage_arg_cases(&device_type)? {
+            assert_signmessage_parity(signmessage_args(&device_type, message, path))
+                .with_context(|| {
+                    format!(
+                        "signmessage parity failed for {device_type}, message {message:?}, path {path}"
+                    )
+                })?;
+        }
+
+        Ok(())
+    }
+
     fn assert_enumerate_parity(
         args: Vec<String>,
         expected_device_type: Option<&str>,
@@ -307,6 +371,50 @@ mod tests {
         Ok(())
     }
 
+    fn assert_signmessage_parity(args: Vec<String>) -> Result<()> {
+        prepare_signmessage_run(&args)?;
+        let reference = HwiBinary::reference()?.run(args.clone())?;
+        assert_success("reference", &reference)?;
+        assert_signmessage_shape("reference", &reference.json)?;
+
+        prepare_signmessage_run(&args)?;
+        let candidate = HwiBinary::candidate()?.run(args)?;
+        assert_success("candidate", &candidate)?;
+        assert_signmessage_shape("candidate", &candidate.json)?;
+
+        if reference.json != candidate.json {
+            bail!(
+                "HWI signmessage JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(&reference.json)?,
+                serde_json::to_string_pretty(&candidate.json)?
+            );
+        }
+
+        Ok(())
+    }
+
+    fn assert_signtx_parity(args: Vec<String>, case: &SigntxCase) -> Result<()> {
+        prepare_signtx_run(&args, case)?;
+        let reference = HwiBinary::reference()?.run(args.clone())?;
+        assert_success("reference", &reference)?;
+        assert_signtx_shape("reference", &reference.json)?;
+        let reference_psbt = assert_signed_psbt("reference", &reference.json, case)?;
+
+        prepare_signtx_run(&args, case)?;
+        let candidate = HwiBinary::candidate()?.run(args)?;
+        assert_success("candidate", &candidate)?;
+        assert_signtx_shape("candidate", &candidate.json)?;
+        let candidate_psbt = assert_signed_psbt("candidate", &candidate.json, case)?;
+
+        assert_eq!(reference.json["signed"], candidate.json["signed"]);
+        assert_eq!(
+            reference_psbt.unsigned_tx, candidate_psbt.unsigned_tx,
+            "reference and candidate signed different transactions"
+        );
+
+        Ok(())
+    }
+
     fn assert_enumerate_stdin_parity(device_type: &str) -> Result<()> {
         let stdin = format!("--emulators --device-type {device_type} enumerate\n\n");
         let reference = HwiBinary::reference()?.run_with_stdin(["--stdin"], &stdin)?;
@@ -332,6 +440,59 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn assert_signmessage_shape(label: &str, json: &Value) -> Result<()> {
+        assert_exact_keys(label, "signmessage", json, &["signature"])?;
+        let signature = assert_string_json_field(label, json, "signature")?;
+        let decoded = BASE64_STANDARD
+            .decode(signature)
+            .with_context(|| format!("{label} hwi signmessage signature was not base64"))?;
+        if decoded.len() != 65 {
+            bail!(
+                "{label} hwi signmessage signature was {} bytes, expected 65:\n{}",
+                decoded.len(),
+                serde_json::to_string_pretty(json)?
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_signtx_shape(label: &str, json: &Value) -> Result<()> {
+        assert_exact_keys(label, "signtx", json, &["psbt", "signed"])?;
+        assert_string_json_field(label, json, "psbt")?;
+        if json.get("signed").and_then(Value::as_bool).is_none() {
+            bail!(
+                "{label} hwi signtx field \"signed\" was not a bool:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_signed_psbt(label: &str, json: &Value, case: &SigntxCase) -> Result<Psbt> {
+        if json.get("signed").and_then(Value::as_bool) != Some(true) {
+            bail!(
+                "{label} hwi signtx did not report signed=true:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
+        let signed_psbt = assert_string_json_field(label, json, "psbt")?;
+        let signed_psbt = Psbt::from_str(signed_psbt)
+            .with_context(|| format!("{label} hwi signtx returned invalid PSBT"))?;
+        if signed_psbt.unsigned_tx != case.original.unsigned_tx {
+            bail!("{label} hwi signtx changed the unsigned transaction");
+        }
+        if signed_psbt.inputs.len() != case.original.inputs.len() {
+            bail!("{label} hwi signtx changed the input count");
+        }
+        if !signed_psbt.inputs[0]
+            .partial_sigs
+            .contains_key(&case.expected_pubkey)
+        {
+            bail!("{label} hwi signtx did not add the expected device signature");
+        }
+        Ok(signed_psbt)
     }
 
     fn assert_getxpub_shape(label: &str, json: &Value, expert: bool) -> Result<()> {
@@ -623,6 +784,432 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    struct SigntxCase {
+        psbt: String,
+        original: Psbt,
+        expected_pubkey: PublicKey,
+        ledger_registers_wallet: bool,
+    }
+
+    fn build_singlesig_signtx_case(device_type: &str) -> Result<SigntxCase> {
+        let fingerprint = reference_fingerprint(device_type)?;
+        let account_xpub = reference_xpub(device_type, "m/84'/1'/0'")?;
+        let secp = Secp256k1::verification_only();
+        let input_path = DerivationPath::from_str("m/84'/1'/0'/0/0")?;
+        let change_path = DerivationPath::from_str("m/84'/1'/0'/1/0")?;
+        let input_child_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(0)?,
+            ChildNumber::from_normal_idx(0)?,
+        ]);
+        let change_child_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(1)?,
+            ChildNumber::from_normal_idx(0)?,
+        ]);
+        let input_xpub = account_xpub.derive_pub(&secp, &input_child_path)?;
+        let change_xpub = account_xpub.derive_pub(&secp, &change_child_path)?;
+        let input_pubkey = PublicKey::new(input_xpub.public_key);
+        let change_pubkey = PublicKey::new(change_xpub.public_key);
+        let input_script = Address::p2wpkh(&input_xpub.to_pub(), Network::Testnet).script_pubkey();
+        let change_script =
+            Address::p2wpkh(&change_xpub.to_pub(), Network::Testnet).script_pubkey();
+        let mut psbt = spending_psbt(input_script.clone(), change_script);
+        psbt.inputs[0] = Input {
+            non_witness_utxo: Some(previous_tx(input_script.clone())),
+            witness_utxo: Some(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: input_script,
+            }),
+            bip32_derivation: [(input_pubkey.inner, (fingerprint, input_path))].into(),
+            ..Default::default()
+        };
+        psbt.outputs[0] = PsbtOutput {
+            bip32_derivation: [(change_pubkey.inner, (fingerprint, change_path))].into(),
+            ..Default::default()
+        };
+
+        Ok(SigntxCase {
+            psbt: psbt.to_string(),
+            original: psbt,
+            expected_pubkey: input_pubkey,
+            ledger_registers_wallet: false,
+        })
+    }
+
+    fn build_ledger_multisig_signtx_case(device_type: &str) -> Result<SigntxCase> {
+        let fingerprint = reference_fingerprint(device_type)?;
+        let device_xpub = reference_xpub(device_type, "m/48'/1'/0'/2'")?;
+        let device_path = DerivationPath::from_str("m/48'/1'/0'/2'")?;
+        let secp = Secp256k1::new();
+        let change_suffix = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(1)?,
+            ChildNumber::from_normal_idx(0)?,
+        ]);
+        let (cosigner_fingerprint, cosigner_xpub, receive) =
+            ledger_multisig_cosigner(&secp, device_xpub, fingerprint, &device_path)?;
+        let change = sorted_multisig_keys(
+            &secp,
+            device_xpub,
+            fingerprint,
+            cosigner_xpub,
+            cosigner_fingerprint,
+            &change_suffix,
+        )?;
+        let input_script = multisig_script(2, &receive);
+        let change_script = multisig_script(2, &change);
+        let mut psbt = spending_psbt(input_script.to_p2wsh(), change_script.to_p2wsh());
+
+        psbt.inputs[0] = Input {
+            non_witness_utxo: Some(previous_tx(input_script.to_p2wsh())),
+            witness_utxo: Some(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: input_script.to_p2wsh(),
+            }),
+            witness_script: Some(input_script),
+            bip32_derivation: [
+                (
+                    receive[0].inner,
+                    (receive[0].fingerprint, receive[0].derivation_path.clone()),
+                ),
+                (
+                    receive[1].inner,
+                    (receive[1].fingerprint, receive[1].derivation_path.clone()),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        psbt.outputs[0] = PsbtOutput {
+            witness_script: Some(change_script),
+            bip32_derivation: [
+                (
+                    change[0].inner,
+                    (change[0].fingerprint, change[0].derivation_path.clone()),
+                ),
+                (
+                    change[1].inner,
+                    (change[1].fingerprint, change[1].derivation_path.clone()),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        psbt.xpub
+            .insert(device_xpub, (fingerprint, device_path.clone()));
+        psbt.xpub
+            .insert(cosigner_xpub, (cosigner_fingerprint, device_path));
+
+        let expected_pubkey = receive
+            .iter()
+            .find(|key| key.fingerprint == fingerprint)
+            .map(|key| PublicKey::new(key.inner))
+            .context("missing device multisig pubkey")?;
+
+        Ok(SigntxCase {
+            psbt: psbt.to_string(),
+            original: psbt,
+            expected_pubkey,
+            ledger_registers_wallet: true,
+        })
+    }
+
+    fn ledger_multisig_cosigner<
+        C: bitcoin::secp256k1::Signing + bitcoin::secp256k1::Verification,
+    >(
+        secp: &Secp256k1<C>,
+        device_xpub: Xpub,
+        device_fingerprint: Fingerprint,
+        device_path: &DerivationPath,
+    ) -> Result<(Fingerprint, Xpub, Vec<DerivedKey>)> {
+        let receive_suffix = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(0)?,
+            ChildNumber::from_normal_idx(0)?,
+        ]);
+        for seed in 1..=255 {
+            let cosigner_master = Xpriv::new_master(bitcoin::NetworkKind::Test, &[seed; 32])?;
+            let cosigner_fingerprint = cosigner_master.fingerprint(secp);
+            let cosigner_xpriv = cosigner_master.derive_priv(secp, device_path)?;
+            let cosigner_xpub = Xpub::from_priv(secp, &cosigner_xpriv);
+            let receive = sorted_multisig_keys(
+                secp,
+                device_xpub,
+                device_fingerprint,
+                cosigner_xpub,
+                cosigner_fingerprint,
+                &receive_suffix,
+            )?;
+            if receive
+                .first()
+                .is_some_and(|key| key.fingerprint == device_fingerprint)
+            {
+                return Ok((cosigner_fingerprint, cosigner_xpub, receive));
+            }
+        }
+        bail!("could not find deterministic Ledger multisig cosigner");
+    }
+
+    #[derive(Clone)]
+    struct DerivedKey {
+        inner: bitcoin::secp256k1::PublicKey,
+        fingerprint: Fingerprint,
+        derivation_path: DerivationPath,
+    }
+
+    fn sorted_multisig_keys<C: bitcoin::secp256k1::Verification>(
+        secp: &Secp256k1<C>,
+        device_xpub: Xpub,
+        device_fingerprint: Fingerprint,
+        cosigner_xpub: Xpub,
+        cosigner_fingerprint: Fingerprint,
+        suffix: &DerivationPath,
+    ) -> Result<Vec<DerivedKey>> {
+        let device = device_xpub.derive_pub(secp, suffix)?;
+        let cosigner = cosigner_xpub.derive_pub(secp, suffix)?;
+        let account_path = DerivationPath::from_str("m/48'/1'/0'/2'")?;
+        let mut keys = vec![
+            DerivedKey {
+                inner: device.public_key,
+                fingerprint: device_fingerprint,
+                derivation_path: join_derivation_path(&account_path, suffix),
+            },
+            DerivedKey {
+                inner: cosigner.public_key,
+                fingerprint: cosigner_fingerprint,
+                derivation_path: join_derivation_path(&account_path, suffix),
+            },
+        ];
+        keys.sort_by_key(|key| key.inner.serialize());
+        Ok(keys)
+    }
+
+    fn join_derivation_path(base: &DerivationPath, suffix: &DerivationPath) -> DerivationPath {
+        let mut children = base.as_ref().to_vec();
+        children.extend_from_slice(suffix.as_ref());
+        DerivationPath::from(children)
+    }
+
+    fn multisig_script(threshold: i64, keys: &[DerivedKey]) -> ScriptBuf {
+        let mut builder = Builder::new().push_int(threshold);
+        for key in keys {
+            builder = builder.push_slice(key.inner.serialize());
+        }
+        builder
+            .push_int(keys.len() as i64)
+            .push_opcode(OP_CHECKMULTISIG)
+            .into_script()
+    }
+
+    fn spending_psbt(input_script: ScriptBuf, change_script: ScriptBuf) -> Psbt {
+        Psbt::from_unsigned_tx(Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: previous_tx(input_script).compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: change_script,
+            }],
+        })
+        .expect("unsigned tx should become PSBT")
+    }
+
+    fn previous_tx(script_pubkey: ScriptBuf) -> Transaction {
+        Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey,
+            }],
+        }
+    }
+
+    fn reference_fingerprint(device_type: &str) -> Result<Fingerprint> {
+        let output = HwiBinary::reference()?.run(args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            device_type,
+            "enumerate",
+        ]))?;
+        assert_success("reference", &output)?;
+        let device = assert_enumerate_contains_device("reference", &output.json, device_type)?;
+        let fingerprint = assert_string_field("reference", device, "fingerprint")?;
+        Fingerprint::from_str(fingerprint).context("reference fingerprint was invalid")
+    }
+
+    fn reference_xpub(device_type: &str, path: &str) -> Result<Xpub> {
+        let output = HwiBinary::reference()?.run(args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            device_type,
+            "getxpub",
+            path,
+        ]))?;
+        assert_success("reference", &output)?;
+        let xpub = assert_string_json_field("reference", &output.json, "xpub")?;
+        Xpub::from_str(xpub).context("reference xpub was invalid")
+    }
+
+    fn signtx_args(device_type: &str, psbt: &str) -> Vec<String> {
+        args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            device_type,
+            "signtx",
+            psbt,
+        ])
+    }
+
+    fn signmessage_arg_cases(device_type: &str) -> Result<Vec<(&'static str, &'static str)>> {
+        let path = match device_type {
+            "ledger" => "m/44'/1'/0'/0",
+            "jade" | "coldcard" => "m/44'/1'/0'",
+            _ => bail!("unsupported signmessage device type {device_type:?}"),
+        };
+        Ok(vec![("hello", path), ("hello world", path)])
+    }
+
+    fn signmessage_args(device_type: &str, message: &str, path: &str) -> Vec<String> {
+        args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            device_type,
+            "signmessage",
+            message,
+            path,
+        ])
+    }
+
+    fn prepare_signmessage_run(args: &[String]) -> Result<()> {
+        let Some(device_type) = arg_value(args, "--device-type") else {
+            return Ok(());
+        };
+        match device_type {
+            "ledger" => set_ledger_signmessage_automation(),
+            "coldcard" => {
+                spawn_coldcard_approval();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn prepare_signtx_run(args: &[String], case: &SigntxCase) -> Result<()> {
+        let Some(device_type) = arg_value(args, "--device-type") else {
+            return Ok(());
+        };
+        match device_type {
+            "ledger" => set_ledger_automation(case.ledger_registers_wallet),
+            "coldcard" => {
+                spawn_coldcard_approval();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+        args.windows(2)
+            .find(|pair| pair[0] == name)
+            .map(|pair| pair[1].as_str())
+    }
+
+    fn set_ledger_automation(registers_wallet: bool) -> Result<()> {
+        let automation = if registers_wallet {
+            serde_json::from_str(include_str!("../../ledger/automations/hwi_speculos.json"))?
+        } else {
+            serde_json::from_str(include_str!("../../ledger/automations/sign_psbt.json"))?
+        };
+        post_speculos_automation(&automation)
+    }
+
+    fn set_ledger_signmessage_automation() -> Result<()> {
+        let automation =
+            serde_json::from_str(include_str!("../../ledger/automations/sign_message.json"))?;
+        post_speculos_automation(&automation)
+    }
+
+    fn post_speculos_automation(automation: &Value) -> Result<()> {
+        let body = serde_json::to_vec(automation)?;
+        let mut stream = std::net::TcpStream::connect("127.0.0.1:5000")
+            .context("failed to connect to Speculos automation API")?;
+        write!(
+            stream,
+            "POST /automation HTTP/1.1\r\nHost: 127.0.0.1:5000\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )?;
+        stream.write_all(&body)?;
+        stream.flush()?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
+            bail!("Speculos automation API returned unexpected response: {response}");
+        }
+        Ok(())
+    }
+
+    fn spawn_coldcard_approval() {
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = send_coldcard_approval();
+        });
+    }
+
+    fn send_coldcard_approval() -> Result<()> {
+        let client_socket = format!("/tmp/bhwi-hwi-parity-ckcc-{}.sock", std::process::id());
+        let _ = std::fs::remove_file(&client_socket);
+        let socket = UnixDatagram::bind(&client_socket)?;
+        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+        socket.connect("/tmp/ckcc-simulator.sock")?;
+        coldcard_hid_exchange(&socket, b"XKEYy")?;
+        let _ = std::fs::remove_file(client_socket);
+        Ok(())
+    }
+
+    fn coldcard_hid_exchange(socket: &UnixDatagram, request: &[u8]) -> Result<Vec<u8>> {
+        let mut packet = [0_u8; 64];
+        packet[0] =
+            0x80 | u8::try_from(request.len()).context("Coldcard test request too large")?;
+        packet[1..1 + request.len()].copy_from_slice(request);
+        socket.send(&packet)?;
+
+        let mut response = Vec::new();
+        let mut first = true;
+        loop {
+            let mut packet = [0_u8; 64];
+            socket.recv(&mut packet)?;
+            let flag = packet[0];
+            let len = usize::from(flag & 0x3f);
+            let is_fram = first && &packet[1..5] == b"fram";
+            response.extend_from_slice(&packet[1..1 + len]);
+            first = false;
+            if flag & 0x80 != 0 || is_fram {
+                break;
+            }
+        }
+        Ok(response)
     }
 
     fn enumerate_args_from_env() -> Result<(Vec<String>, Option<String>)> {
