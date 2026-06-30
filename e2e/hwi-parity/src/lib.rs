@@ -254,6 +254,24 @@ mod tests {
     }
 
     #[test]
+    fn candidate_getdescriptors_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        for args in getdescriptors_arg_cases(&device_type) {
+            assert_getdescriptors_parity(args.clone())
+                .with_context(|| format!("getdescriptors parity failed for args: {args:?}"))?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn candidate_signtx_matches_reference() -> Result<()> {
         if env::var("HWI_BIN").is_err() {
             return Ok(());
@@ -371,6 +389,26 @@ mod tests {
         Ok(())
     }
 
+    fn assert_getdescriptors_parity(args: Vec<String>) -> Result<()> {
+        let reference = HwiBinary::reference()?.run(args.clone())?;
+        assert_success("reference", &reference)?;
+        assert_getdescriptors_shape("reference", &reference.json)?;
+
+        let candidate = HwiBinary::candidate()?.run(args)?;
+        assert_success("candidate", &candidate)?;
+        assert_getdescriptors_shape("candidate", &candidate.json)?;
+
+        if reference.json != candidate.json {
+            bail!(
+                "HWI getdescriptors JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(&reference.json)?,
+                serde_json::to_string_pretty(&candidate.json)?
+            );
+        }
+
+        Ok(())
+    }
+
     fn assert_signmessage_parity(args: Vec<String>) -> Result<()> {
         prepare_signmessage_run(&args)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
@@ -454,6 +492,43 @@ mod tests {
                 decoded.len(),
                 serde_json::to_string_pretty(json)?
             );
+        }
+        Ok(())
+    }
+
+    fn assert_getdescriptors_shape(label: &str, json: &Value) -> Result<()> {
+        assert_exact_keys(label, "getdescriptors", json, &["receive", "internal"])?;
+        for field in ["receive", "internal"] {
+            let Some(descriptors) = json.get(field).and_then(Value::as_array) else {
+                bail!(
+                    "{label} hwi getdescriptors field {field:?} was not an array:\n{}",
+                    serde_json::to_string_pretty(json)?
+                );
+            };
+            if descriptors.is_empty() {
+                bail!(
+                    "{label} hwi getdescriptors field {field:?} was empty:\n{}",
+                    serde_json::to_string_pretty(json)?
+                );
+            }
+            for descriptor in descriptors {
+                let Some(descriptor) = descriptor.as_str() else {
+                    bail!(
+                        "{label} hwi getdescriptors field {field:?} contained a non-string:\n{}",
+                        serde_json::to_string_pretty(json)?
+                    );
+                };
+                if !descriptor.contains('#') || !descriptor.contains("/*") {
+                    bail!(
+                        "{label} hwi getdescriptors descriptor was not ranged with checksum: {descriptor}"
+                    );
+                }
+                if descriptor.contains('\'') {
+                    bail!(
+                        "{label} hwi getdescriptors descriptor used apostrophe hardening instead of h: {descriptor}"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1327,6 +1402,29 @@ mod tests {
                 device_type,
                 "getxpub",
                 "m/44h/1h/0h/0/3",
+            ]),
+        ]
+    }
+
+    fn getdescriptors_arg_cases(device_type: &str) -> Vec<Vec<String>> {
+        vec![
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getdescriptors",
+            ]),
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getdescriptors",
+                "--account",
+                "1",
             ]),
         ]
     }

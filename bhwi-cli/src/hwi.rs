@@ -21,10 +21,16 @@ use bitcoin::{
     psbt::Input,
 };
 use clap::{Parser, Subcommand, ValueEnum, error::ErrorKind};
-use miniscript::descriptor::WalletPolicy;
+use miniscript::{
+    Descriptor, DescriptorPublicKey,
+    descriptor::{DescriptorType, WalletPolicy, checksum},
+};
 use serde::{Serialize, Serializer};
 
-use crate::{Device, DeviceManager, DeviceType, config::DeviceSelector};
+use crate::{
+    Device, DeviceManager, DeviceType, config::DeviceSelector,
+    get_descriptors::GetDescriptorOptions,
+};
 
 type HwiResult<T> = std::result::Result<T, HwiError>;
 
@@ -78,6 +84,10 @@ pub enum HwiCliCommand {
         #[arg(value_parser = clap::value_parser!(DerivationPath))]
         path: DerivationPath,
     },
+    Getdescriptors {
+        #[arg(long, default_value_t = 0)]
+        account: u32,
+    },
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -105,6 +115,9 @@ pub enum HwiCommand {
     GetXpub {
         path: DerivationPath,
         expert: bool,
+    },
+    GetDescriptors {
+        account: u32,
     },
     Unsupported(String),
 }
@@ -182,6 +195,7 @@ pub struct HwiEnumeratedDevice {
 pub enum HwiResponse {
     Enumerate(Vec<HwiEnumeratedDevice>),
     GetXpub(HwiGetXpubResponse),
+    GetDescriptors(HwiGetDescriptorsResponse),
     SignTx(HwiSignTxResponse),
     SignMessage(HwiSignMessageResponse),
     Error(HwiError),
@@ -221,6 +235,12 @@ pub struct HwiGetXpubResponse {
     pub pubkey: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct HwiGetDescriptorsResponse {
+    pub receive: Vec<String>,
+    pub internal: Vec<String>,
+}
+
 pub fn parse_args<I, T>(args: I) -> HwiResult<HwiRequest>
 where
     I: IntoIterator<Item = T>,
@@ -242,6 +262,7 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
             sign_message(request.selector, message, path).await
         }
         HwiCommand::GetXpub { path, expert } => get_xpub(request.selector, path, expert).await,
+        HwiCommand::GetDescriptors { account } => get_descriptors(request.selector, account).await,
         HwiCommand::Unsupported(command) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             format!("Unsupported HWI command: {command}"),
@@ -527,6 +548,87 @@ async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) 
             err.to_string(),
         )),
     }
+}
+
+async fn get_descriptors(selector: DeviceSelector, account: u32) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    let fingerprint = match device.fingerprint().await {
+        Ok(fingerprint) => fingerprint,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+    let device_type = device.device_type();
+    let model = device.model().to_owned();
+    let network = manager.selector.network;
+    let mut response = HwiGetDescriptorsResponse {
+        receive: Vec::new(),
+        internal: Vec::new(),
+    };
+
+    for internal in [false, true] {
+        for addr_type in hwi_descriptor_addr_types(device_type, &model) {
+            let descriptor_type = descriptor_type_for(addr_type);
+            let options = GetDescriptorOptions::with_account(
+                fingerprint,
+                account,
+                internal,
+                descriptor_type,
+                network,
+            );
+            let descriptor = match manager.get_descriptor(device.device(), options).await {
+                Ok(descriptor) => descriptor,
+                Err(err) => {
+                    return HwiResponse::Error(HwiError::new(
+                        HwiErrorCode::DeviceConnectionError,
+                        err.to_string(),
+                    ));
+                }
+            };
+            let descriptor = match hwi_descriptor_string(&descriptor) {
+                Ok(descriptor) => descriptor,
+                Err(err) => {
+                    return HwiResponse::Error(HwiError::new(
+                        HwiErrorCode::BadArgument,
+                        err.to_string(),
+                    ));
+                }
+            };
+            if internal {
+                response.internal.push(descriptor);
+            } else {
+                response.receive.push(descriptor);
+            }
+        }
+    }
+
+    HwiResponse::GetDescriptors(response)
 }
 
 async fn ledger_signing_context(
@@ -853,6 +955,44 @@ fn bip44_chain(network: Network) -> u32 {
     if network == Network::Bitcoin { 0 } else { 1 }
 }
 
+fn descriptor_type_for(addr_type: HwiAddressType) -> DescriptorType {
+    match addr_type {
+        HwiAddressType::Legacy => DescriptorType::Pkh,
+        HwiAddressType::ShWit => DescriptorType::ShWpkh,
+        HwiAddressType::Wit => DescriptorType::Wpkh,
+        HwiAddressType::Tap => DescriptorType::Tr,
+    }
+}
+
+fn hwi_descriptor_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAddressType> {
+    let mut types = vec![
+        HwiAddressType::Legacy,
+        HwiAddressType::Wit,
+        HwiAddressType::ShWit,
+    ];
+    if hwi_can_sign_taproot(device_type, model) {
+        types.push(HwiAddressType::Tap);
+    }
+    types
+}
+
+fn hwi_can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
+    match device_type {
+        DeviceType::Ledger => true,
+        DeviceType::Jade => false,
+        DeviceType::Coldcard => model.contains("edge"),
+    }
+}
+
+fn hwi_descriptor_string(
+    descriptor: &Descriptor<DescriptorPublicKey>,
+) -> Result<String, checksum::Error> {
+    let descriptor = format!("{descriptor:#}").replace('\'', "h");
+    let mut checksum = checksum::Engine::new();
+    checksum.input(&descriptor)?;
+    Ok(format!("{descriptor}#{}", checksum.checksum()))
+}
+
 fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
     if !expert {
         return HwiGetXpubResponse {
@@ -941,6 +1081,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         HwiCliCommand::Signtx { psbt } => HwiCommand::SignTx { psbt },
         HwiCliCommand::Signmessage { message, path } => HwiCommand::SignMessage { message, path },
         HwiCliCommand::Getxpub { path } => HwiCommand::GetXpub { path, expert },
+        HwiCliCommand::Getdescriptors { account } => HwiCommand::GetDescriptors { account },
         HwiCliCommand::External(argv) => {
             let command = argv
                 .first()
@@ -1189,6 +1330,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_getdescriptors_account() {
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "getdescriptors",
+            "--account",
+            "3",
+        ])
+        .expect("request");
+
+        assert_eq!(request.selector.network, Network::Testnet);
+        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.command, HwiCommand::GetDescriptors { account: 3 });
+    }
+
+    #[test]
     fn accepts_python_hwi_version_flag() {
         let error = HwiCli::try_parse_from(["hwi", "--version"]).expect_err("version exits");
 
@@ -1293,10 +1453,74 @@ mod tests {
     }
 
     #[test]
+    fn getdescriptors_serializes_receive_and_internal() {
+        let json = serde_json::to_value(HwiResponse::GetDescriptors(HwiGetDescriptorsResponse {
+            receive: vec!["wpkh(...)#receive".to_owned()],
+            internal: vec!["wpkh(...)#internal".to_owned()],
+        }))
+        .expect("json");
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "receive": ["wpkh(...)#receive"],
+                "internal": ["wpkh(...)#internal"],
+            })
+        );
+    }
+
+    #[test]
     fn signmessage_normalizes_coldcard_header_for_python_hwi() {
         assert_eq!(python_hwi_message_header(DeviceType::Coldcard, 40), 32);
         assert_eq!(python_hwi_message_header(DeviceType::Ledger, 32), 32);
         assert_eq!(python_hwi_message_header(DeviceType::Jade, 31), 31);
+    }
+
+    #[test]
+    fn hwi_descriptor_string_uses_hardened_h_and_recomputes_checksum() {
+        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(
+            "wpkh([f5acc2fd/84'/1'/0']tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/0/*)",
+        )
+        .expect("descriptor");
+
+        let descriptor = hwi_descriptor_string(&descriptor).expect("descriptor string");
+
+        assert!(descriptor.contains("/84h/1h/0h]"));
+        assert!(!descriptor.contains('\''));
+        checksum::verify_checksum(&descriptor).expect("valid checksum");
+    }
+
+    #[test]
+    fn descriptor_addr_types_match_python_hwi_taproot_capabilities() {
+        assert_eq!(
+            hwi_descriptor_addr_types(DeviceType::Ledger, "ledger_nano_s_simulator"),
+            vec![
+                HwiAddressType::Legacy,
+                HwiAddressType::Wit,
+                HwiAddressType::ShWit,
+                HwiAddressType::Tap,
+            ]
+        );
+        assert_eq!(
+            hwi_descriptor_addr_types(DeviceType::Jade, "jade_simulator"),
+            vec![
+                HwiAddressType::Legacy,
+                HwiAddressType::Wit,
+                HwiAddressType::ShWit,
+            ]
+        );
+        assert_eq!(
+            hwi_descriptor_addr_types(DeviceType::Coldcard, "coldcard_simulator"),
+            vec![
+                HwiAddressType::Legacy,
+                HwiAddressType::Wit,
+                HwiAddressType::ShWit,
+            ]
+        );
+        assert!(hwi_can_sign_taproot(
+            DeviceType::Coldcard,
+            "coldcard_simulator_edge"
+        ));
     }
 
     #[test]
