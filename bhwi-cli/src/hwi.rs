@@ -7,9 +7,9 @@ use std::{
 
 use bitcoin::{
     Network, NetworkKind,
-    bip32::{DerivationPath, Fingerprint, Xpub},
+    bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
 };
-use clap::{Parser, Subcommand, error::ErrorKind};
+use clap::{Parser, Subcommand, ValueEnum, error::ErrorKind};
 use serde::{Serialize, Serializer};
 
 use crate::{DeviceManager, DeviceType, config::DeviceSelector};
@@ -48,6 +48,12 @@ pub struct HwiCli {
 #[derive(Debug, Clone, Subcommand)]
 pub enum HwiCliCommand {
     Enumerate,
+    Getmasterxpub {
+        #[arg(long = "addr-type", value_enum, default_value = "wit")]
+        addr_type: HwiAddressType,
+        #[arg(long, default_value_t = 0)]
+        account: u32,
+    },
     Getxpub {
         #[arg(value_parser = clap::value_parser!(DerivationPath))]
         path: DerivationPath,
@@ -65,8 +71,27 @@ pub struct HwiRequest {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum HwiCommand {
     Enumerate,
-    GetXpub { path: DerivationPath, expert: bool },
+    GetMasterXpub {
+        addr_type: HwiAddressType,
+        account: u32,
+    },
+    GetXpub {
+        path: DerivationPath,
+        expert: bool,
+    },
     Unsupported(String),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum HwiAddressType {
+    #[value(name = "legacy")]
+    Legacy,
+    #[value(name = "sh_wit")]
+    ShWit,
+    #[value(name = "wit")]
+    Wit,
+    #[value(name = "tap")]
+    Tap,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -169,6 +194,9 @@ where
 pub async fn process_request(request: HwiRequest) -> HwiResponse {
     match request.command {
         HwiCommand::Enumerate => enumerate(request.selector).await,
+        HwiCommand::GetMasterXpub { addr_type, account } => {
+            get_master_xpub(request.selector, addr_type, account).await
+        }
         HwiCommand::GetXpub { path, expert } => get_xpub(request.selector, path, expert).await,
         HwiCommand::Unsupported(command) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
@@ -280,6 +308,20 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
     HwiResponse::Enumerate(response)
 }
 
+async fn get_master_xpub(
+    selector: DeviceSelector,
+    addr_type: HwiAddressType,
+    account: u32,
+) -> HwiResponse {
+    let path = match master_xpub_path(addr_type, selector.network, account) {
+        Ok(path) => path,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
+        }
+    };
+    get_xpub(selector, path, false).await
+}
+
 async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) -> HwiResponse {
     if selector.device_type.is_none() && selector.fingerprint.is_none() {
         return HwiResponse::Error(HwiError::new(
@@ -312,6 +354,33 @@ async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) 
             err.to_string(),
         )),
     }
+}
+
+fn master_xpub_path(
+    addr_type: HwiAddressType,
+    network: Network,
+    account: u32,
+) -> Result<DerivationPath, bitcoin::bip32::Error> {
+    Ok([
+        ChildNumber::from_hardened_idx(bip44_purpose(addr_type))?,
+        ChildNumber::from_hardened_idx(bip44_chain(network))?,
+        ChildNumber::from_hardened_idx(account)?,
+    ]
+    .as_ref()
+    .into())
+}
+
+fn bip44_purpose(addr_type: HwiAddressType) -> u32 {
+    match addr_type {
+        HwiAddressType::Legacy => 44,
+        HwiAddressType::ShWit => 49,
+        HwiAddressType::Wit => 84,
+        HwiAddressType::Tap => 86,
+    }
+}
+
+fn bip44_chain(network: Network) -> u32 {
+    if network == Network::Bitcoin { 0 } else { 1 }
 }
 
 fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
@@ -396,6 +465,9 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
     let network = parse_chain(&args.chain)?;
     let command = match args.command {
         HwiCliCommand::Enumerate => HwiCommand::Enumerate,
+        HwiCliCommand::Getmasterxpub { addr_type, account } => {
+            HwiCommand::GetMasterXpub { addr_type, account }
+        }
         HwiCliCommand::Getxpub { path } => HwiCommand::GetXpub { path, expert },
         HwiCliCommand::External(argv) => {
             let command = argv
@@ -544,6 +616,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_getmasterxpub_defaults() {
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "--emulators",
+            "getmasterxpub",
+        ])
+        .expect("request");
+
+        assert_eq!(
+            request.command,
+            HwiCommand::GetMasterXpub {
+                addr_type: HwiAddressType::Wit,
+                account: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_getmasterxpub_addr_type_and_account() {
+        let request = parse_args([
+            "hwi",
+            "--device-type",
+            "ledger",
+            "getmasterxpub",
+            "--addr-type",
+            "sh_wit",
+            "--account",
+            "7",
+        ])
+        .expect("request");
+
+        assert_eq!(
+            request.command,
+            HwiCommand::GetMasterXpub {
+                addr_type: HwiAddressType::ShWit,
+                account: 7,
+            }
+        );
+    }
+
+    #[test]
     fn accepts_python_hwi_version_flag() {
         let error = HwiCli::try_parse_from(["hwi", "--version"]).expect_err("version exits");
 
@@ -569,11 +686,11 @@ mod tests {
 
     #[test]
     fn captures_unsupported_commands() {
-        let request = parse_args(["hwi", "getmasterxpub"]).expect("unsupported command request");
+        let request = parse_args(["hwi", "signmessage"]).expect("unsupported command request");
 
         assert_eq!(
             request.command,
-            HwiCommand::Unsupported("getmasterxpub".to_owned())
+            HwiCommand::Unsupported("signmessage".to_owned())
         );
     }
 
@@ -662,6 +779,42 @@ mod tests {
         assert_eq!(json["pubkey"], hex::encode(xpub.public_key.serialize()));
         assert!(!object.contains_key("child_index"));
         assert!(!object.contains_key("chain_code"));
+    }
+
+    #[test]
+    fn master_xpub_path_matches_python_hwi_addr_types() {
+        for (addr_type, expected) in [
+            (HwiAddressType::Legacy, "44'/1'/7'"),
+            (HwiAddressType::ShWit, "49'/1'/7'"),
+            (HwiAddressType::Wit, "84'/1'/7'"),
+            (HwiAddressType::Tap, "86'/1'/7'"),
+        ] {
+            let path = master_xpub_path(addr_type, Network::Testnet, 7).unwrap();
+            assert_eq!(path.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn master_xpub_path_uses_mainnet_coin_type_only_for_mainnet() {
+        assert_eq!(
+            master_xpub_path(HwiAddressType::Wit, Network::Bitcoin, 0)
+                .unwrap()
+                .to_string(),
+            "84'/0'/0'"
+        );
+        for network in [
+            Network::Testnet,
+            Network::Testnet4,
+            Network::Signet,
+            Network::Regtest,
+        ] {
+            assert_eq!(
+                master_xpub_path(HwiAddressType::Wit, network, 0)
+                    .unwrap()
+                    .to_string(),
+                "84'/1'/0'"
+            );
+        }
     }
 
     fn sample_xpub() -> Xpub {
