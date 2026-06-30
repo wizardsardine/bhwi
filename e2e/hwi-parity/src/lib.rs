@@ -216,6 +216,24 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn candidate_getmasterxpub_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        for args in getmasterxpub_arg_cases(&device_type) {
+            assert_getmasterxpub_parity(args.clone())
+                .with_context(|| format!("getmasterxpub parity failed for args: {args:?}"))?;
+        }
+
+        Ok(())
+    }
+
     fn assert_enumerate_parity(
         args: Vec<String>,
         expected_device_type: Option<&str>,
@@ -240,6 +258,26 @@ mod tests {
         if reference.json != candidate.json {
             bail!(
                 "HWI JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(&reference.json)?,
+                serde_json::to_string_pretty(&candidate.json)?
+            );
+        }
+
+        Ok(())
+    }
+
+    fn assert_getmasterxpub_parity(args: Vec<String>) -> Result<()> {
+        let reference = HwiBinary::reference()?.run(args.clone())?;
+        assert_success("reference", &reference)?;
+        assert_xpub_only_shape("reference", "getmasterxpub", &reference.json)?;
+
+        let candidate = HwiBinary::candidate()?.run(args)?;
+        assert_success("candidate", &candidate)?;
+        assert_xpub_only_shape("candidate", "getmasterxpub", &candidate.json)?;
+
+        if reference.json != candidate.json {
+            bail!(
+                "HWI getmasterxpub JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
                 serde_json::to_string_pretty(&candidate.json)?
             );
@@ -304,8 +342,6 @@ mod tests {
             );
         };
 
-        assert_string_json_field(label, json, "xpub")?;
-
         let expected: &[&str] = if expert {
             &[
                 "xpub",
@@ -321,6 +357,7 @@ mod tests {
             &["xpub"]
         };
         assert_exact_keys(label, "getxpub", json, expected)?;
+        assert_string_json_field(label, json, "xpub")?;
 
         if !expert {
             return Ok(());
@@ -359,6 +396,18 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    fn assert_xpub_only_shape(label: &str, command: &str, json: &Value) -> Result<()> {
+        if !json.is_object() {
+            bail!(
+                "{label} hwi {command} output was not an object:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        };
+        assert_exact_keys(label, command, json, &["xpub"])?;
+        assert_string_json_field(label, json, "xpub")?;
         Ok(())
     }
 
@@ -597,6 +646,78 @@ mod tests {
             Err(env::VarError::NotPresent) => Ok(None),
             Err(err) => Err(err).context("failed to read HWI_PARITY_DEVICE_TYPE"),
         }
+    }
+
+    fn getmasterxpub_arg_cases(device_type: &str) -> Vec<Vec<String>> {
+        vec![
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getmasterxpub",
+            ]),
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--expert",
+                "--device-type",
+                device_type,
+                "getmasterxpub",
+            ]),
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getmasterxpub",
+                "--account",
+                "1",
+            ]),
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getmasterxpub",
+                "--addr-type",
+                "legacy",
+            ]),
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getmasterxpub",
+                "--addr-type",
+                "sh_wit",
+            ]),
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getmasterxpub",
+                "--addr-type",
+                "wit",
+            ]),
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getmasterxpub",
+                "--addr-type",
+                "tap",
+            ]),
+        ]
     }
 
     fn getxpub_arg_cases(device_type: &str) -> Vec<Vec<String>> {
