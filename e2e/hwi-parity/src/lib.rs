@@ -198,6 +198,24 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn candidate_getxpub_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        for args in getxpub_arg_cases(&device_type) {
+            assert_getxpub_parity(args.clone())
+                .with_context(|| format!("getxpub parity failed for args: {args:?}"))?;
+        }
+
+        Ok(())
+    }
+
     fn assert_enumerate_parity(
         args: Vec<String>,
         expected_device_type: Option<&str>,
@@ -222,6 +240,27 @@ mod tests {
         if reference.json != candidate.json {
             bail!(
                 "HWI JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(&reference.json)?,
+                serde_json::to_string_pretty(&candidate.json)?
+            );
+        }
+
+        Ok(())
+    }
+
+    fn assert_getxpub_parity(args: Vec<String>) -> Result<()> {
+        let expert = args.iter().any(|arg| arg == "--expert");
+        let reference = HwiBinary::reference()?.run(args.clone())?;
+        assert_success("reference", &reference)?;
+        assert_getxpub_shape("reference", &reference.json, expert)?;
+
+        let candidate = HwiBinary::candidate()?.run(args)?;
+        assert_success("candidate", &candidate)?;
+        assert_getxpub_shape("candidate", &candidate.json, expert)?;
+
+        if reference.json != candidate.json {
+            bail!(
+                "HWI getxpub JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
                 serde_json::to_string_pretty(&candidate.json)?
             );
@@ -255,6 +294,144 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn assert_getxpub_shape(label: &str, json: &Value, expert: bool) -> Result<()> {
+        let Some(object) = json.as_object() else {
+            bail!(
+                "{label} hwi getxpub output was not an object:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        };
+
+        assert_string_json_field(label, json, "xpub")?;
+
+        let expected: &[&str] = if expert {
+            &[
+                "xpub",
+                "testnet",
+                "private",
+                "depth",
+                "parent_fingerprint",
+                "child_num",
+                "chaincode",
+                "pubkey",
+            ]
+        } else {
+            &["xpub"]
+        };
+        assert_exact_keys(label, "getxpub", json, expected)?;
+
+        if !expert {
+            return Ok(());
+        }
+
+        if json.get("testnet").and_then(Value::as_bool).is_none() {
+            bail!(
+                "{label} hwi getxpub expert field \"testnet\" was not a bool:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
+        if json.get("private").and_then(Value::as_bool) != Some(false) {
+            bail!(
+                "{label} hwi getxpub expert field \"private\" was not false:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
+        assert_u64_json_field(label, json, "depth")?;
+        assert_u64_json_field(label, json, "child_num")?;
+        assert_lower_hex_string_field(label, json, "parent_fingerprint", 8)?;
+        assert_lower_hex_string_field(label, json, "chaincode", 64)?;
+        let pubkey = assert_lower_hex_string_field(label, json, "pubkey", 66)?;
+        if !pubkey.starts_with("02") && !pubkey.starts_with("03") {
+            bail!(
+                "{label} hwi getxpub expert field \"pubkey\" was not compressed SEC hex:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
+
+        for stale in ["version", "child_index", "chain_code"] {
+            if object.contains_key(stale) {
+                bail!(
+                    "{label} hwi getxpub used stale expert field name {stale:?}:\n{}",
+                    serde_json::to_string_pretty(json)?
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn assert_exact_keys(
+        label: &str,
+        command: &str,
+        json: &Value,
+        expected: &[&str],
+    ) -> Result<()> {
+        let object = json
+            .as_object()
+            .with_context(|| format!("{label} hwi {command} output was not an object"))?;
+        let mut actual = object.keys().map(String::as_str).collect::<Vec<_>>();
+        actual.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        if actual != expected {
+            bail!(
+                "{label} hwi {command} keys did not match\nexpected: {:?}\nactual: {:?}\njson:\n{}",
+                expected,
+                actual,
+                serde_json::to_string_pretty(json)?
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_string_json_field<'a>(label: &str, json: &'a Value, field: &str) -> Result<&'a str> {
+        let Some(value) = json.get(field).and_then(Value::as_str) else {
+            bail!(
+                "{label} hwi field {field:?} was not a string:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        };
+
+        if value.is_empty() {
+            bail!(
+                "{label} hwi field {field:?} was empty:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
+
+        Ok(value)
+    }
+
+    fn assert_u64_json_field(label: &str, json: &Value, field: &str) -> Result<u64> {
+        let Some(value) = json.get(field).and_then(Value::as_u64) else {
+            bail!(
+                "{label} hwi field {field:?} was not an unsigned integer:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        };
+        Ok(value)
+    }
+
+    fn assert_lower_hex_string_field<'a>(
+        label: &str,
+        json: &'a Value,
+        field: &str,
+        expected_len: usize,
+    ) -> Result<&'a str> {
+        let value = assert_string_json_field(label, json, field)?;
+        let valid = value.len() == expected_len
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !valid {
+            bail!(
+                "{label} hwi field {field:?} was not {expected_len} lowercase hex chars:\n{}",
+                serde_json::to_string_pretty(json)?
+            );
+        }
+        Ok(value)
     }
 
     fn assert_enumerate_array(label: &str, json: &Value) -> Result<()> {
@@ -420,6 +597,30 @@ mod tests {
             Err(env::VarError::NotPresent) => Ok(None),
             Err(err) => Err(err).context("failed to read HWI_PARITY_DEVICE_TYPE"),
         }
+    }
+
+    fn getxpub_arg_cases(device_type: &str) -> Vec<Vec<String>> {
+        vec![
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--device-type",
+                device_type,
+                "getxpub",
+                "m/44h/1h/0h",
+            ]),
+            args([
+                "--emulators",
+                "--chain",
+                "test",
+                "--expert",
+                "--device-type",
+                device_type,
+                "getxpub",
+                "m/44h/1h/0h/0/3",
+            ]),
+        ]
     }
 
     fn enumerate_python_hwi_arg_cases(
