@@ -7,9 +7,10 @@ use std::{
 
 use bhwi::{
     bitcoin::psbt::Psbt,
+    common::{MultisigAddressType, MultisigDisplayAddress, MultisigDisplayKey},
     ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
 };
-use bhwi_async::DeviceContext;
+use bhwi_async::{DeviceContext, DisplayAddress};
 use bitcoin::{
     Network, NetworkKind, PublicKey, ScriptBuf,
     base64::prelude::{BASE64_STANDARD, Engine as _},
@@ -19,8 +20,9 @@ use bitcoin::{
         script::{Instruction, PushBytes},
     },
     psbt::Input,
+    secp256k1::{PublicKey as SecpPublicKey, XOnlyPublicKey},
 };
-use clap::{ArgAction, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{ArgAction, ArgGroup, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use miniscript::{
     Descriptor, DescriptorPublicKey,
     descriptor::{DescriptorType, WalletPolicy, checksum},
@@ -80,6 +82,19 @@ pub enum HwiCliCommand {
         #[arg(value_parser = clap::value_parser!(DerivationPath))]
         path: DerivationPath,
     },
+    #[command(group(
+        ArgGroup::new("address_target")
+            .required(true)
+            .args(["path", "desc"])
+    ))]
+    Displayaddress {
+        #[arg(long, conflicts_with = "desc")]
+        path: Option<DerivationPath>,
+        #[arg(long, conflicts_with = "path")]
+        desc: Option<String>,
+        #[arg(long = "addr-type", value_enum, default_value = "wit")]
+        addr_type: HwiAddressType,
+    },
     Getxpub {
         #[arg(value_parser = clap::value_parser!(DerivationPath))]
         path: DerivationPath,
@@ -130,6 +145,7 @@ pub enum HwiCommand {
         message: String,
         path: DerivationPath,
     },
+    DisplayAddress(HwiDisplayAddressRequest),
     GetXpub {
         path: DerivationPath,
         expert: bool,
@@ -148,6 +164,17 @@ pub enum HwiCommand {
         path: Option<String>,
     },
     Unsupported(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum HwiDisplayAddressRequest {
+    Path {
+        path: DerivationPath,
+        addr_type: HwiAddressType,
+    },
+    Descriptor {
+        descriptor: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -173,6 +200,7 @@ pub enum HwiErrorCode {
     NoDeviceType,
     BadArgument,
     UnsupportedCommand,
+    DeviceFailure,
     DeviceConnectionError,
 }
 
@@ -182,6 +210,7 @@ impl HwiErrorCode {
             HwiErrorCode::NoDeviceType => -1,
             HwiErrorCode::BadArgument => -7,
             HwiErrorCode::UnsupportedCommand => -9,
+            HwiErrorCode::DeviceFailure => -13,
             HwiErrorCode::DeviceConnectionError => -3,
         }
     }
@@ -227,6 +256,7 @@ pub enum HwiResponse {
     GetKeypool(Vec<HwiGetKeypoolEntry>),
     SignTx(HwiSignTxResponse),
     SignMessage(HwiSignMessageResponse),
+    DisplayAddress(HwiDisplayAddressResponse),
     Error(HwiError),
 }
 
@@ -239,6 +269,11 @@ pub struct HwiSignTxResponse {
 #[derive(Debug, Serialize)]
 pub struct HwiSignMessageResponse {
     pub signature: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HwiDisplayAddressResponse {
+    pub address: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -301,6 +336,7 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
         HwiCommand::SignMessage { message, path } => {
             sign_message(request.selector, message, path).await
         }
+        HwiCommand::DisplayAddress(address) => display_address(request.selector, address).await,
         HwiCommand::GetXpub { path, expert } => get_xpub(request.selector, path, expert).await,
         HwiCommand::GetDescriptors { account } => get_descriptors(request.selector, account).await,
         HwiCommand::GetKeypool {
@@ -558,6 +594,79 @@ async fn sign_message(
             HwiErrorCode::DeviceConnectionError,
             err.to_string(),
         )),
+    }
+}
+
+async fn display_address(
+    selector: DeviceSelector,
+    request: HwiDisplayAddressRequest,
+) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    let display = match request {
+        HwiDisplayAddressRequest::Path { path, addr_type } => {
+            if device.device_type() == DeviceType::Coldcard && addr_type == HwiAddressType::Tap {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::UnsupportedCommand,
+                    "Coldcard does not support displaying Taproot addresses yet",
+                ));
+            }
+            if device.device_type() == DeviceType::Jade && addr_type == HwiAddressType::Tap {
+                return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, "tap"));
+            }
+            Ok(DisplayAddress::ByPath {
+                path,
+                display: true,
+                address_format: Some(address_type_for(addr_type)),
+            })
+        }
+        HwiDisplayAddressRequest::Descriptor { descriptor } => {
+            match singlesig_display_address_from_descriptor(&mut device, &descriptor).await {
+                Ok(address) => Ok(address),
+                Err(single_sig_error) => {
+                    if device.device_type() == DeviceType::Coldcard {
+                        match multisig_display_address_from_descriptor(&descriptor) {
+                            Ok(address) => Ok(DisplayAddress::ByMultisig(address)),
+                            Err(_) => return HwiResponse::Error(single_sig_error),
+                        }
+                    } else {
+                        return HwiResponse::Error(single_sig_error);
+                    }
+                }
+            }
+        }
+    };
+
+    let display = match display {
+        Ok(display) => display,
+        Err(error) => return HwiResponse::Error(error),
+    };
+
+    match device.device().display_address(display, None).await {
+        Ok(address) => HwiResponse::DisplayAddress(HwiDisplayAddressResponse { address }),
+        Err(err) => display_address_error(err.to_string()),
     }
 }
 
@@ -1157,6 +1266,283 @@ fn descriptor_type_for(addr_type: HwiAddressType) -> DescriptorType {
     }
 }
 
+fn address_type_for(addr_type: HwiAddressType) -> bitcoin::address::AddressType {
+    match addr_type {
+        HwiAddressType::Legacy => bitcoin::address::AddressType::P2pkh,
+        HwiAddressType::ShWit => bitcoin::address::AddressType::P2sh,
+        HwiAddressType::Wit => bitcoin::address::AddressType::P2wpkh,
+        HwiAddressType::Tap => bitcoin::address::AddressType::P2tr,
+    }
+}
+
+async fn singlesig_display_address_from_descriptor(
+    device: &mut Device,
+    descriptor: &str,
+) -> Result<DisplayAddress, HwiError> {
+    let descriptor = strip_descriptor_checksum(descriptor);
+    let parsed = parse_singlesig_display_descriptor(descriptor)?;
+    let fingerprint = device
+        .fingerprint()
+        .await
+        .map_err(|err| HwiError::new(HwiErrorCode::DeviceConnectionError, err.to_string()))?;
+    if parsed.fingerprint != fingerprint {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            format!("Descriptor fingerprint does not match device: {descriptor}"),
+        ));
+    }
+
+    let xpub = device
+        .device()
+        .get_extended_pubkey(parsed.origin_path.clone(), false)
+        .await
+        .map_err(|err| HwiError::new(HwiErrorCode::DeviceConnectionError, err.to_string()))?;
+
+    if !descriptor_key_matches_xpub(&parsed.key, xpub) {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            format!("Key in descriptor does not match device: {descriptor}"),
+        ));
+    }
+
+    Ok(DisplayAddress::ByPath {
+        path: parsed.full_path,
+        display: true,
+        address_format: Some(address_type_for(parsed.addr_type)),
+    })
+}
+
+#[derive(Debug)]
+struct ParsedSingleSigDisplayDescriptor {
+    addr_type: HwiAddressType,
+    fingerprint: Fingerprint,
+    origin_path: DerivationPath,
+    full_path: DerivationPath,
+    key: String,
+}
+
+fn parse_singlesig_display_descriptor(
+    descriptor: &str,
+) -> Result<ParsedSingleSigDisplayDescriptor, HwiError> {
+    let (addr_type, key_expr) = if let Some(inner) = descriptor
+        .strip_prefix("sh(wpkh(")
+        .and_then(|value| value.strip_suffix("))"))
+    {
+        (HwiAddressType::ShWit, inner)
+    } else if let Some(inner) = descriptor
+        .strip_prefix("wpkh(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        (HwiAddressType::Wit, inner)
+    } else if let Some(inner) = descriptor
+        .strip_prefix("pkh(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        (HwiAddressType::Legacy, inner)
+    } else if let Some(inner) = descriptor
+        .strip_prefix("tr(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        (HwiAddressType::Tap, inner)
+    } else {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            format!("Unsupported displayaddress descriptor: {descriptor}"),
+        ));
+    };
+
+    let Some(rest) = key_expr.strip_prefix('[') else {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            format!("Descriptor missing origin info: {descriptor}"),
+        ));
+    };
+    let Some((origin, key_and_suffix)) = rest.split_once(']') else {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            format!("Descriptor missing origin info: {descriptor}"),
+        ));
+    };
+    let (fingerprint, origin_path) = parse_key_origin(origin)?;
+    let (key, suffix_path) = split_key_suffix(key_and_suffix)?;
+    validate_singlesig_display_key(key)?;
+    let full_path = join_derivation_path(&origin_path, &suffix_path);
+
+    Ok(ParsedSingleSigDisplayDescriptor {
+        addr_type,
+        fingerprint,
+        origin_path,
+        full_path,
+        key: key.to_owned(),
+    })
+}
+
+fn validate_singlesig_display_key(key: &str) -> Result<(), HwiError> {
+    if SecpPublicKey::from_str(key).is_ok() || XOnlyPublicKey::from_str(key).is_ok() {
+        return Ok(());
+    }
+
+    Xpub::from_str(key).map(|_| ()).map_err(|err| {
+        let error = invalid_base58_character(key).map_or_else(
+            || err.to_string(),
+            |ch| format!("Character '{ch}' is not a valid base58 character"),
+        );
+        HwiError::new(HwiErrorCode::BadArgument, error)
+    })
+}
+
+fn invalid_base58_character(value: &str) -> Option<char> {
+    const BASE58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    value.chars().find(|ch| !BASE58_ALPHABET.contains(*ch))
+}
+
+fn multisig_display_address_from_descriptor(
+    descriptor: &str,
+) -> Result<MultisigDisplayAddress, HwiError> {
+    let descriptor = strip_descriptor_checksum(descriptor);
+    let (address_type, inner) = if let Some(inner) = descriptor
+        .strip_prefix("sh(wsh(sortedmulti(")
+        .and_then(|value| value.strip_suffix(")))"))
+    {
+        (MultisigAddressType::ShWit, inner)
+    } else if let Some(inner) = descriptor
+        .strip_prefix("wsh(sortedmulti(")
+        .and_then(|value| value.strip_suffix("))"))
+    {
+        (MultisigAddressType::Wit, inner)
+    } else if let Some(inner) = descriptor
+        .strip_prefix("sh(sortedmulti(")
+        .and_then(|value| value.strip_suffix("))"))
+    {
+        (MultisigAddressType::Legacy, inner)
+    } else if descriptor.contains("multi(") {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "Coldcards only allow sortedmulti descriptors",
+        ));
+    } else {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            format!("Unsupported displayaddress descriptor: {descriptor}"),
+        ));
+    };
+
+    let mut parts = inner.split(',');
+    let threshold = parts
+        .next()
+        .ok_or_else(|| {
+            HwiError::new(
+                HwiErrorCode::BadArgument,
+                format!("Invalid multisig descriptor: {descriptor}"),
+            )
+        })?
+        .parse::<u8>()
+        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
+    let mut keys = parts
+        .map(parse_multisig_display_key)
+        .collect::<Result<Vec<_>, _>>()?;
+    if keys.is_empty() || threshold == 0 || usize::from(threshold) > keys.len() {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "Either the redeem script provided is invalid or the keypaths provided are insufficient",
+        ));
+    }
+    keys.sort_by_key(|key| key.public_key.serialize());
+
+    Ok(MultisigDisplayAddress {
+        threshold,
+        address_type,
+        keys,
+    })
+}
+
+fn parse_multisig_display_key(key_expr: &str) -> Result<MultisigDisplayKey, HwiError> {
+    let Some(rest) = key_expr.strip_prefix('[') else {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "Coldcard multisig display requires key origin information",
+        ));
+    };
+    let Some((origin, key_and_suffix)) = rest.split_once(']') else {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "Coldcard multisig display requires key origin information",
+        ));
+    };
+    let (fingerprint, origin_path) = parse_key_origin(origin)?;
+    let (key, suffix_path) = split_key_suffix(key_and_suffix)?;
+    let public_key = SecpPublicKey::from_str(key)
+        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
+    Ok(MultisigDisplayKey {
+        fingerprint,
+        path: join_derivation_path(&origin_path, &suffix_path),
+        public_key,
+    })
+}
+
+fn strip_descriptor_checksum(descriptor: &str) -> &str {
+    descriptor
+        .split_once('#')
+        .map_or(descriptor, |(desc, _)| desc)
+}
+
+fn parse_key_origin(origin: &str) -> Result<(Fingerprint, DerivationPath), HwiError> {
+    let (fingerprint, path) = origin
+        .split_once('/')
+        .map_or((origin, ""), |(fp, path)| (fp, path));
+    let fingerprint = Fingerprint::from_str(fingerprint)
+        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
+    let path = if path.is_empty() {
+        DerivationPath::master()
+    } else {
+        DerivationPath::from_str(&format!("m/{path}"))
+            .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?
+    };
+    Ok((fingerprint, path))
+}
+
+fn split_key_suffix(key_and_suffix: &str) -> Result<(&str, DerivationPath), HwiError> {
+    let Some((key, suffix)) = key_and_suffix.split_once('/') else {
+        return Ok((key_and_suffix, DerivationPath::master()));
+    };
+    let suffix = DerivationPath::from_str(&format!("m/{suffix}"))
+        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
+    Ok((key, suffix))
+}
+
+fn join_derivation_path(base: &DerivationPath, suffix: &DerivationPath) -> DerivationPath {
+    let mut children = base.as_ref().to_vec();
+    children.extend_from_slice(suffix.as_ref());
+    DerivationPath::from(children)
+}
+
+fn descriptor_key_matches_xpub(key: &str, xpub: Xpub) -> bool {
+    key == xpub.to_string()
+        || key.eq_ignore_ascii_case(&hex::encode(xpub.public_key.serialize()))
+        || key.eq_ignore_ascii_case(&hex::encode(
+            xpub.public_key.x_only_public_key().0.serialize(),
+        ))
+}
+
+fn display_address_error(error: String) -> HwiResponse {
+    let error = match error.find("Coldcard Error:") {
+        Some(idx) => error[idx..].to_owned(),
+        None => error,
+    };
+    let code = if error.contains("unsupported display address")
+        || error.contains("does not support displaying")
+        || error.contains("does not support this path address format")
+    {
+        HwiErrorCode::UnsupportedCommand
+    } else if error.contains("Coldcard Error:") {
+        HwiErrorCode::BadArgument
+    } else {
+        HwiErrorCode::DeviceConnectionError
+    };
+    HwiResponse::Error(HwiError::new(code, error))
+}
+
 fn hwi_descriptor_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAddressType> {
     let mut types = vec![
         HwiAddressType::Legacy,
@@ -1303,6 +1689,24 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         }
         HwiCliCommand::Signtx { psbt } => HwiCommand::SignTx { psbt },
         HwiCliCommand::Signmessage { message, path } => HwiCommand::SignMessage { message, path },
+        HwiCliCommand::Displayaddress {
+            path,
+            desc,
+            addr_type,
+        } => match (path, desc) {
+            (Some(path), None) => {
+                HwiCommand::DisplayAddress(HwiDisplayAddressRequest::Path { path, addr_type })
+            }
+            (None, Some(descriptor)) => {
+                HwiCommand::DisplayAddress(HwiDisplayAddressRequest::Descriptor { descriptor })
+            }
+            _ => {
+                return Err(HwiError::new(
+                    HwiErrorCode::BadArgument,
+                    "displayaddress requires exactly one of --path or --desc",
+                ));
+            }
+        },
         HwiCliCommand::Getxpub { path } => HwiCommand::GetXpub { path, expert },
         HwiCliCommand::Getdescriptors { account } => HwiCommand::GetDescriptors { account },
         HwiCliCommand::Getkeypool {
@@ -1573,6 +1977,56 @@ mod tests {
     }
 
     #[test]
+    fn parses_displayaddress_path() {
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "displayaddress",
+            "--addr-type",
+            "sh_wit",
+            "--path",
+            "m/49h/1h/0h/0/0",
+        ])
+        .expect("request");
+
+        assert_eq!(request.selector.network, Network::Testnet);
+        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(
+            request.command,
+            HwiCommand::DisplayAddress(HwiDisplayAddressRequest::Path {
+                path: DerivationPath::from_str("m/49h/1h/0h/0/0").unwrap(),
+                addr_type: HwiAddressType::ShWit,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_displayaddress_descriptor() {
+        let descriptor = "wpkh([f5acc2fd/84h/1h/0h]tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/0/0)";
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "displayaddress",
+            "--desc",
+            descriptor,
+        ])
+        .expect("request");
+
+        assert_eq!(
+            request.command,
+            HwiCommand::DisplayAddress(HwiDisplayAddressRequest::Descriptor {
+                descriptor: descriptor.to_owned(),
+            })
+        );
+    }
+
+    #[test]
     fn parses_getdescriptors_account() {
         let request = parse_args([
             "hwi",
@@ -1797,6 +2251,16 @@ mod tests {
     }
 
     #[test]
+    fn displayaddress_serializes_only_address() {
+        let json = serde_json::to_value(HwiResponse::DisplayAddress(HwiDisplayAddressResponse {
+            address: "tb1qexample".to_owned(),
+        }))
+        .expect("json");
+
+        assert_eq!(json, serde_json::json!({ "address": "tb1qexample" }));
+    }
+
+    #[test]
     fn getdescriptors_serializes_receive_and_internal() {
         let json = serde_json::to_value(HwiResponse::GetDescriptors(HwiGetDescriptorsResponse {
             receive: vec!["wpkh(...)#receive".to_owned()],
@@ -1911,6 +2375,70 @@ mod tests {
 
         assert_eq!(err.code, HwiErrorCode::BadArgument.code());
         assert_eq!(err.error, "Path must end with /*");
+    }
+
+    #[test]
+    fn parses_singlesig_display_descriptor() {
+        let descriptor = "sh(wpkh([f5acc2fd/49h/1h/0h]tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/0/7))#checksum";
+
+        let parsed = parse_singlesig_display_descriptor(strip_descriptor_checksum(descriptor))
+            .expect("display descriptor");
+
+        assert_eq!(parsed.addr_type, HwiAddressType::ShWit);
+        assert_eq!(
+            parsed.fingerprint,
+            Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd])
+        );
+        assert_eq!(
+            parsed.origin_path,
+            DerivationPath::from_str("m/49h/1h/0h").unwrap()
+        );
+        assert_eq!(
+            parsed.full_path,
+            DerivationPath::from_str("m/49h/1h/0h/0/7").unwrap()
+        );
+        assert_eq!(
+            parsed.key,
+            "tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT"
+        );
+    }
+
+    #[test]
+    fn display_descriptor_requires_origin() {
+        let err = parse_singlesig_display_descriptor("wpkh(tpubDD8d3xExampleKeyMaterial/0/7)")
+            .expect_err("missing origin");
+
+        assert_eq!(err.code, HwiErrorCode::BadArgument.code());
+        assert!(err.error.contains("Descriptor missing origin info"));
+    }
+
+    #[test]
+    fn display_descriptor_rejects_invalid_base58_key_like_python_hwi() {
+        let err = parse_singlesig_display_descriptor("wpkh([0f056943/84h/1h/0h]not_an_xpub/0/0)")
+            .expect_err("invalid key");
+
+        assert_eq!(err.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(err.error, "Character '_' is not a valid base58 character");
+    }
+
+    #[test]
+    fn parses_coldcard_sortedmulti_display_descriptor() {
+        let descriptor = "sh(wsh(sortedmulti(2,[f5acc2fd/48h/1h/0h/0h/0]0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,[aaaaaaaa/48h/1h/1h/0h/0]03f028892bad7ed57d2fb57bf33081d5cfcf6f9ed3d3d7f159c2e2fff579dc341a)))";
+
+        let parsed = multisig_display_address_from_descriptor(descriptor)
+            .expect("multisig display descriptor");
+
+        assert_eq!(parsed.threshold, 2);
+        assert!(matches!(parsed.address_type, MultisigAddressType::ShWit));
+        assert_eq!(parsed.keys.len(), 2);
+        assert_eq!(
+            parsed.keys[0].path,
+            DerivationPath::from_str("m/48h/1h/0h/0h/0").unwrap()
+        );
+        assert_eq!(
+            parsed.keys[1].path,
+            DerivationPath::from_str("m/48h/1h/1h/0h/0").unwrap()
+        );
     }
 
     #[test]

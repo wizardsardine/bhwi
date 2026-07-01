@@ -343,6 +343,36 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn candidate_displayaddress_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        for case in displayaddress_arg_cases(&device_type)? {
+            match case.expect {
+                ExpectedResult::Success => assert_displayaddress_parity(case.args.clone())
+                    .with_context(|| {
+                        format!("displayaddress parity failed for args: {:?}", case.args)
+                    })?,
+                ExpectedResult::Error => {
+                    assert_error_json_parity(case.args.clone()).with_context(|| {
+                        format!(
+                            "displayaddress error parity failed for args: {:?}",
+                            case.args
+                        )
+                    })?
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn assert_enumerate_parity(
         args: Vec<String>,
         expected_device_type: Option<&str>,
@@ -499,6 +529,28 @@ mod tests {
         Ok(())
     }
 
+    fn assert_displayaddress_parity(args: Vec<String>) -> Result<()> {
+        prepare_displayaddress_run(&args)?;
+        let reference = HwiBinary::reference()?.run(args.clone())?;
+        assert_success("reference", &reference)?;
+        assert_displayaddress_shape("reference", &reference.json)?;
+
+        prepare_displayaddress_run(&args)?;
+        let candidate = HwiBinary::candidate()?.run(args)?;
+        assert_success("candidate", &candidate)?;
+        assert_displayaddress_shape("candidate", &candidate.json)?;
+
+        if reference.json != candidate.json {
+            bail!(
+                "HWI displayaddress JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(&reference.json)?,
+                serde_json::to_string_pretty(&candidate.json)?
+            );
+        }
+
+        Ok(())
+    }
+
     fn assert_signtx_parity(args: Vec<String>, case: &SigntxCase) -> Result<()> {
         prepare_signtx_run(&args, case)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
@@ -561,6 +613,12 @@ mod tests {
                 serde_json::to_string_pretty(json)?
             );
         }
+        Ok(())
+    }
+
+    fn assert_displayaddress_shape(label: &str, json: &Value) -> Result<()> {
+        assert_exact_keys(label, "displayaddress", json, &["address"])?;
+        assert_string_json_field(label, json, "address")?;
         Ok(())
     }
 
@@ -1311,6 +1369,27 @@ mod tests {
         Xpub::from_str(xpub).context("reference xpub was invalid")
     }
 
+    struct ExpertXpub {
+        pubkey: String,
+    }
+
+    fn reference_expert_xpub(device_type: &str, path: &str) -> Result<ExpertXpub> {
+        let output = HwiBinary::reference()?.run(args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--expert",
+            "--device-type",
+            device_type,
+            "getxpub",
+            path,
+        ]))?;
+        assert_success("reference", &output)?;
+        Ok(ExpertXpub {
+            pubkey: assert_string_json_field("reference", &output.json, "pubkey")?.to_owned(),
+        })
+    }
+
     fn signtx_args(device_type: &str, psbt: &str) -> Vec<String> {
         args([
             "--emulators",
@@ -1332,6 +1411,118 @@ mod tests {
         Ok(vec![("hello", path), ("hello world", path)])
     }
 
+    fn displayaddress_arg_cases(device_type: &str) -> Result<Vec<CommandCase>> {
+        let fingerprint = reference_fingerprint(device_type)?;
+        let wit_xpub = reference_xpub(device_type, "m/84'/1'/0'")?;
+        let sh_wit_xpub = reference_xpub(device_type, "m/49'/1'/0'")?;
+        let legacy_xpub = reference_xpub(device_type, "m/44'/1'/0'")?;
+        let fingerprint = fingerprint.to_string();
+        let wit_xpub_string = wit_xpub.to_string();
+        let wit_pubkey = lower_hex(&wit_xpub.public_key.serialize());
+        let sh_wit_xpub = sh_wit_xpub.to_string();
+        let legacy_xpub = legacy_xpub.to_string();
+
+        let mut cases = vec![
+            CommandCase {
+                args: displayaddress_path_args(device_type, "legacy", "m/44h/1h/0h/0/0"),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: displayaddress_path_args(device_type, "sh_wit", "m/49h/1h/0h/0/0"),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: displayaddress_path_args(device_type, "wit", "m/84h/1h/0h/0/0"),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: displayaddress_desc_args(
+                    device_type,
+                    &format!("wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/0/0)"),
+                ),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: displayaddress_desc_args(
+                    device_type,
+                    &format!("wpkh([{fingerprint}/84h/1h/0h]{wit_pubkey}/0/0)"),
+                ),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: displayaddress_desc_args(
+                    device_type,
+                    &format!("sh(wpkh([{fingerprint}/49h/1h/0h]{sh_wit_xpub}/0/0))"),
+                ),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: displayaddress_desc_args(
+                    device_type,
+                    &format!("pkh([{fingerprint}/44h/1h/0h]{legacy_xpub}/0/0)"),
+                ),
+                expect: ExpectedResult::Success,
+            },
+        ];
+
+        cases.push(CommandCase {
+            args: displayaddress_path_args(device_type, "tap", "m/86h/1h/0h/0/0"),
+            expect: if device_type == "ledger" {
+                ExpectedResult::Success
+            } else {
+                ExpectedResult::Error
+            },
+        });
+        cases.push(CommandCase {
+            args: displayaddress_desc_args(
+                device_type,
+                &format!("wpkh([00000000/84h/1h/0h]{wit_xpub_string}/0/0)"),
+            ),
+            expect: ExpectedResult::Error,
+        });
+        cases.push(CommandCase {
+            args: displayaddress_desc_args(
+                device_type,
+                &format!("wpkh([{fingerprint}/84h/1h/0h]not_an_xpub/0/0)"),
+            ),
+            expect: ExpectedResult::Error,
+        });
+        if device_type == "coldcard" {
+            // A standalone Python HWI displayaddress run cannot display a
+            // Coldcard multisig descriptor until the matching multisig wallet
+            // is registered in simulator state. Keep the unregistered-wallet
+            // contract in parity here; registered multisig display belongs in a
+            // setup-backed case.
+            for descriptor in coldcard_multisig_display_descriptors(device_type, &fingerprint)? {
+                cases.push(CommandCase {
+                    args: displayaddress_desc_args(device_type, &descriptor),
+                    expect: ExpectedResult::Error,
+                });
+            }
+        }
+
+        Ok(cases)
+    }
+
+    fn coldcard_multisig_display_descriptors(
+        device_type: &str,
+        fingerprint: &str,
+    ) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        for account in 0..3 {
+            let origin_path = format!("48h/1h/{account}h/0h/0");
+            let full_path = format!("m/{origin_path}/0");
+            let expert = reference_expert_xpub(device_type, &full_path)?;
+            keys.push(format!("[{fingerprint}/{origin_path}/0]{}", expert.pubkey));
+        }
+        let keys = keys.join(",");
+        Ok(vec![
+            format!("sh(sortedmulti(2,{keys}))"),
+            format!("wsh(sortedmulti(2,{keys}))"),
+            format!("sh(wsh(sortedmulti(2,{keys})))"),
+        ])
+    }
+
     fn signmessage_args(device_type: &str, message: &str, path: &str) -> Vec<String> {
         args([
             "--emulators",
@@ -1345,12 +1536,54 @@ mod tests {
         ])
     }
 
+    fn displayaddress_path_args(device_type: &str, addr_type: &str, path: &str) -> Vec<String> {
+        args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            device_type,
+            "displayaddress",
+            "--addr-type",
+            addr_type,
+            "--path",
+            path,
+        ])
+    }
+
+    fn displayaddress_desc_args(device_type: &str, descriptor: &str) -> Vec<String> {
+        args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            device_type,
+            "displayaddress",
+            "--desc",
+            descriptor,
+        ])
+    }
+
     fn prepare_signmessage_run(args: &[String]) -> Result<()> {
         let Some(device_type) = arg_value(args, "--device-type") else {
             return Ok(());
         };
         match device_type {
             "ledger" => set_ledger_signmessage_automation(),
+            "coldcard" => {
+                spawn_coldcard_approval();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn prepare_displayaddress_run(args: &[String]) -> Result<()> {
+        let Some(device_type) = arg_value(args, "--device-type") else {
+            return Ok(());
+        };
+        match device_type {
+            "ledger" => set_ledger_displayaddress_automation(),
             "coldcard" => {
                 spawn_coldcard_approval();
                 Ok(())
@@ -1391,6 +1624,13 @@ mod tests {
     fn set_ledger_signmessage_automation() -> Result<()> {
         let automation =
             serde_json::from_str(include_str!("../../ledger/automations/sign_message.json"))?;
+        post_speculos_automation(&automation)
+    }
+
+    fn set_ledger_displayaddress_automation() -> Result<()> {
+        let automation = serde_json::from_str(include_str!(
+            "../../ledger/automations/display_address.json"
+        ))?;
         post_speculos_automation(&automation)
     }
 
@@ -1801,5 +2041,15 @@ mod tests {
             "coldcard" | "jade" | "ledger" => Ok(device_type),
             _ => bail!("unsupported HWI_PARITY_DEVICE_TYPE {device_type:?}"),
         }
+    }
+
+    fn lower_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        out
     }
 }
