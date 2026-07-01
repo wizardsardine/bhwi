@@ -490,6 +490,11 @@ impl TryFrom<Command> for JadeCommand {
                 path,
                 variant: jade_path_variant(address_format)?,
             })),
+            Command::DisplayAddress(DisplayAddress::ByMultisig(_), _) => {
+                Err(Error::UnsupportedDisplayAddress(
+                    "Jade raw multisig display is not implemented".into(),
+                ))
+            }
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
             Command::GetVersion => Ok(Self::GetInfo),
             Command::RegisterWallet { name, policy } => {

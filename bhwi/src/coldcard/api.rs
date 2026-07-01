@@ -1,6 +1,8 @@
 // See https://github.com/Coldcard/ckcc-protocol for implementation details.
 pub mod request {
-    use bitcoin::bip32::DerivationPath;
+    use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
+
+    use crate::common::MultisigDisplayKey;
 
     pub const MAX_UPLOAD_CHUNK_LEN: usize = 2048;
 
@@ -43,7 +45,7 @@ pub mod request {
         pub fn from_address_type(addr_type: bitcoin::address::AddressType) -> u32 {
             match addr_type {
                 bitcoin::address::AddressType::P2pkh => AF_P2PKH,
-                bitcoin::address::AddressType::P2sh => AF_P2SH,
+                bitcoin::address::AddressType::P2sh => AF_P2WPKH_P2SH,
                 bitcoin::address::AddressType::P2wpkh => AF_P2WPKH,
                 bitcoin::address::AddressType::P2wsh => AF_P2WSH,
                 bitcoin::address::AddressType::P2tr => AF_P2TR,
@@ -57,6 +59,38 @@ pub mod request {
         data.extend(addr_fmt.to_le_bytes());
         data.extend(path.to_string().as_bytes());
         data
+    }
+
+    pub fn show_p2sh_address(
+        threshold: u8,
+        keys: &[MultisigDisplayKey],
+        redeem_script: &[u8],
+        addr_fmt: u32,
+    ) -> Vec<u8> {
+        let mut data = b"p2sh".to_vec();
+        data.extend(addr_fmt.to_le_bytes());
+        data.push(threshold);
+        data.push(keys.len() as u8);
+        data.extend((redeem_script.len() as u16).to_le_bytes());
+        data.extend(redeem_script);
+        for key in keys {
+            let path = coldcard_xfp_path(key.fingerprint, &key.path);
+            data.push(path.len() as u8);
+            for child in path {
+                data.extend(child.to_le_bytes());
+            }
+        }
+        data
+    }
+
+    fn coldcard_xfp_path(fingerprint: Fingerprint, path: &DerivationPath) -> Vec<u32> {
+        let mut result = vec![u32::from_le_bytes(fingerprint.to_bytes())];
+        result.extend(path.as_ref().iter().copied().map(child_number_u32));
+        result
+    }
+
+    fn child_number_u32(child: ChildNumber) -> u32 {
+        u32::from(child)
     }
 
     pub fn miniscript_address(name: &str, change: bool, index: u32) -> Vec<u8> {
@@ -171,6 +205,14 @@ mod tests {
         assert_eq!(&req[..4], b"enrl");
         assert_eq!(u32::from_le_bytes(req[4..8].try_into().unwrap()), 321);
         assert_eq!(&req[8..], &hash);
+    }
+
+    #[test]
+    fn p2sh_address_type_maps_to_nested_segwit_for_path_display() {
+        assert_eq!(
+            super::request::addr_fmt::from_address_type(bitcoin::address::AddressType::P2sh),
+            super::request::addr_fmt::AF_P2WPKH_P2SH
+        );
     }
 
     #[test]
@@ -351,6 +393,9 @@ pub mod response {
                 Ok(ColdcardResponse::Address(address))
             }
             (ResponseMessage::Refu, _) => Ok(ColdcardResponse::Ok),
+            (ResponseMessage::Err_, data) => Err(ColdcardError::Device(
+                String::from_utf8_lossy(data).into_owned(),
+            )),
             (msg, _) => Err(ColdcardError::unexpected_response_message(
                 msg,
                 &[ResponseMessage::Asci, ResponseMessage::Refu],
@@ -365,6 +410,9 @@ pub mod response {
                 Ok(ColdcardResponse::Address(address))
             }
             (ResponseMessage::Refu, _) => Ok(ColdcardResponse::Ok),
+            (ResponseMessage::Err_, data) => Err(ColdcardError::Device(
+                String::from_utf8_lossy(data).into_owned(),
+            )),
             (msg, _) => Err(ColdcardError::unexpected_response_message(
                 msg,
                 &[ResponseMessage::Asci, ResponseMessage::Refu],

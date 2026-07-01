@@ -518,6 +518,12 @@ where
                             Some(cmd),
                         )
                     }
+                    DisplayAddress::ByMultisig(_) => {
+                        return Err(LedgerError::UnsupportedDisplayAddress(
+                            "Ledger raw multisig display is not implemented".into(),
+                        )
+                        .into());
+                    }
                 }
             }
             State::GetWalletAddress(GetWalletAddressStep::Xpub {
@@ -558,6 +564,12 @@ where
                                 "Ledger requires DeviceContext::Ledger for descriptor-based address display",
                             ))?;
                         (wallet_policy, wallet_hmac, change, index)
+                    }
+                    DisplayAddress::ByMultisig(_) => {
+                        return Err(LedgerError::UnsupportedDisplayAddress(
+                            "Ledger raw multisig display is not implemented".into(),
+                        )
+                        .into());
                     }
                 };
                 let store = Some(ledger_policy.to_store().map_err(LedgerError::from)?);
@@ -772,7 +784,14 @@ impl TryFrom<Command> for LedgerCommand {
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
             Command::GetXpub { path, display } => Ok(Self::GetXpub { path, display }),
             Command::DisplayAddress(addr, ctx) => Ok(Self::GetWalletAddress {
-                address: addr,
+                address: match addr {
+                    DisplayAddress::ByMultisig(_) => {
+                        return Err(LedgerError::UnsupportedDisplayAddress(
+                            "Ledger raw multisig display is not implemented".into(),
+                        ));
+                    }
+                    address => address,
+                },
                 context: ctx,
             }),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),

@@ -4,6 +4,7 @@ pub mod encrypt;
 use std::string::FromUtf8Error;
 
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
+use bitcoin::blockdata::{opcodes::all::OP_CHECKMULTISIG, script::Builder};
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::Signature;
@@ -15,7 +16,8 @@ use miniscript::{
 use crate::Interpreter;
 use crate::coldcard::api::response::ResponseMessage;
 use crate::common::{
-    Command, DeviceBackup, DisplayAddress, Error, Info, Recipient, Response, Transmit,
+    Command, DeviceBackup, DisplayAddress, Error, Info, MultisigAddressType,
+    MultisigDisplayAddress, Recipient, Response, Transmit,
 };
 use crate::device::DeviceId;
 
@@ -32,6 +34,9 @@ pub enum ColdcardError {
 
     #[error("missing command info: {0}")]
     MissingCommandInfo(&'static str),
+
+    #[error("Coldcard Error: {0}")]
+    Device(String),
 
     #[error("no error or result returned")]
     NoErrorOrResult,
@@ -76,6 +81,9 @@ pub enum ColdcardCommand {
     ShowAddress {
         path: DerivationPath,
         addr_fmt: u32,
+    },
+    ShowP2shAddress {
+        address: MultisigDisplayAddress,
     },
     MiniscriptAddress {
         name: String,
@@ -241,6 +249,15 @@ where
             ColdcardCommand::ShowAddress { path, addr_fmt } => {
                 request(api::request::show_address(path, *addr_fmt), self.encryption)?
             }
+            ColdcardCommand::ShowP2shAddress { address } => request(
+                api::request::show_p2sh_address(
+                    address.threshold,
+                    &address.keys,
+                    &multisig_redeem_script(address)?,
+                    multisig_addr_fmt(address.address_type),
+                ),
+                self.encryption,
+            )?,
             ColdcardCommand::MiniscriptAddress {
                 name,
                 change,
@@ -320,6 +337,11 @@ where
                 Ok(None)
             }
             State::Running(ColdcardCommand::ShowAddress { .. }) => {
+                let data = self.encryption.decrypt(data)?;
+                self.state = State::Finished(api::response::show_address(&data)?);
+                Ok(None)
+            }
+            State::Running(ColdcardCommand::ShowP2shAddress { .. }) => {
                 let data = self.encryption.decrypt(data)?;
                 self.state = State::Finished(api::response::show_address(&data)?);
                 Ok(None)
@@ -568,6 +590,9 @@ impl TryFrom<Command> for ColdcardCommand {
                 change,
                 index,
             }),
+            Command::DisplayAddress(DisplayAddress::ByMultisig(address), ..) => {
+                Ok(Self::ShowP2shAddress { address })
+            }
             Command::RegisterWallet { name, policy } => Ok(Self::RegisterWallet {
                 payload: coldcard_registration_payload(&name, &policy)?,
             }),
@@ -691,6 +716,29 @@ fn validate_coldcard_registration_key(key: &DescriptorPublicKey) -> Result<(), C
     }
 }
 
+fn multisig_addr_fmt(address_type: MultisigAddressType) -> u32 {
+    match address_type {
+        MultisigAddressType::Legacy => api::request::addr_fmt::AF_P2SH,
+        MultisigAddressType::ShWit => api::request::addr_fmt::AF_P2WSH_P2SH,
+        MultisigAddressType::Wit => api::request::addr_fmt::AF_P2WSH,
+    }
+}
+
+fn multisig_redeem_script(address: &MultisigDisplayAddress) -> Result<Vec<u8>, ColdcardError> {
+    let mut builder = Builder::new().push_int(i64::from(address.threshold));
+    for key in &address.keys {
+        builder = builder.push_slice(key.public_key.serialize());
+    }
+    let signer_count = i64::try_from(address.keys.len()).map_err(|_| {
+        ColdcardError::Serialization("too many multisig keys for Coldcard".to_string())
+    })?;
+    Ok(builder
+        .push_int(signer_count)
+        .push_opcode(OP_CHECKMULTISIG)
+        .into_script()
+        .to_bytes())
+}
+
 impl From<ColdcardResponse> for Response {
     fn from(res: ColdcardResponse) -> Response {
         match res {
@@ -737,6 +785,7 @@ impl From<ColdcardError> for Error {
         match error {
             ColdcardError::Encryption(e) => Error::Encryption(e),
             ColdcardError::MissingCommandInfo(e) => Error::MissingCommandInfo(e),
+            ColdcardError::Device(s) => Error::Device(format!("Coldcard Error: {s}")),
             ColdcardError::NoErrorOrResult => Error::NoErrorOrResult,
             ColdcardError::Serialization(s) => Error::Serialization(s),
             ColdcardError::InvalidInput(s) => Error::InvalidInput(s),

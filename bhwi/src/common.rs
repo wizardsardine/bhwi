@@ -6,7 +6,7 @@ use bitcoin::Network;
 use bitcoin::address::AddressType;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::psbt::Psbt;
-use bitcoin::secp256k1::ecdsa::Signature;
+use bitcoin::secp256k1::{PublicKey, ecdsa::Signature};
 
 #[derive(Default)]
 pub struct UnlockOptions {
@@ -26,6 +26,28 @@ pub enum DisplayAddress {
         display: bool,
         descriptor_name: String,
     },
+    ByMultisig(MultisigDisplayAddress),
+}
+
+#[derive(Clone, Debug)]
+pub struct MultisigDisplayAddress {
+    pub threshold: u8,
+    pub address_type: MultisigAddressType,
+    pub keys: Vec<MultisigDisplayKey>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum MultisigAddressType {
+    Legacy,
+    ShWit,
+    Wit,
+}
+
+#[derive(Clone, Debug)]
+pub struct MultisigDisplayKey {
+    pub fingerprint: Fingerprint,
+    pub path: DerivationPath,
+    pub public_key: PublicKey,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -131,6 +153,9 @@ pub enum Error {
 
     #[error("missing command info: {0}")]
     MissingCommandInfo(&'static str),
+
+    #[error("{0}")]
+    Device(String),
 
     #[error("unexpected result for {1}: {0:x?}")]
     UnexpectedResult(Vec<u8>, String),
