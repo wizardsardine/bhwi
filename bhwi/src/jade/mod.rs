@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use base64ct::{Base64, Encoding};
 use bitcoin::Network;
+use bitcoin::address::AddressType;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::Signature;
@@ -44,17 +45,25 @@ pub enum JadeCommand {
     GetMasterFingerprint,
     GetInfo,
     GetXpub(DerivationPath),
-    GetReceiveAddress {
-        index: u32,
-        change: bool,
-        descriptor_name: String,
-    },
+    GetReceiveAddress(ReceiveAddress),
     SignMessage {
         message: Vec<u8>,
         path: DerivationPath,
     },
     SignPsbt {
         psbt: Psbt,
+    },
+}
+
+pub enum ReceiveAddress {
+    Descriptor {
+        index: u32,
+        change: bool,
+        descriptor_name: String,
+    },
+    Path {
+        path: DerivationPath,
+        variant: &'static str,
     },
 }
 
@@ -213,19 +222,29 @@ where
                     psbt: psbt.serialize(),
                 }),
             ),
-            JadeCommand::GetReceiveAddress {
-                index,
-                change,
-                descriptor_name,
-            } => request(
-                "get_receive_address",
-                Some(api::DescriptorAddressParams {
-                    network: self.network,
-                    branch: u32::from(*change),
-                    pointer: *index,
+            JadeCommand::GetReceiveAddress(address) => match address {
+                ReceiveAddress::Descriptor {
+                    index,
+                    change,
                     descriptor_name,
-                }),
-            ),
+                } => request(
+                    "get_receive_address",
+                    Some(api::DescriptorAddressParams {
+                        network: self.network,
+                        branch: u32::from(*change),
+                        pointer: *index,
+                        descriptor_name,
+                    }),
+                ),
+                ReceiveAddress::Path { path, variant } => request(
+                    "get_receive_address",
+                    Some(api::PathAddressParams {
+                        network: self.network,
+                        path: path.to_u32_vec(),
+                        variant,
+                    }),
+                ),
+            },
             JadeCommand::GetInfo => request("get_version_info", None::<api::EmptyRequest>),
         };
 
@@ -380,7 +399,7 @@ where
                 }
             }
             State::GettingExtendedData { .. } => unreachable!("handled before immutable match"),
-            State::Running(JadeCommand::GetReceiveAddress { .. }) => {
+            State::Running(JadeCommand::GetReceiveAddress(_)) => {
                 let address: String = from_response(&data)?.into_result()?;
                 response = Some(JadeResponse::Address(address));
                 None
@@ -423,16 +442,22 @@ impl TryFrom<Command> for JadeCommand {
                     ..
                 },
                 _ctx,
-            ) => Ok(Self::GetReceiveAddress {
+            ) => Ok(Self::GetReceiveAddress(ReceiveAddress::Descriptor {
                 index,
                 change,
                 descriptor_name,
-            }),
-            Command::DisplayAddress(DisplayAddress::ByPath { .. }, _) => {
-                Err(Error::UnsupportedDisplayAddress(
-                    "Jade does not support path-based address display".into(),
-                ))
-            }
+            })),
+            Command::DisplayAddress(
+                DisplayAddress::ByPath {
+                    path,
+                    address_format,
+                    ..
+                },
+                _,
+            ) => Ok(Self::GetReceiveAddress(ReceiveAddress::Path {
+                path,
+                variant: jade_path_variant(address_format)?,
+            })),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
             Command::GetVersion => Ok(Self::GetInfo),
             Command::RegisterWallet { .. } => Err(Error::MissingCommandInfo(
@@ -440,6 +465,20 @@ impl TryFrom<Command> for JadeCommand {
             )),
             Command::SignTx(psbt, _) => Ok(Self::SignPsbt { psbt }),
         }
+    }
+}
+
+fn jade_path_variant(address_format: Option<AddressType>) -> Result<&'static str, Error> {
+    match address_format.unwrap_or(AddressType::P2wpkh) {
+        AddressType::P2pkh => Ok("pkh(k)"),
+        AddressType::P2sh => Ok("sh(wpkh(k))"),
+        AddressType::P2wpkh => Ok("wpkh(k)"),
+        AddressType::P2wsh | AddressType::P2tr => Err(Error::UnsupportedDisplayAddress(
+            "Jade does not support this path address format".into(),
+        )),
+        _ => Err(Error::UnsupportedDisplayAddress(
+            "Jade does not support this path address format".into(),
+        )),
     }
 }
 
@@ -496,5 +535,65 @@ impl From<JadeError> for Error {
                 Error::UnsupportedDisplayAddress("unsupported display address on Jade".into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Interpreter;
+    use crate::common::{Command, DisplayAddress, JadeInterpreter};
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct OwnedRequest {
+        method: String,
+        params: Option<OwnedPathAddressParams>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct OwnedPathAddressParams {
+        network: String,
+        path: Vec<u32>,
+        variant: String,
+    }
+
+    #[test]
+    fn path_display_request_encodes_jade_path_params() {
+        let mut interpreter = JadeInterpreter::default().with_network(Network::Testnet);
+        let transmit = interpreter
+            .start(Command::DisplayAddress(
+                DisplayAddress::ByPath {
+                    path: "m/49'/1'/0'/0/0".parse().unwrap(),
+                    display: true,
+                    address_format: Some(AddressType::P2sh),
+                },
+                None,
+            ))
+            .unwrap();
+
+        let request: OwnedRequest = serde_cbor::from_slice(&transmit.payload).unwrap();
+        let params = request.params.unwrap();
+        assert_eq!(request.method, "get_receive_address");
+        assert_eq!(params.network, JADE_NETWORK_TESTNET);
+        assert_eq!(params.variant, "sh(wpkh(k))");
+        assert_eq!(
+            params.path,
+            vec![0x8000_0031, 0x8000_0001, 0x8000_0000, 0, 0]
+        );
+    }
+
+    #[test]
+    fn path_display_rejects_unsupported_jade_address_format() {
+        let result = JadeCommand::try_from(Command::DisplayAddress(
+            DisplayAddress::ByPath {
+                path: "m/86'/1'/0'/0/0".parse().unwrap(),
+                display: true,
+                address_format: Some(AddressType::P2tr),
+            },
+            None,
+        ));
+
+        assert!(matches!(result, Err(Error::UnsupportedDisplayAddress(_))));
     }
 }
