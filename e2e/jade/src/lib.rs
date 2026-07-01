@@ -8,7 +8,7 @@ mod tests {
         Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
         Witness,
         absolute::LockTime,
-        address::Address,
+        address::{Address, AddressType},
         bip32::{ChildNumber, DerivationPath},
         psbt::{Input, Psbt},
         secp256k1::Secp256k1,
@@ -83,9 +83,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn can_display_address_miniscript() {
+    async fn can_display_address_by_path() {
         let mut dev = device().await;
-        let res = dev
+        let address = dev
             .display_address(
                 DisplayAddress::ByPath {
                     path: "m/84'/1'/0'/0/0".parse().unwrap(),
@@ -94,9 +94,43 @@ mod tests {
                 },
                 None,
             )
-            .await;
-        // Jade does not support Path-based address display
-        assert!(res.is_err());
+            .await
+            .unwrap();
+        assert_eq!(address, "tb1q9t9pgtdsyf6r8ks7gnxvj99sea4d3nmjl0tnzu");
+    }
+
+    #[tokio::test]
+    async fn can_display_nested_segwit_address_by_path() {
+        let mut dev = device().await;
+        let address = dev
+            .display_address(
+                DisplayAddress::ByPath {
+                    path: "m/49'/1'/0'/0/0".parse().unwrap(),
+                    display: true,
+                    address_format: Some(AddressType::P2sh),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(address, "2MsFo9x4kZMVumePtLZvjh9Hn9A98bS3MF6");
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_path_address_format() {
+        let mut dev = device().await;
+        let err = dev
+            .display_address(
+                DisplayAddress::ByPath {
+                    path: "m/86'/1'/0'/0/0".parse().unwrap(),
+                    display: true,
+                    address_format: Some(AddressType::P2tr),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unsupported display address"));
     }
 
     #[tokio::test]

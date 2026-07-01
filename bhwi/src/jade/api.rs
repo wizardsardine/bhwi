@@ -200,6 +200,13 @@ pub struct DescriptorAddressParams<'a> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct PathAddressParams<'a> {
+    pub network: &'a str,
+    pub path: Vec<u32>,
+    pub variant: &'a str,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SignPsbtParams<'a> {
     pub network: &'a str,
     #[serde(with = "serde_bytes")]
