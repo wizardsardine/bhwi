@@ -121,6 +121,30 @@ pub enum HwiCliCommand {
         #[arg(long)]
         path: Option<String>,
     },
+    Setup {
+        #[arg(long, short = 'l', default_value = "")]
+        label: String,
+        #[arg(long = "backup_passphrase", short = 'b', default_value = "")]
+        backup_passphrase: String,
+    },
+    Wipe,
+    Restore {
+        #[arg(long = "word_count", short = 'w', default_value_t = 24)]
+        word_count: i32,
+        #[arg(long, short = 'l', default_value = "")]
+        label: String,
+    },
+    Backup {
+        #[arg(long, short = 'l', default_value = "")]
+        label: String,
+        #[arg(long = "backup_passphrase", short = 'b', default_value = "")]
+        backup_passphrase: String,
+    },
+    Promptpin,
+    Sendpin {
+        pin: String,
+    },
+    Togglepassphrase,
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -163,7 +187,32 @@ pub enum HwiCommand {
         all: bool,
         path: Option<String>,
     },
+    UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
     Unsupported(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum HwiUnsupportedDeviceAction {
+    Setup {
+        interactive: bool,
+        label: String,
+        backup_passphrase: String,
+    },
+    Wipe,
+    Restore {
+        interactive: bool,
+        word_count: i32,
+        label: String,
+    },
+    Backup {
+        label: String,
+        backup_passphrase: String,
+    },
+    PromptPin,
+    SendPin {
+        pin: String,
+    },
+    TogglePassphrase,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -364,6 +413,9 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
             )
             .await
         }
+        HwiCommand::UnsupportedDeviceAction(action) => {
+            unsupported_device_action(request.selector, action).await
+        }
         HwiCommand::Unsupported(command) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             format!("Unsupported HWI command: {command}"),
@@ -472,6 +524,47 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
         });
     }
     HwiResponse::Enumerate(response)
+}
+
+async fn unsupported_device_action(
+    selector: DeviceSelector,
+    action: HwiUnsupportedDeviceAction,
+) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    let error = match action {
+        HwiUnsupportedDeviceAction::Setup { interactive, .. } if !interactive => {
+            "setup requires interactive mode".to_owned()
+        }
+        HwiUnsupportedDeviceAction::Restore { interactive, .. } if !interactive => {
+            "restore requires interactive mode".to_owned()
+        }
+        action => hwi_unavailable_action_message(device.device_type(), &action),
+    };
+
+    HwiResponse::Error(HwiError::new(HwiErrorCode::UnsupportedCommand, error))
 }
 
 async fn get_master_xpub(
@@ -1635,6 +1728,78 @@ fn label_for(device_type: DeviceType) -> Option<Option<String>> {
     }
 }
 
+fn hwi_unavailable_action_message(
+    device_type: DeviceType,
+    action: &HwiUnsupportedDeviceAction,
+) -> String {
+    match (device_type, action) {
+        (DeviceType::Ledger, HwiUnsupportedDeviceAction::Setup { .. }) => {
+            "The Ledger Nano S and X do not support software setup"
+        }
+        (DeviceType::Ledger, HwiUnsupportedDeviceAction::Wipe) => {
+            "The Ledger Nano S and X do not support wiping via software"
+        }
+        (DeviceType::Ledger, HwiUnsupportedDeviceAction::Restore { .. }) => {
+            "The Ledger Nano S and X do not support restoring via software"
+        }
+        (DeviceType::Ledger, HwiUnsupportedDeviceAction::Backup { .. }) => {
+            "The Ledger Nano S and X do not support creating a backup via software"
+        }
+        (DeviceType::Ledger, HwiUnsupportedDeviceAction::PromptPin) => {
+            "The Ledger Nano S and X do not need a PIN sent from the host"
+        }
+        (DeviceType::Ledger, HwiUnsupportedDeviceAction::SendPin { .. }) => {
+            "The Ledger Nano S and X do not need a PIN sent from the host"
+        }
+        (DeviceType::Ledger, HwiUnsupportedDeviceAction::TogglePassphrase) => {
+            "The Ledger Nano S and X do not support toggling passphrase from the host"
+        }
+        (DeviceType::Jade, HwiUnsupportedDeviceAction::Setup { .. }) => {
+            "Blockstream Jade does not support software setup"
+        }
+        (DeviceType::Jade, HwiUnsupportedDeviceAction::Wipe) => {
+            "Blockstream Jade does not support wiping via software"
+        }
+        (DeviceType::Jade, HwiUnsupportedDeviceAction::Restore { .. }) => {
+            "Blockstream Jade does not support restoring via software"
+        }
+        (DeviceType::Jade, HwiUnsupportedDeviceAction::Backup { .. }) => {
+            "Blockstream Jade does not support creating a backup via software"
+        }
+        (DeviceType::Jade, HwiUnsupportedDeviceAction::PromptPin) => {
+            "Blockstream Jade does not need a PIN sent from the host"
+        }
+        (DeviceType::Jade, HwiUnsupportedDeviceAction::SendPin { .. }) => {
+            "Blockstream Jade does not need a PIN sent from the host"
+        }
+        (DeviceType::Jade, HwiUnsupportedDeviceAction::TogglePassphrase) => {
+            "Blockstream Jade does not support toggling passphrase from the host"
+        }
+        (DeviceType::Coldcard, HwiUnsupportedDeviceAction::Setup { .. }) => {
+            "The Coldcard does not support software setup"
+        }
+        (DeviceType::Coldcard, HwiUnsupportedDeviceAction::Wipe) => {
+            "The Coldcard does not support wiping via software"
+        }
+        (DeviceType::Coldcard, HwiUnsupportedDeviceAction::Restore { .. }) => {
+            "The Coldcard does not support restoring via software"
+        }
+        (DeviceType::Coldcard, HwiUnsupportedDeviceAction::Backup { .. }) => {
+            "The Coldcard does not support creating a backup via software"
+        }
+        (DeviceType::Coldcard, HwiUnsupportedDeviceAction::PromptPin) => {
+            "The Coldcard does not need a PIN sent from the host"
+        }
+        (DeviceType::Coldcard, HwiUnsupportedDeviceAction::SendPin { .. }) => {
+            "The Coldcard does not need a PIN sent from the host"
+        }
+        (DeviceType::Coldcard, HwiUnsupportedDeviceAction::TogglePassphrase) => {
+            "The Coldcard does not support toggling passphrase from the host"
+        }
+    }
+    .to_owned()
+}
+
 fn print_response(response: HwiResponse) -> ExitCode {
     match response {
         HwiResponse::Error(error) => {
@@ -1729,6 +1894,40 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             all,
             path,
         },
+        HwiCliCommand::Setup {
+            label,
+            backup_passphrase,
+        } => HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Setup {
+            interactive: args.interactive,
+            label,
+            backup_passphrase,
+        }),
+        HwiCliCommand::Wipe => {
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Wipe)
+        }
+        HwiCliCommand::Restore { word_count, label } => {
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Restore {
+                interactive: args.interactive,
+                word_count,
+                label,
+            })
+        }
+        HwiCliCommand::Backup {
+            label,
+            backup_passphrase,
+        } => HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Backup {
+            label,
+            backup_passphrase,
+        }),
+        HwiCliCommand::Promptpin => {
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::PromptPin)
+        }
+        HwiCliCommand::Sendpin { pin } => {
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::SendPin { pin })
+        }
+        HwiCliCommand::Togglepassphrase => {
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::TogglePassphrase)
+        }
         HwiCliCommand::External(argv) => {
             let command = argv
                 .first()
@@ -2171,10 +2370,153 @@ mod tests {
     }
 
     #[test]
-    fn captures_unsupported_commands() {
-        let request = parse_args(["hwi", "setup"]).expect("unsupported command request");
+    fn parses_setup_unsupported_action() {
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "test",
+            "--device-type",
+            "ledger",
+            "--interactive",
+            "setup",
+            "-l",
+            "HWI Ledger",
+            "-b",
+            "backup passphrase",
+        ])
+        .expect("unsupported setup request");
 
-        assert_eq!(request.command, HwiCommand::Unsupported("setup".to_owned()));
+        assert_eq!(request.selector.network, Network::Testnet);
+        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(
+            request.command,
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Setup {
+                interactive: true,
+                label: "HWI Ledger".to_owned(),
+                backup_passphrase: "backup passphrase".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_restore_unsupported_action() {
+        let request = parse_args([
+            "hwi",
+            "--device-type",
+            "jade",
+            "--interactive",
+            "restore",
+            "--word_count",
+            "12",
+            "--label",
+            "HWI Jade",
+        ])
+        .expect("unsupported restore request");
+
+        assert_eq!(
+            request.command,
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Restore {
+                interactive: true,
+                word_count: 12,
+                label: "HWI Jade".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_backup_unsupported_action() {
+        let request = parse_args([
+            "hwi",
+            "--device-type",
+            "coldcard",
+            "backup",
+            "--label",
+            "HWI Coldcard",
+            "--backup_passphrase",
+            "backup passphrase",
+        ])
+        .expect("unsupported backup request");
+
+        assert_eq!(
+            request.command,
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Backup {
+                label: "HWI Coldcard".to_owned(),
+                backup_passphrase: "backup passphrase".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_pin_and_passphrase_unsupported_actions() {
+        let promptpin = parse_args(["hwi", "--device-type", "ledger", "promptpin"])
+            .expect("unsupported promptpin request");
+        assert_eq!(
+            promptpin.command,
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::PromptPin)
+        );
+
+        let sendpin = parse_args(["hwi", "--device-type", "ledger", "sendpin", "1234"])
+            .expect("unsupported sendpin request");
+        assert_eq!(
+            sendpin.command,
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::SendPin {
+                pin: "1234".to_owned()
+            })
+        );
+
+        let togglepassphrase = parse_args(["hwi", "--device-type", "ledger", "togglepassphrase"])
+            .expect("unsupported togglepassphrase request");
+        assert_eq!(
+            togglepassphrase.command,
+            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::TogglePassphrase)
+        );
+    }
+
+    #[test]
+    fn captures_unknown_unsupported_commands() {
+        let request = parse_args(["hwi", "unknowncommand"]).expect("unsupported command request");
+
+        assert_eq!(
+            request.command,
+            HwiCommand::Unsupported("unknowncommand".to_owned())
+        );
+    }
+
+    #[test]
+    fn unsupported_action_without_selector_returns_no_device_type() {
+        let request = parse_args(["hwi", "wipe"]).expect("unsupported wipe request");
+        let response = futures::executor::block_on(process_request(request));
+        let HwiResponse::Error(error) = response else {
+            panic!("expected HWI error");
+        };
+
+        assert_eq!(error.code, HwiErrorCode::NoDeviceType.code());
+        assert_eq!(
+            error.error,
+            "You must specify a device type or fingerprint for all commands except enumerate"
+        );
+    }
+
+    #[test]
+    fn unsupported_action_messages_match_python_hwi() {
+        assert_eq!(
+            hwi_unavailable_action_message(DeviceType::Ledger, &HwiUnsupportedDeviceAction::Wipe),
+            "The Ledger Nano S and X do not support wiping via software"
+        );
+        assert_eq!(
+            hwi_unavailable_action_message(
+                DeviceType::Jade,
+                &HwiUnsupportedDeviceAction::TogglePassphrase,
+            ),
+            "Blockstream Jade does not support toggling passphrase from the host"
+        );
+        assert_eq!(
+            hwi_unavailable_action_message(
+                DeviceType::Coldcard,
+                &HwiUnsupportedDeviceAction::PromptPin,
+            ),
+            "The Coldcard does not need a PIN sent from the host"
+        );
     }
 
     #[test]

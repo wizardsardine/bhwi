@@ -373,6 +373,43 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn candidate_unsupported_device_actions_match_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        for case in unsupported_device_action_cases(&device_type) {
+            if device_type == "coldcard" && case.command == "backup" {
+                let candidate =
+                    assert_candidate_error_json(case.args.clone()).with_context(|| {
+                        format!(
+                            "candidate Coldcard backup deviation failed for args: {:?}",
+                            case.args
+                        )
+                    })?;
+                assert_eq!(candidate["code"], -9);
+                assert_eq!(
+                    candidate["error"],
+                    "The Coldcard does not support creating a backup via software"
+                );
+            } else {
+                assert_error_json_parity(case.args.clone()).with_context(|| {
+                    format!(
+                        "unsupported device action parity failed for args: {:?}",
+                        case.args
+                    )
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn assert_enumerate_parity(
         args: Vec<String>,
         expected_device_type: Option<&str>,
@@ -505,6 +542,12 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn assert_candidate_error_json(args: Vec<String>) -> Result<Value> {
+        let candidate = HwiBinary::candidate()?.run(args)?;
+        assert_error_shape("candidate", &candidate.json)?;
+        Ok(candidate.json)
     }
 
     fn assert_signmessage_parity(args: Vec<String>) -> Result<()> {
@@ -1847,6 +1890,11 @@ mod tests {
         expect: ExpectedResult,
     }
 
+    struct UnsupportedDeviceActionCase {
+        command: &'static str,
+        args: Vec<String>,
+    }
+
     fn getkeypool_arg_cases(device_type: &str) -> Vec<CommandCase> {
         let mut cases = vec![
             CommandCase {
@@ -1934,6 +1982,129 @@ mod tests {
         });
 
         cases
+    }
+
+    fn unsupported_device_action_cases(device_type: &str) -> Vec<UnsupportedDeviceActionCase> {
+        vec![
+            UnsupportedDeviceActionCase {
+                command: "setup",
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "setup",
+                ]),
+            },
+            UnsupportedDeviceActionCase {
+                command: "setup",
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "--interactive",
+                    "setup",
+                    "--label",
+                    "HWI Test",
+                    "--backup_passphrase",
+                    "backup passphrase",
+                ]),
+            },
+            UnsupportedDeviceActionCase {
+                command: "wipe",
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "wipe",
+                ]),
+            },
+            UnsupportedDeviceActionCase {
+                command: "restore",
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "restore",
+                    "--word_count",
+                    "12",
+                    "--label",
+                    "HWI Test",
+                ]),
+            },
+            UnsupportedDeviceActionCase {
+                command: "restore",
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "--interactive",
+                    "restore",
+                    "-w",
+                    "18",
+                    "-l",
+                    "HWI Test",
+                ]),
+            },
+            UnsupportedDeviceActionCase {
+                command: "backup",
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "backup",
+                    "--label",
+                    "HWI Test",
+                    "--backup_passphrase",
+                    "backup passphrase",
+                ]),
+            },
+            UnsupportedDeviceActionCase {
+                command: "promptpin",
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "promptpin",
+                ]),
+            },
+            UnsupportedDeviceActionCase {
+                command: "sendpin",
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "sendpin",
+                    "1234",
+                ]),
+            },
+            UnsupportedDeviceActionCase {
+                command: "togglepassphrase",
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "togglepassphrase",
+                ]),
+            },
+        ]
     }
 
     fn enumerate_python_hwi_arg_cases(
