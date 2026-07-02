@@ -11,6 +11,10 @@ pub mod request {
         data
     }
 
+    pub fn start_backup() -> Vec<u8> {
+        b"back".to_vec()
+    }
+
     pub fn get_xpub(path: &DerivationPath) -> Vec<u8> {
         if path.is_master() {
             "xpubm".as_bytes().to_vec()
@@ -105,6 +109,10 @@ pub mod request {
         b"stok".to_vec()
     }
 
+    pub fn get_backup_file() -> Vec<u8> {
+        b"bkok".to_vec()
+    }
+
     pub fn download(offset: u32, length: u32, file_number: u32) -> Vec<u8> {
         let mut rv = b"dwld".to_vec();
         rv.extend(offset.to_le_bytes());
@@ -147,6 +155,12 @@ mod tests {
         assert_eq!(u32::from_le_bytes(req[4..8].try_into().unwrap()), 99);
         assert_eq!(u32::from_le_bytes(req[8..12].try_into().unwrap()), 0);
         assert_eq!(&req[12..], &hash);
+    }
+
+    #[test]
+    fn backup_requests_encode_command_names() {
+        assert_eq!(super::request::start_backup(), b"back");
+        assert_eq!(super::request::get_backup_file(), b"bkok");
     }
 
     #[test]

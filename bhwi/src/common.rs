@@ -28,6 +28,7 @@ pub enum DisplayAddress {
 
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
+    Backup,
     GetMasterFingerprint,
     GetVersion,
     GetXpub {
@@ -60,6 +61,7 @@ pub enum DeviceContext {
 }
 
 pub enum Response {
+    Backup(Vec<u8>),
     TaskDone,
     TaskBusy,
     Info(Info),
