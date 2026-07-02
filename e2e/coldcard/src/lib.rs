@@ -30,6 +30,15 @@ impl DeviceControl {
         self.client.exchange(b"XKEYy", false).await.unwrap();
         Ok(())
     }
+
+    pub async fn approve_backup(&mut self) -> Result<()> {
+        self.client.exchange(b"XKEYy", false).await.unwrap();
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            self.client.exchange(b"XKEY1", false).await.unwrap();
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +243,18 @@ mod tests {
         assert_eq!(signed.inputs.len(), 1);
         assert_eq!(signed.inputs[0].partial_sigs.len(), 1);
         assert!(signed.inputs[0].partial_sigs.contains_key(&input_pubkey));
+    }
+
+    #[tokio::test]
+    async fn can_backup_device() {
+        let (mut dev, mut control) = device().await;
+
+        let backup_task = dev.backup_device();
+        let (backup_res, approve_res) = tokio::join!(backup_task, control.approve_backup());
+        approve_res.unwrap();
+        let backup = backup_res.expect("failed to back up coldcard");
+
+        assert!(backup.starts_with(b"7z\xbc\xaf'\x1c"));
+        assert!(backup.len() > 1024);
     }
 }
