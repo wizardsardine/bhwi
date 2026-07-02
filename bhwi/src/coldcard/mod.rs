@@ -56,6 +56,7 @@ impl ColdcardError {
 
 pub enum ColdcardCommand {
     StartEncryption,
+    Backup,
     GetVersion,
     GetMasterFingerprint,
     GetXpub(DerivationPath),
@@ -93,6 +94,7 @@ pub enum ColdcardResponse {
     },
     Signature(u8, Signature),
     Address(String),
+    Backup(Vec<u8>),
     SignedPsbt(Psbt),
 }
 
@@ -114,13 +116,21 @@ enum State {
     },
     SigningPsbt,
     PollingSignedPsbt,
-    DownloadingSignedPsbt {
+    PollingBackupFile,
+    DownloadingFile {
+        response: FileDownloadResponse,
+        file_number: u32,
         expected_sha: [u8; 32],
         bytes: Vec<u8>,
         offset: usize,
         total_len: usize,
     },
     Finished(ColdcardResponse),
+}
+
+enum FileDownloadResponse {
+    Backup,
+    SignedPsbt,
 }
 
 pub struct ColdcardInterpreter<'a, C, T, R, E> {
@@ -162,13 +172,17 @@ fn psbt_upload_request(bytes: &[u8], offset: usize) -> Result<Vec<u8>, ColdcardE
     ))
 }
 
-fn download_request(offset: usize, total_len: usize) -> Result<Vec<u8>, ColdcardError> {
+fn download_request(
+    offset: usize,
+    total_len: usize,
+    file_number: u32,
+) -> Result<Vec<u8>, ColdcardError> {
     let length = (api::request::MAX_UPLOAD_CHUNK_LEN).min(total_len - offset);
     let offset = u32::try_from(offset)
         .map_err(|_| ColdcardError::Serialization("download offset too large".to_string()))?;
     let length = u32::try_from(length)
         .map_err(|_| ColdcardError::Serialization("download length too large".to_string()))?;
-    Ok(api::request::download(offset, length, 1))
+    Ok(api::request::download(offset, length, file_number))
 }
 
 impl<'a, C, T, R, E> Interpreter for ColdcardInterpreter<'a, C, T, R, E>
@@ -190,6 +204,7 @@ where
                 payload: api::request::start_encryption(None, &self.encryption.pub_key()?),
                 encrypted: false,
             },
+            ColdcardCommand::Backup => request(api::request::start_backup(), self.encryption)?,
             ColdcardCommand::GetVersion => request(api::request::get_version(), self.encryption)?,
             ColdcardCommand::GetMasterFingerprint => request(
                 api::request::get_xpub(&DerivationPath::master()),
@@ -255,6 +270,17 @@ where
             State::Running(ColdcardCommand::StartEncryption) => {
                 let mypub = api::response::mypub(&data)?;
                 self.state = State::Finished(mypub);
+                Ok(None)
+            }
+            State::Running(ColdcardCommand::Backup) => {
+                let data = self.encryption.decrypt(data)?;
+                let res = api::response::sign_transaction(&data)?;
+                if let ColdcardResponse::Ok | ColdcardResponse::Busy = res {
+                    self.state = State::PollingBackupFile;
+                    return Ok(Some(
+                        request(api::request::get_backup_file(), self.encryption)?.into(),
+                    ));
+                }
                 Ok(None)
             }
             State::Running(ColdcardCommand::ShowAddress { .. }) => {
@@ -348,19 +374,52 @@ where
                                 "signed psbt length cannot fit usize".to_string(),
                             )
                         })?;
-                        self.state = State::DownloadingSignedPsbt {
+                        self.state = State::DownloadingFile {
+                            response: FileDownloadResponse::SignedPsbt,
+                            file_number: 1,
                             expected_sha: sha,
                             bytes: Vec::with_capacity(total_len),
                             offset: 0,
                             total_len,
                         };
                         Ok(Some(
-                            request(download_request(0, total_len)?, self.encryption)?.into(),
+                            request(download_request(0, total_len, 1)?, self.encryption)?.into(),
                         ))
                     }
                 }
             }
-            State::DownloadingSignedPsbt {
+            State::PollingBackupFile => {
+                let data = self.encryption.decrypt(data)?;
+                match api::response::signed_transaction(&data)? {
+                    api::response::SignedTransactionStatus::Pending => {
+                        self.state = State::PollingBackupFile;
+                        Ok(Some(
+                            request(api::request::get_backup_file(), self.encryption)?.into(),
+                        ))
+                    }
+                    api::response::SignedTransactionStatus::Complete { length, sha } => {
+                        let total_len = usize::try_from(length).map_err(|_| {
+                            ColdcardError::Serialization(
+                                "backup file length cannot fit usize".to_string(),
+                            )
+                        })?;
+                        self.state = State::DownloadingFile {
+                            response: FileDownloadResponse::Backup,
+                            file_number: 0,
+                            expected_sha: sha,
+                            bytes: Vec::with_capacity(total_len),
+                            offset: 0,
+                            total_len,
+                        };
+                        Ok(Some(
+                            request(download_request(0, total_len, 0)?, self.encryption)?.into(),
+                        ))
+                    }
+                }
+            }
+            State::DownloadingFile {
+                response,
+                file_number,
                 expected_sha,
                 bytes,
                 offset,
@@ -370,32 +429,41 @@ where
                 let chunk = api::response::download(&data)?;
                 if chunk.is_empty() {
                     return Err(ColdcardError::Serialization(
-                        "empty signed psbt download chunk".into(),
+                        "empty coldcard file download chunk".into(),
                     )
                     .into());
                 }
                 bytes.extend_from_slice(&chunk);
                 *offset += chunk.len();
                 if *offset < *total_len {
-                    let req = request(download_request(*offset, *total_len)?, self.encryption)?;
+                    let req = request(
+                        download_request(*offset, *total_len, *file_number)?,
+                        self.encryption,
+                    )?;
                     return Ok(Some(req.into()));
                 }
                 if *offset != *total_len {
                     return Err(ColdcardError::Serialization(format!(
-                        "downloaded signed psbt length {offset}, wanted {total_len}"
+                        "downloaded coldcard file length {offset}, wanted {total_len}"
                     ))
                     .into());
                 }
                 let actual_sha = sha256::Hash::hash(bytes).to_byte_array();
                 if actual_sha != *expected_sha {
                     return Err(ColdcardError::Serialization(
-                        "coldcard signed psbt sha mismatch".to_string(),
+                        "coldcard file download sha mismatch".to_string(),
                     )
                     .into());
                 }
-                let signed = Psbt::deserialize(bytes)
-                    .map_err(|e| ColdcardError::Serialization(e.to_string()))?;
-                self.state = State::Finished(ColdcardResponse::SignedPsbt(signed));
+                let response = match response {
+                    FileDownloadResponse::Backup => ColdcardResponse::Backup(std::mem::take(bytes)),
+                    FileDownloadResponse::SignedPsbt => {
+                        let signed = Psbt::deserialize(bytes)
+                            .map_err(|e| ColdcardError::Serialization(e.to_string()))?;
+                        ColdcardResponse::SignedPsbt(signed)
+                    }
+                };
+                self.state = State::Finished(response);
                 Ok(None)
             }
             State::Finished(..) => Ok(None),
@@ -414,6 +482,7 @@ impl TryFrom<Command> for ColdcardCommand {
     type Error = ColdcardError;
     fn try_from(cmd: Command) -> Result<Self, Self::Error> {
         match cmd {
+            Command::Backup => Ok(Self::Backup),
             Command::Unlock { .. } => Ok(Self::StartEncryption),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
             Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),
@@ -482,6 +551,7 @@ impl From<ColdcardResponse> for Response {
             ColdcardResponse::Ok => Response::TaskDone,
             ColdcardResponse::Busy => Response::TaskBusy,
             ColdcardResponse::Address(address) => Response::Address(address),
+            ColdcardResponse::Backup(bytes) => Response::Backup(bytes),
             ColdcardResponse::SignedPsbt(psbt) => Response::SignedPsbt(psbt),
         }
     }
@@ -515,5 +585,85 @@ impl From<ColdcardError> for Error {
 impl From<FromUtf8Error> for ColdcardError {
     fn from(error: FromUtf8Error) -> Self {
         ColdcardError::Serialization(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::hashes::{Hash, sha256};
+
+    use super::*;
+
+    fn paired_engines() -> (encrypt::Engine, encrypt::Engine) {
+        let mut host = encrypt::Engine::New(k256::SecretKey::from_slice(&[1u8; 32]).unwrap());
+        let mut device = encrypt::Engine::New(k256::SecretKey::from_slice(&[2u8; 32]).unwrap());
+        let host_pubkey = host.pub_key().unwrap();
+        let device_pubkey = device.pub_key().unwrap();
+        host.ready(device_pubkey).unwrap();
+        device.ready(host_pubkey).unwrap();
+        (host, device)
+    }
+
+    fn encrypt_response(device: &mut encrypt::Engine, response: &[u8]) -> Vec<u8> {
+        device.encrypt(response.to_vec()).unwrap()
+    }
+
+    fn decrypt_request(device: &mut encrypt::Engine, request: Transmit) -> Vec<u8> {
+        assert!(request.encrypted);
+        device.decrypt(request.payload).unwrap()
+    }
+
+    #[test]
+    fn backup_state_machine_polls_and_downloads_file_zero() {
+        let (mut host, mut device) = paired_engines();
+        let backup = b"encrypted backup bytes".to_vec();
+        let backup_sha = sha256::Hash::hash(&backup).to_byte_array();
+        let mut interpreter: ColdcardInterpreter<'_, Command, Transmit, Response, Error> =
+            ColdcardInterpreter::new(&mut host);
+
+        let request = interpreter.start(Command::Backup).unwrap();
+        assert_eq!(decrypt_request(&mut device, request), b"back");
+
+        let request = interpreter
+            .exchange(encrypt_response(&mut device, b"okay"))
+            .unwrap()
+            .expect("poll request");
+        assert_eq!(decrypt_request(&mut device, request), b"bkok");
+
+        let request = interpreter
+            .exchange(encrypt_response(&mut device, b"busy"))
+            .unwrap()
+            .expect("second poll request");
+        assert_eq!(decrypt_request(&mut device, request), b"bkok");
+
+        let mut complete = b"strx".to_vec();
+        complete.extend((backup.len() as u32).to_le_bytes());
+        complete.extend(backup_sha);
+        let request = interpreter
+            .exchange(encrypt_response(&mut device, &complete))
+            .unwrap()
+            .expect("download request");
+        let download = decrypt_request(&mut device, request);
+        assert_eq!(&download[..4], b"dwld");
+        assert_eq!(u32::from_le_bytes(download[4..8].try_into().unwrap()), 0);
+        assert_eq!(
+            u32::from_le_bytes(download[8..12].try_into().unwrap()),
+            backup.len() as u32
+        );
+        assert_eq!(u32::from_le_bytes(download[12..16].try_into().unwrap()), 0);
+
+        let mut chunk = b"biny".to_vec();
+        chunk.extend(&backup);
+        assert!(
+            interpreter
+                .exchange(encrypt_response(&mut device, &chunk))
+                .unwrap()
+                .is_none()
+        );
+
+        match interpreter.end().unwrap() {
+            Response::Backup(bytes) => assert_eq!(bytes, backup),
+            _ => panic!("expected backup response"),
+        }
     }
 }

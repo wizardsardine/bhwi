@@ -762,6 +762,9 @@ impl TryFrom<Command> for LedgerCommand {
     type Error = LedgerError;
     fn try_from(cmd: Command) -> Result<Self, Self::Error> {
         match cmd {
+            Command::Backup => Err(LedgerError::MissingCommandInfo(
+                "Backup not supported by Ledger",
+            )),
             Command::Unlock { options } => options
                 .network
                 .map(Self::OpenApp)
