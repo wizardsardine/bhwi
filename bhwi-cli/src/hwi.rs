@@ -247,7 +247,7 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
 
 fn label_for(device_type: DeviceType) -> Option<Option<String>> {
     match device_type {
-        DeviceType::Coldcard | DeviceType::Ledger => Some(None),
+        DeviceType::BitBox02 | DeviceType::Coldcard | DeviceType::Ledger => Some(None),
         DeviceType::Jade => None,
     }
 }

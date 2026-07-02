@@ -14,9 +14,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 async-trait.workspace = true
 bitcoin = { workspace = true, features = ["secp-lowmemory"] }
-bhwi.workspace = true
+bhwi = { workspace = true, features = ["bitbox"] }
 hex.workspace = true
-bhwi-async.workspace = true
+bhwi-async = { workspace = true, features = ["bitbox"] }
 futures.workspace = true
 log.workspace = true
 rand_core.workspace = true

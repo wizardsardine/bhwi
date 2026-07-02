@@ -492,10 +492,12 @@ where
                     } => {
                         let (ledger_policy, wallet_hmac) = context
                             .as_ref()
-                            .map(|ctx| match ctx {
+                            .and_then(|ctx| match ctx {
                                 DeviceContext::Ledger { wallet_policy, wallet_hmac } => {
-                                    (wallet_policy.clone(), *wallet_hmac)
+                                    Some((wallet_policy.clone(), *wallet_hmac))
                                 }
+                                #[cfg(feature = "bitbox")]
+                                _ => None,
                             })
                             .ok_or(LedgerError::MissingCommandInfo(
                                 "Ledger requires DeviceContext::Ledger for descriptor-based address display",
@@ -545,10 +547,12 @@ where
                     DisplayAddress::ByDescriptor { index, change, .. } => {
                         let (wallet_policy, wallet_hmac) = context
                             .as_ref()
-                            .map(|ctx| match ctx {
+                            .and_then(|ctx| match ctx {
                                 DeviceContext::Ledger { wallet_policy, wallet_hmac } => {
-                                    (wallet_policy.clone(), *wallet_hmac)
+                                    Some((wallet_policy.clone(), *wallet_hmac))
                                 }
+                                #[cfg(feature = "bitbox")]
+                                _ => None,
                             })
                             .ok_or(LedgerError::MissingCommandInfo(
                                 "Ledger requires DeviceContext::Ledger for descriptor-based address display",
@@ -775,11 +779,13 @@ impl TryFrom<Command> for LedgerCommand {
             }),
             Command::SignTx(psbt, context) => {
                 let (ledger_policy, wallet_hmac) = context
-                    .map(|ctx| match ctx {
+                    .and_then(|ctx| match ctx {
                         DeviceContext::Ledger {
                             wallet_policy,
                             wallet_hmac,
-                        } => (wallet_policy, wallet_hmac),
+                        } => Some((wallet_policy, wallet_hmac)),
+                        #[cfg(feature = "bitbox")]
+                        _ => None,
                     })
                     .ok_or(LedgerError::MissingCommandInfo("ledger sign tx context"))?;
                 Ok(Self::SignPsbt {

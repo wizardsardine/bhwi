@@ -13,6 +13,7 @@ description = "development kit"
 
 [features]
 default = []
+bitbox = ["bhwi/bitbox"]
 emulators = ["hex", "serde", "serde_json"]
 
 [dependencies]

@@ -3,13 +3,15 @@ import initWasm, { initialize_logging, Client } from 'bhwi-wasm';
 import coldcardIcon from './assets/devices/coldcard.svg';
 import jadeIcon from './assets/devices/blockstream-jade.svg';
 import ledgerIcon from './assets/devices/ledger-nano.svg';
+import bitboxIcon from './assets/devices/bitbox02.svg';
 
-type DeviceType = 'Coldcard' | 'Jade' | 'Ledger';
+type DeviceType = 'Coldcard' | 'Jade' | 'Ledger' | 'BitBox02';
 
 const DEVICE_ICONS: Record<DeviceType, string> = {
     'Coldcard': coldcardIcon,
     'Jade': jadeIcon,
     'Ledger': ledgerIcon,
+    'BitBox02': bitboxIcon,
 };
 type Network = 'bitcoin' | 'testnet';
 
@@ -73,6 +75,7 @@ const App = () => {
     const [registeringWallet, setRegisteringWallet] = useState(false);
     const [processing, setProcessing] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [pairingCode, setPairingCode] = useState<string | null>(null);
 
     const showError = (message: string) => {
         setError(message);
@@ -104,6 +107,10 @@ const App = () => {
                 setDevice(null);
             };
 
+            const onPairingCodeCallback = (code: string) => {
+                setPairingCode(code);
+            };
+
             switch (type) {
                 case 'Coldcard':
                     await client.connect_coldcard(onCloseCallback);
@@ -114,9 +121,13 @@ const App = () => {
                 case 'Ledger':
                     await client.connect_ledger(onCloseCallback);
                     break;
+                case 'BitBox02':
+                    await client.connect_bitbox(network ?? 'bitcoin', onCloseCallback, onPairingCodeCallback);
+                    break;
             }
 
             await client.unlock(network ?? 'bitcoin');
+            setPairingCode(null);
             const masterFingerprint = await client.get_master_fingerprint();
 
             let detectedNetwork: Network | null = null;
@@ -147,6 +158,7 @@ const App = () => {
         } finally {
             setConnecting(null);
             setProcessing(false);
+            setPairingCode(null);
         }
     };
 
@@ -278,6 +290,23 @@ const App = () => {
                         >
                             ×
                         </button>
+                    </div>
+                </div>
+            )}
+
+            {pairingCode && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+                    <div className="bg-gray-800 border border-gray-700 rounded-lg shadow-xl px-8 py-6 max-w-sm text-center">
+                        <div className="flex justify-center mb-4">
+                            <img src={DEVICE_ICONS['BitBox02']} alt="" className="h-12 w-12 object-contain" />
+                        </div>
+                        <h2 className="text-lg font-semibold mb-2">Confirm pairing code</h2>
+                        <p className="text-sm text-gray-400 mb-4">
+                            Check that this code matches the one shown on your BitBox02, then confirm on the device.
+                        </p>
+                        <p className="font-mono text-2xl tracking-widest bg-gray-900 rounded-lg px-4 py-3">
+                            {pairingCode}
+                        </p>
                     </div>
                 </div>
             )}
@@ -636,6 +665,18 @@ const App = () => {
                                 />
                                 <img src={DEVICE_ICONS['Ledger']} alt="" className="h-10 w-10 object-contain" />
                                 <span className="font-medium">Ledger</span>
+                            </label>
+
+                            <label className="flex items-center gap-3 bg-gray-800 px-6 py-3 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors">
+                                <input
+                                    type="radio"
+                                    name="device"
+                                    checked={selectedDevice === 'BitBox02'}
+                                    onChange={() => setSelectedDevice('BitBox02')}
+                                    className="w-4 h-4 accent-blue-600"
+                                />
+                                <img src={DEVICE_ICONS['BitBox02']} alt="" className="h-10 w-10 object-contain" />
+                                <span className="font-medium">BitBox02</span>
                             </label>
                         </div>
 

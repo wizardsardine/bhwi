@@ -20,7 +20,7 @@ path = "src/bin/hwi.rs"
 anyhow.workspace = true
 async-trait.workspace = true
 bitcoin = { workspace = true, features = ["base64", "serde"] }
-bhwi-async = { workspace = true, features = ["emulators"] }
+bhwi-async = { workspace = true, features = ["bitbox", "emulators"] }
 bhwi.workspace = true
 futures.workspace = true
 hex = { workspace = true, features = ["serde"] }
