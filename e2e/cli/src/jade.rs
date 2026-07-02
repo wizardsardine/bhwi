@@ -3,6 +3,8 @@ use anyhow::Result;
 use crate::support::{Cli, CommandCase, ExpectedOutput, assert_command};
 
 const JADE_FINGERPRINT: &str = "e3ebcc79";
+const JADE_ADDRESS_84_0: &str = "tb1q9t9pgtdsyf6r8ks7gnxvj99sea4d3nmjl0tnzu";
+const JADE_ADDRESS_49_0: &str = "2MsFo9x4kZMVumePtLZvjh9Hn9A98bS3MF6";
 const JADE_XPUB_44: &str = "tpubDCKD5cdxMEFd2i4cNa3PJUbUHMsGDxsnfqjxVpMoG1ymWYUQUaZzTcHQo3JwYgaKe2FyKGA2FzGPSVczBoAiHGyERuA1mZ2UkGKufEnUxKk";
 
 #[test]
@@ -22,6 +24,33 @@ fn jade_xpub_get() -> Result<()> {
         cli: Cli::for_device(JADE_FINGERPRINT),
         args: &["xpub", "get", "m/44'/1'/0'"],
         expected: ExpectedOutput::Exact(JADE_XPUB_44),
+    })
+}
+
+#[test]
+fn jade_address_get_by_path() -> Result<()> {
+    assert_command(CommandCase {
+        name: "address get m/84'/1'/0'/0/0",
+        cli: Cli::for_device(JADE_FINGERPRINT),
+        args: &["address", "get", "--from-path", "m/84'/1'/0'/0/0"],
+        expected: ExpectedOutput::Exact(JADE_ADDRESS_84_0),
+    })
+}
+
+#[test]
+fn jade_nested_segwit_address_get_by_path() -> Result<()> {
+    assert_command(CommandCase {
+        name: "address get m/49'/1'/0'/0/0",
+        cli: Cli::for_device(JADE_FINGERPRINT),
+        args: &[
+            "address",
+            "get",
+            "--from-path",
+            "m/49'/1'/0'/0/0",
+            "--address-format",
+            "p2sh",
+        ],
+        expected: ExpectedOutput::Exact(JADE_ADDRESS_49_0),
     })
 }
 
