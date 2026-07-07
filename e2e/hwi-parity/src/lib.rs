@@ -53,6 +53,19 @@ impl HwiBinary {
         parse_output(self.label, output)
     }
 
+    pub fn run_with_envs<I, S>(&self, args: I, envs: &[(&str, &str)]) -> Result<HwiOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let output = Command::new(&self.path)
+            .args(args)
+            .envs(envs.iter().copied())
+            .output()
+            .with_context(|| format!("failed to spawn {} hwi at {}", self.label, self.path))?;
+        parse_output(self.label, output)
+    }
+
     pub fn run_with_stdin<I, S>(&self, args: I, stdin: &str) -> Result<HwiOutput>
     where
         I: IntoIterator<Item = S>,
@@ -147,8 +160,11 @@ fn assert_success(label: &str, output: &HwiOutput) -> Result<()> {
 mod tests {
     use super::*;
     use std::{
+        fs,
         io::{Read, Write},
+        os::unix::fs::PermissionsExt,
         os::unix::net::UnixDatagram,
+        path::{Path, PathBuf},
         str::FromStr,
         time::Duration,
     };
@@ -408,6 +424,79 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn candidate_installudevrules_matches_reference_or_avoids_getlogin_failure() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let temp = temp_path("installudevrules")?;
+        let fake_bin = temp.join("bin");
+        let reference_rules = temp.join("reference-rules.d");
+        let candidate_rules = temp.join("candidate-rules.d");
+        fs::create_dir_all(&fake_bin)?;
+        fs::create_dir_all(&reference_rules)?;
+        fs::create_dir_all(&candidate_rules)?;
+        write_fake_command(&fake_bin.join("udevadm"), 0)?;
+        write_fake_command(&fake_bin.join("groupadd"), 0)?;
+        write_fake_command(&fake_bin.join("usermod"), 0)?;
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let test_path = format!("{}:{original_path}", fake_bin.display());
+        let envs = [("PATH", test_path.as_str()), ("USER", "bhwi-test")];
+
+        let reference = HwiBinary::reference()?.run_with_envs(
+            args([
+                "installudevrules",
+                "--location",
+                reference_rules
+                    .to_str()
+                    .context("reference rules path is not utf8")?,
+            ]),
+            &envs,
+        )?;
+        let reference_getlogin_failure = is_upstream_getlogin_failure(&reference.json);
+        if !reference_getlogin_failure {
+            assert_success("reference", &reference)?;
+        }
+
+        let candidate = HwiBinary::candidate()?.run_with_envs(
+            args([
+                "installudevrules",
+                "--location",
+                candidate_rules
+                    .to_str()
+                    .context("candidate rules path is not utf8")?,
+            ]),
+            &envs,
+        )?;
+        assert_success("candidate", &candidate)?;
+
+        if !reference_getlogin_failure && reference.json != candidate.json {
+            bail!(
+                "HWI installudevrules JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                serde_json::to_string_pretty(&reference.json)?,
+                serde_json::to_string_pretty(&candidate.json)?
+            );
+        }
+
+        assert_udev_rule_dirs_match(&reference_rules, &candidate_rules)?;
+        fs::remove_dir_all(temp).ok();
+        Ok(())
+    }
+
+    fn is_upstream_getlogin_failure(json: &Value) -> bool {
+        json.get("code").and_then(Value::as_i64) == Some(-13)
+            && json
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| {
+                    error.starts_with("installudevrules failed: [Errno ")
+                        && (error.contains("Inappropriate ioctl for device")
+                            || error.contains("No such device or address"))
+                })
     }
 
     fn assert_enumerate_parity(
@@ -2204,6 +2293,63 @@ mod tests {
 
     fn args<const N: usize>(items: [&str; N]) -> Vec<String> {
         items.into_iter().map(str::to_owned).collect()
+    }
+
+    fn temp_path(name: &str) -> Result<PathBuf> {
+        let mut path = env::temp_dir();
+        path.push(format!("bhwi-hwi-parity-{name}-{}", std::process::id()));
+        if path.exists() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("failed to clean {}", path.display()))?;
+        }
+        fs::create_dir_all(&path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        Ok(path)
+    }
+
+    fn write_fake_command(path: &Path, exit_code: i32) -> Result<()> {
+        fs::write(path, format!("#!/bin/sh\nexit {exit_code}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to chmod {}", path.display()))?;
+        Ok(())
+    }
+
+    fn assert_udev_rule_dirs_match(reference: &Path, candidate: &Path) -> Result<()> {
+        let mut reference_files = rule_files(reference)?;
+        let mut candidate_files = rule_files(candidate)?;
+        reference_files.sort();
+        candidate_files.sort();
+
+        if reference_files != candidate_files {
+            bail!(
+                "udev rule file list mismatch\nreference: {:?}\ncandidate: {:?}",
+                reference_files,
+                candidate_files
+            );
+        }
+
+        for file_name in reference_files {
+            let reference_contents = fs::read(reference.join(&file_name))
+                .with_context(|| format!("failed to read reference {file_name}"))?;
+            let candidate_contents = fs::read(candidate.join(&file_name))
+                .with_context(|| format!("failed to read candidate {file_name}"))?;
+            if reference_contents != candidate_contents {
+                bail!("udev rule file contents mismatch for {file_name}");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn rule_files(path: &Path) -> Result<Vec<String>> {
+        fs::read_dir(path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+            .map(|entry| {
+                let entry = entry?;
+                Ok(entry.file_name().to_string_lossy().into_owned())
+            })
+            .collect()
     }
 
     fn normalize_device_type(device_type: &str) -> Result<String> {

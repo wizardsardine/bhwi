@@ -21,6 +21,7 @@ pub mod hid;
 pub mod hwi;
 pub mod jade;
 pub mod ledger;
+pub mod udev;
 
 #[derive(Serialize)]
 pub struct Device {

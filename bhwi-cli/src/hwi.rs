@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     io::{self, BufRead},
+    path::PathBuf,
     process::ExitCode,
     str::FromStr,
 };
@@ -30,8 +31,10 @@ use miniscript::{
 use serde::{Serialize, Serializer};
 
 use crate::{
-    Device, DeviceManager, DeviceType, config::DeviceSelector,
+    Device, DeviceManager, DeviceType,
+    config::DeviceSelector,
     get_descriptors::GetDescriptorOptions,
+    udev::{UdevRuleSelection, install_udev_rules},
 };
 
 type HwiResult<T> = std::result::Result<T, HwiError>;
@@ -145,6 +148,10 @@ pub enum HwiCliCommand {
         pin: String,
     },
     Togglepassphrase,
+    Installudevrules {
+        #[arg(long, default_value = "/etc/udev/rules.d/")]
+        location: PathBuf,
+    },
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -188,6 +195,9 @@ pub enum HwiCommand {
         path: Option<String>,
     },
     UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
+    InstallUdevRules {
+        location: PathBuf,
+    },
     Unsupported(String),
 }
 
@@ -251,6 +261,7 @@ pub enum HwiErrorCode {
     UnsupportedCommand,
     DeviceFailure,
     DeviceConnectionError,
+    NeedToBeRoot,
 }
 
 impl HwiErrorCode {
@@ -261,6 +272,7 @@ impl HwiErrorCode {
             HwiErrorCode::UnsupportedCommand => -9,
             HwiErrorCode::DeviceFailure => -13,
             HwiErrorCode::DeviceConnectionError => -3,
+            HwiErrorCode::NeedToBeRoot => -16,
         }
     }
 }
@@ -306,7 +318,13 @@ pub enum HwiResponse {
     SignTx(HwiSignTxResponse),
     SignMessage(HwiSignMessageResponse),
     DisplayAddress(HwiDisplayAddressResponse),
+    Success(HwiSuccessResponse),
     Error(HwiError),
+}
+
+#[derive(Debug, Serialize)]
+pub struct HwiSuccessResponse {
+    pub success: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -416,6 +434,7 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
+        HwiCommand::InstallUdevRules { location } => install_udev_rules_hwi(location),
         HwiCommand::Unsupported(command) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             format!("Unsupported HWI command: {command}"),
@@ -524,6 +543,20 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
         });
     }
     HwiResponse::Enumerate(response)
+}
+
+fn install_udev_rules_hwi(location: PathBuf) -> HwiResponse {
+    match install_udev_rules(&location, UdevRuleSelection::All) {
+        Ok(()) => HwiResponse::Success(HwiSuccessResponse { success: true }),
+        Err(err) if err.needs_root() => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NeedToBeRoot,
+            "installudevrules failed: Need to be root.",
+        )),
+        Err(err) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceFailure,
+            format!("installudevrules failed: {err}"),
+        )),
+    }
 }
 
 async fn unsupported_device_action(
@@ -1928,6 +1961,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         HwiCliCommand::Togglepassphrase => {
             HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::TogglePassphrase)
         }
+        HwiCliCommand::Installudevrules { location } => HwiCommand::InstallUdevRules { location },
         HwiCliCommand::External(argv) => {
             let command = argv
                 .first()
@@ -2469,6 +2503,21 @@ mod tests {
         assert_eq!(
             togglepassphrase.command,
             HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::TogglePassphrase)
+        );
+    }
+
+    #[test]
+    fn parses_installudevrules_without_device_selection() {
+        let request = parse_args(["hwi", "installudevrules", "--location", "/tmp/bhwi-rules.d"])
+            .expect("installudevrules request");
+
+        assert_eq!(request.selector.device_type, None);
+        assert_eq!(request.selector.fingerprint, None);
+        assert_eq!(
+            request.command,
+            HwiCommand::InstallUdevRules {
+                location: PathBuf::from("/tmp/bhwi-rules.d"),
+            }
         );
     }
 

@@ -39,7 +39,7 @@ Coldcard, BHWI still tests Python HWI-compatible unsupported-action errors.
 |`promptpin`       |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN prompting for Trezor-class devices.      |
 |`sendpin`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN entry for Trezor-class devices.          |
 |`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[ ]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
-|`installudevrules`|`n/a` |`n/a`|`n/a`   |`n/a` |`n/a`  |`n/a`   |`n/a`   |Host-side Python HWI command not yet implemented.                     |
+|`installudevrules`|`n/a` |`n/a`|`n/a`   |`n/a` |`n/a`  |`n/a`   |`n/a`   |Host-side Python HWI command covered by the shared udev installer.    |
 
 ## Running Parity Tests
 
