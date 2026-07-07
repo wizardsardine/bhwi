@@ -133,7 +133,7 @@
             {
               "name": "bhwi-wasm",
               "type": "module",
-              "version": "0.0.1",
+              "version": "${(builtins.fromTOML (builtins.readFile ./bhwi-wasm/Cargo.toml)).package.version}",
               "main": "bhwi_wasm.js",
               "types": "bhwi_wasm.d.ts"
             }
@@ -516,6 +516,54 @@
               rm -rf website/pkg
               cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} website/pkg
               cd website && npm install && npm run dev
+            '');
+          };
+          # Publish the wasm-bindgen bundle to npm, once per name.
+          # Usage: nix run .#publish-wasm -- [name1 name2 ...]
+          # Defaults to the unscoped "bhwi-wasm" and the scoped "@wizardsardine/bhwi-wasm".
+          # (The bare "bhwi" name is blocked by npm's name-similarity filter, and is thus
+          # unsquattable by anyone, so it is not published.)
+          # Set DRY_RUN=1 to pack and report without uploading (no auth needed).
+          # A real publish requires npm auth (npm login, or a token in ~/.npmrc / NODE_AUTH_TOKEN).
+          publish-wasm = {
+            type = "app";
+            program = toString (pkgs.writeShellScript "publish-wasm" ''
+              set -euo pipefail
+              export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.jq]}:$PATH"
+
+              names=("$@")
+              if [ ''${#names[@]} -eq 0 ]; then
+                names=("bhwi-wasm" "@wizardsardine/bhwi-wasm")
+              fi
+
+              publish_args=(--access public)
+              if [ -n "''${DRY_RUN:-}" ]; then
+                publish_args+=(--dry-run)
+                echo "DRY_RUN set — packing only, nothing will be uploaded."
+              fi
+
+              workdir="$(mktemp -d)"
+              trap 'rm -rf "$workdir"' EXIT
+              cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg}/. "$workdir/"
+              cd "$workdir"
+
+              failed=()
+              for name in "''${names[@]}"; do
+                echo "Publishing bundle as '$name' ..."
+                jq --arg name "$name" '.name = $name' package.json > package.json.tmp
+                mv package.json.tmp package.json
+                # Don't let one rejected name (e.g. npm's name-similarity filter) abort the rest.
+                if ! npm publish "''${publish_args[@]}"; then
+                  echo "  -> FAILED to publish '$name'"
+                  failed+=("$name")
+                fi
+              done
+
+              if [ ''${#failed[@]} -ne 0 ]; then
+                echo "Done, but these names failed: ''${failed[*]}"
+                exit 1
+              fi
+              echo "All names published."
             '');
           };
         } // linuxApps;
