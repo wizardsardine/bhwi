@@ -142,21 +142,26 @@
           '';
           doCheck = false;
         };
-        mkWebsite = pkgs.callPackage ({buildNpmPackage, nodejs_20, base ? "/"}: buildNpmPackage {
-          name = "bhwi-website";
-          src = ./website;
-          nodejs = nodejs_20;
-          npmDepsHash = "sha256-N2Uxh6567ry8CSZyBWWIg8yDJEqQXFtToKi4hVBr8Hk=";
-          postPatch = ''
-            cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} pkg
-          '';
-          npmBuildFlags = ["--" "--base" base];
-          installPhase = ''
-            runHook preInstall
-            cp -r dist $out
-            runHook postInstall
-          '';
-        });
+        mkWebsite = pkgs.callPackage ({
+          buildNpmPackage,
+          nodejs_20,
+          base ? "/",
+        }:
+          buildNpmPackage {
+            name = "bhwi-website";
+            src = ./website;
+            nodejs = nodejs_20;
+            npmDepsHash = "sha256-N2Uxh6567ry8CSZyBWWIg8yDJEqQXFtToKi4hVBr8Hk=";
+            postPatch = ''
+              cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} pkg
+            '';
+            npmBuildFlags = ["--" "--base" base];
+            installPhase = ''
+              runHook preInstall
+              cp -r dist $out
+              runHook postInstall
+            '';
+          });
         inputs = [
           rust
           pkgs.rust-analyzer
@@ -310,76 +315,111 @@
               '';
           };
         mkRunner = mkRunnerWith pkgs;
-        coldcardRunner = mkRunnerWith coldcardPkgs "bhwi-start-coldcard" coldcardInputs ''
-          unset LD_LIBRARY_PATH
-          unset C_INCLUDE_PATH
-          unset CPLUS_INCLUDE_PATH
-          unset LIBRARY_PATH
-          unset OBJC_INCLUDE_PATH
-          unset OBJCPLUS_INCLUDE_PATH
-          export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
-            coldcardPkgs.SDL2
-            coldcardPkgs.gcc13.cc.lib
-            coldcardPkgs.glibc
-            coldcardPkgs.libffi
-            coldcardPkgs.openssl.out
-            coldcardPkgs.pcsclite
-            coldcardPkgs.systemd
-          ]}"
-          export COLDCARD_FIRMWARE_SRC="${coldcard-firmware}"
-          export COLDCARD_FIRMWARE_REV="${coldcard-firmware.rev or "locked"}"
-          export COLDCARD_FIRMWARE_URL="https://github.com/Coldcard/firmware.git"
-          export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
-          export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
-          export PYSDL2_DLL_PATH="${coldcardPkgs.SDL2}/lib"
-          export CFLAGS="-I${coldcardPkgs.pcsclite.dev}/include/PCSC ''${CFLAGS:-}"
-          export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
-        '' ./nix/scripts/start-coldcard.sh;
-        ledgerRunner = mkRunner "bhwi-start-ledger" ledgerInputs ''
-          export APP_BITCOIN_NEW_SRC="${app-bitcoin-new}"
-          export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
-          export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
-          export SPECULOS_BIN="${speculos}/bin/speculos"
-          export LEDGER_BUILD_APP_SCRIPT="${./nix/scripts/build-ledger-app.sh}"
-        '' ./nix/scripts/start-ledger.sh;
-        ledgerAppBuilder = mkRunner "bhwi-build-ledger-app" ledgerInputs ''
-          export APP_BITCOIN_NEW_SRC="${app-bitcoin-new}"
-          export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
-          export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
-        '' ./nix/scripts/build-ledger-app.sh;
-        jadeRunner = mkRunner "bhwi-start-jade" jadeQemuInputs ''
-          export JADE_FIRMWARE_SRC="${jade-firmware}"
-          export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
-          export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
-          export PATH="${jadePython}/bin:$PATH"
-          export IDF_PATH="${jadeEspIdf}"
-          export IDF_TOOLS_PATH="$IDF_PATH/tools"
-          export IDF_PYTHON_CHECK_CONSTRAINTS=no
-          IDF_PYTHON_ENV_PATH="$(readlink "$IDF_PATH/python-env")"
-          export IDF_PYTHON_ENV_PATH
-          export PATH="$IDF_TOOLS_PATH:$IDF_PATH/components/espcoredump:$IDF_PATH/components/partition_table:$IDF_PATH/components/app_update:$PATH"
-          if [ -e "$IDF_PATH/.tool-env" ]; then
-            # shellcheck disable=SC1091
-            . "$IDF_PATH/.tool-env"
-          fi
-          if [ -e "$IDF_PATH/etc/gitconfig" ]; then
-            export GIT_CONFIG_SYSTEM="$IDF_PATH/etc/gitconfig"
-          fi
-        '' ./nix/scripts/start-jade.sh;
-        jadeInitRunner = mkRunner "bhwi-init-jade" jadeInitInputs ''
-          export JADE_FIRMWARE_SRC="${jade-firmware}"
-          export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
-          export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
-        '' ./nix/scripts/init-jade.sh;
-        jadePinserverRunner = mkRunner "bhwi-start-jade-pinserver" jadePinserverInputs ''
-          export JADE_FIRMWARE_SRC="${jade-firmware}"
-          export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
-          export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
-          export JADE_PINSERVER_SRC="${jade-pinserver}"
-          export JADE_PINSERVER_REV="${jade-pinserver.rev or "locked"}"
-          export JADE_PINSERVER_URL="https://github.com/Blockstream/blind_pin_server.git"
-          export JADE_PINSERVER_PYTHON="${pkgs.python311}/bin/python3"
-        '' ./nix/scripts/start-jade-pinserver.sh;
+        coldcardRunner =
+          mkRunnerWith coldcardPkgs "bhwi-start-coldcard" coldcardInputs ''
+            unset LD_LIBRARY_PATH
+            unset C_INCLUDE_PATH
+            unset CPLUS_INCLUDE_PATH
+            unset LIBRARY_PATH
+            unset OBJC_INCLUDE_PATH
+            unset OBJCPLUS_INCLUDE_PATH
+            export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
+              coldcardPkgs.SDL2
+              coldcardPkgs.gcc13.cc.lib
+              coldcardPkgs.glibc
+              coldcardPkgs.libffi
+              coldcardPkgs.openssl.out
+              coldcardPkgs.pcsclite
+              coldcardPkgs.systemd
+            ]}"
+            export COLDCARD_FIRMWARE_SRC="${coldcard-firmware}"
+            export COLDCARD_FIRMWARE_REV="${coldcard-firmware.rev or "locked"}"
+            export COLDCARD_FIRMWARE_URL="https://github.com/Coldcard/firmware.git"
+            export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
+            export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
+            export PYSDL2_DLL_PATH="${coldcardPkgs.SDL2}/lib"
+            export CFLAGS="-I${coldcardPkgs.pcsclite.dev}/include/PCSC ''${CFLAGS:-}"
+            export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
+          ''
+          ./nix/scripts/start-coldcard.sh;
+        ledgerRunner =
+          mkRunner "bhwi-start-ledger" ledgerInputs ''
+            export APP_BITCOIN_NEW_SRC="${app-bitcoin-new}"
+            export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
+            export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
+            export SPECULOS_BIN="${speculos}/bin/speculos"
+            export LEDGER_BUILD_APP_SCRIPT="${./nix/scripts/build-ledger-app.sh}"
+          ''
+          ./nix/scripts/start-ledger.sh;
+        ledgerAppBuilder =
+          mkRunner "bhwi-build-ledger-app" ledgerInputs ''
+            export APP_BITCOIN_NEW_SRC="${app-bitcoin-new}"
+            export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
+            export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
+          ''
+          ./nix/scripts/build-ledger-app.sh;
+        jadeRunner =
+          mkRunner "bhwi-start-jade" jadeQemuInputs ''
+            export JADE_FIRMWARE_SRC="${jade-firmware}"
+            export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
+            export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
+            export PATH="${jadePython}/bin:$PATH"
+            export IDF_PATH="${jadeEspIdf}"
+            export IDF_TOOLS_PATH="$IDF_PATH/tools"
+            export IDF_PYTHON_CHECK_CONSTRAINTS=no
+            IDF_PYTHON_ENV_PATH="$(readlink "$IDF_PATH/python-env")"
+            export IDF_PYTHON_ENV_PATH
+            export PATH="$IDF_TOOLS_PATH:$IDF_PATH/components/espcoredump:$IDF_PATH/components/partition_table:$IDF_PATH/components/app_update:$PATH"
+            if [ -e "$IDF_PATH/.tool-env" ]; then
+              # shellcheck disable=SC1091
+              . "$IDF_PATH/.tool-env"
+            fi
+            if [ -e "$IDF_PATH/etc/gitconfig" ]; then
+              export GIT_CONFIG_SYSTEM="$IDF_PATH/etc/gitconfig"
+            fi
+          ''
+          ./nix/scripts/start-jade.sh;
+        jadeInitRunner =
+          mkRunner "bhwi-init-jade" jadeInitInputs ''
+            export JADE_FIRMWARE_SRC="${jade-firmware}"
+            export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
+            export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
+          ''
+          ./nix/scripts/init-jade.sh;
+        jadePinserverRunner =
+          mkRunner "bhwi-start-jade-pinserver" jadePinserverInputs ''
+            export JADE_FIRMWARE_SRC="${jade-firmware}"
+            export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
+            export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
+            export JADE_PINSERVER_SRC="${jade-pinserver}"
+            export JADE_PINSERVER_REV="${jade-pinserver.rev or "locked"}"
+            export JADE_PINSERVER_URL="https://github.com/Blockstream/blind_pin_server.git"
+            export JADE_PINSERVER_PYTHON="${pkgs.python311}/bin/python3"
+          ''
+          ./nix/scripts/start-jade-pinserver.sh;
+        # The BitBox02 simulator ships as a prebuilt linux/amd64 release binary; pin it by
+        # hash and autopatch it so it runs on NixOS. Version/hash come from bitbox-api-rs's
+        # tests/simulators.json.
+        bitboxSimulatorVersion = "9.26.1";
+        bitboxSimulator = pkgs.stdenv.mkDerivation {
+          name = "bitbox02-simulator-${bitboxSimulatorVersion}";
+          src = pkgs.fetchurl {
+            url = "https://github.com/BitBoxSwiss/bitbox02-firmware/releases/download/firmware%2Fv${bitboxSimulatorVersion}/bitbox02-multi-v${bitboxSimulatorVersion}-simulator1.0.0-linux-amd64";
+            sha256 = "91ddf47eb0653ce8b3d3344a8e329fc7fef90adfa51e39c5214830cf6e21cccf";
+          };
+          dontUnpack = true;
+          nativeBuildInputs = [pkgs.autoPatchelfHook];
+          buildInputs = [pkgs.stdenv.cc.cc.lib];
+          installPhase = ''
+            mkdir -p $out/bin
+            install -m755 $src $out/bin/bitbox02-simulator
+          '';
+        };
+        bitboxRunner =
+          mkRunner "bhwi-start-bitbox" [pkgs.coreutils] ''
+            export BITBOX_SIMULATOR_BIN="${bitboxSimulator}/bin/bitbox02-simulator"
+          ''
+          ./nix/scripts/start-bitbox.sh;
         hwiReference = pkgs.writeShellApplication {
           name = "hwi-reference";
           runtimeInputs = [hwiPython];
@@ -430,143 +470,152 @@
         hwiParityColdcard = mkHwiParityRunner "bhwi-hwi-parity-coldcard" "coldcard" (coldcardInputs ++ inputs) coldcardE2eEnv;
         hwiParityLedger = mkHwiParityRunner "bhwi-hwi-parity-ledger" "ledger" (ledgerInputs ++ inputs) commonE2eEnv;
         hwiParityJade = mkHwiParityRunner "bhwi-hwi-parity-jade" "jade" (jadeInputs ++ inputs) commonE2eEnv;
-        linuxPackages =
-          pkgs.lib.optionalAttrs emulatorSystem {
-            inherit speculos;
-            coldcard-simulator = coldcardRunner;
-            ledger-app = ledgerAppBuilder;
-            jade-qemu = jadeRunner;
-          };
-        linuxApps =
-          pkgs.lib.optionalAttrs emulatorSystem {
-            coldcard = mkApp coldcardRunner;
-            ledger = mkApp ledgerRunner;
-            ledger-build-app = mkApp ledgerAppBuilder;
-            hwi-upstream-suite = mkApp hwiUpstreamSuite;
-            hwi-parity-coldcard = mkApp hwiParityColdcard;
-            hwi-parity-ledger = mkApp hwiParityLedger;
-            hwi-parity-jade = mkApp hwiParityJade;
-            jade = mkApp jadeRunner;
-            jade-init = mkApp jadeInitRunner;
-            jade-pinserver = mkApp jadePinserverRunner;
-          };
-        linuxShells =
-          pkgs.lib.optionalAttrs emulatorSystem {
-            coldcard = pkgs.mkShell {
-              packages = coldcardInputs ++ inputs;
-              shellHook = coldcardE2eEnv;
-            };
-            ledger = pkgs.mkShell {
-              packages = inputs ++ ledgerInputs;
-              shellHook = commonE2eEnv;
-            };
-            jade = pkgs.mkShell {
-              packages = inputs ++ jadeInputs;
-              shellHook = commonE2eEnv;
-            };
-          };
-        linuxChecks =
-          pkgs.lib.optionalAttrs emulatorSystem {
-            emulator-scripts = pkgs.runCommand "bhwi-emulator-scripts" {} ''
-              test -f ${./nix/scripts/start-coldcard.sh}
-              test -f ${./nix/scripts/start-ledger.sh}
-              test -f ${./nix/scripts/start-jade.sh}
-              test -f ${./nix/scripts/start-jade-pinserver.sh}
-              test -f ${./nix/scripts/init-jade.sh}
-              test -f ${./nix/scripts/emit-gh-error-log.sh}
-              touch $out
-            '';
-          };
-      in {
-        packages = {
-          hwi-reference = hwiReference;
-          hwi-reference-bhwi = hwiReferenceBhwi;
-          hwi-upstream-suite = hwiUpstreamSuite;
-          default = pkgs.rustPlatform.buildRustPackage {
-            name = "bhwi";
-            src = ./.;
-
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-            };
-
-            nativeBuildInputs = inputs;
-          };
-          website = mkWebsite {};
-          website-ghpages = mkWebsite { base = "/bhwi/"; };
-        } // linuxPackages;
-
-        devShells = {
-          default = pkgs.mkShell {
+        linuxPackages = pkgs.lib.optionalAttrs emulatorSystem {
+          inherit speculos bitboxSimulator;
+          bitbox02-simulator = bitboxSimulator;
+          coldcard-simulator = coldcardRunner;
+          ledger-app = ledgerAppBuilder;
+          jade-qemu = jadeRunner;
+        };
+        linuxApps = pkgs.lib.optionalAttrs emulatorSystem {
+          bitbox = mkApp bitboxRunner;
+          coldcard = mkApp coldcardRunner;
+          ledger = mkApp ledgerRunner;
+          ledger-build-app = mkApp ledgerAppBuilder;
+          hwi-upstream-suite = mkApp hwiUpstreamSuite;
+          hwi-parity-coldcard = mkApp hwiParityColdcard;
+          hwi-parity-ledger = mkApp hwiParityLedger;
+          hwi-parity-jade = mkApp hwiParityJade;
+          jade = mkApp jadeRunner;
+          jade-init = mkApp jadeInitRunner;
+          jade-pinserver = mkApp jadePinserverRunner;
+        };
+        linuxShells = pkgs.lib.optionalAttrs emulatorSystem {
+          bitbox = pkgs.mkShell {
             packages = inputs;
-            shellHook = ''
-              export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-              export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
-              export CC_wasm32_unknown_unknown=${pkgs.llvmPackages.clang-unwrapped}/bin/clang
-              export CFLAGS_wasm32_unknown_unknown="-I ${pkgs.llvmPackages.libclang.lib}/lib/clang/21.1.8/include/"
-            '';
+            shellHook = commonE2eEnv;
           };
-        } // linuxShells;
-
-        apps = {
-          website = {
-            type = "app";
-            program = toString (pkgs.writeShellScript "run-website" ''
-              export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.corepack_20]}:$PATH"
-              rm -rf website/pkg
-              cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} website/pkg
-              cd website && npm install && npm run dev
-            '');
+          coldcard = pkgs.mkShell {
+            packages = coldcardInputs ++ inputs;
+            shellHook = coldcardE2eEnv;
           };
-          # Publish the wasm-bindgen bundle to npm, once per name.
-          # Usage: nix run .#publish-wasm -- [name1 name2 ...]
-          # Defaults to the unscoped "bhwi-wasm" and the scoped "@wizardsardine/bhwi-wasm".
-          # (The bare "bhwi" name is blocked by npm's name-similarity filter, and is thus
-          # unsquattable by anyone, so it is not published.)
-          # Set DRY_RUN=1 to pack and report without uploading (no auth needed).
-          # A real publish requires npm auth (npm login, or a token in ~/.npmrc / NODE_AUTH_TOKEN).
-          publish-wasm = {
-            type = "app";
-            program = toString (pkgs.writeShellScript "publish-wasm" ''
-              set -euo pipefail
-              export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.jq]}:$PATH"
+          ledger = pkgs.mkShell {
+            packages = inputs ++ ledgerInputs;
+            shellHook = commonE2eEnv;
+          };
+          jade = pkgs.mkShell {
+            packages = inputs ++ jadeInputs;
+            shellHook = commonE2eEnv;
+          };
+        };
+        linuxChecks = pkgs.lib.optionalAttrs emulatorSystem {
+          emulator-scripts = pkgs.runCommand "bhwi-emulator-scripts" {} ''
+            test -f ${./nix/scripts/start-bitbox.sh}
+            test -f ${./nix/scripts/start-coldcard.sh}
+            test -f ${./nix/scripts/start-ledger.sh}
+            test -f ${./nix/scripts/start-jade.sh}
+            test -f ${./nix/scripts/start-jade-pinserver.sh}
+            test -f ${./nix/scripts/init-jade.sh}
+            test -f ${./nix/scripts/emit-gh-error-log.sh}
+            touch $out
+          '';
+        };
+      in {
+        packages =
+          {
+            hwi-reference = hwiReference;
+            hwi-reference-bhwi = hwiReferenceBhwi;
+            hwi-upstream-suite = hwiUpstreamSuite;
+            default = pkgs.rustPlatform.buildRustPackage {
+              name = "bhwi";
+              src = ./.;
 
-              names=("$@")
-              if [ ''${#names[@]} -eq 0 ]; then
-                names=("bhwi-wasm" "@wizardsardine/bhwi-wasm")
-              fi
+              cargoLock = {
+                lockFile = ./Cargo.lock;
+              };
 
-              publish_args=(--access public)
-              if [ -n "''${DRY_RUN:-}" ]; then
-                publish_args+=(--dry-run)
-                echo "DRY_RUN set — packing only, nothing will be uploaded."
-              fi
+              nativeBuildInputs = inputs;
+            };
+            website = mkWebsite {};
+            website-ghpages = mkWebsite {base = "/bhwi/";};
+          }
+          // linuxPackages;
 
-              workdir="$(mktemp -d)"
-              trap 'rm -rf "$workdir"' EXIT
-              cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg}/. "$workdir/"
-              cd "$workdir"
+        devShells =
+          {
+            default = pkgs.mkShell {
+              packages = inputs;
+              shellHook = ''
+                export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
+                export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
+                export CC_wasm32_unknown_unknown=${pkgs.llvmPackages.clang-unwrapped}/bin/clang
+                export CFLAGS_wasm32_unknown_unknown="-I ${pkgs.llvmPackages.libclang.lib}/lib/clang/21.1.8/include/"
+              '';
+            };
+          }
+          // linuxShells;
 
-              failed=()
-              for name in "''${names[@]}"; do
-                echo "Publishing bundle as '$name' ..."
-                jq --arg name "$name" '.name = $name' package.json > package.json.tmp
-                mv package.json.tmp package.json
-                # Don't let one rejected name (e.g. npm's name-similarity filter) abort the rest.
-                if ! npm publish "''${publish_args[@]}"; then
-                  echo "  -> FAILED to publish '$name'"
-                  failed+=("$name")
+        apps =
+          {
+            website = {
+              type = "app";
+              program = toString (pkgs.writeShellScript "run-website" ''
+                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.corepack_20]}:$PATH"
+                rm -rf website/pkg
+                cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} website/pkg
+                cd website && npm install && npm run dev
+              '');
+            };
+            # Publish the wasm-bindgen bundle to npm, once per name.
+            # Usage: nix run .#publish-wasm -- [name1 name2 ...]
+            # Defaults to the unscoped "bhwi-wasm" and the scoped "@wizardsardine/bhwi-wasm".
+            # (The bare "bhwi" name is blocked by npm's name-similarity filter, and is thus
+            # unsquattable by anyone, so it is not published.)
+            # Set DRY_RUN=1 to pack and report without uploading (no auth needed).
+            # A real publish requires npm auth (npm login, or a token in ~/.npmrc / NODE_AUTH_TOKEN).
+            publish-wasm = {
+              type = "app";
+              program = toString (pkgs.writeShellScript "publish-wasm" ''
+                set -euo pipefail
+                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.jq]}:$PATH"
+
+                names=("$@")
+                if [ ''${#names[@]} -eq 0 ]; then
+                  names=("bhwi-wasm" "@wizardsardine/bhwi-wasm")
                 fi
-              done
 
-              if [ ''${#failed[@]} -ne 0 ]; then
-                echo "Done, but these names failed: ''${failed[*]}"
-                exit 1
-              fi
-              echo "All names published."
-            '');
-          };
-        } // linuxApps;
+                publish_args=(--access public)
+                if [ -n "''${DRY_RUN:-}" ]; then
+                  publish_args+=(--dry-run)
+                  echo "DRY_RUN set — packing only, nothing will be uploaded."
+                fi
+
+                workdir="$(mktemp -d)"
+                trap 'rm -rf "$workdir"' EXIT
+                cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg}/. "$workdir/"
+                cd "$workdir"
+
+                failed=()
+                for name in "''${names[@]}"; do
+                  echo "Publishing bundle as '$name' ..."
+                  jq --arg name "$name" '.name = $name' package.json > package.json.tmp
+                  mv package.json.tmp package.json
+                  # Don't let one rejected name (e.g. npm's name-similarity filter) abort the rest.
+                  if ! npm publish "''${publish_args[@]}"; then
+                    echo "  -> FAILED to publish '$name'"
+                    failed+=("$name")
+                  fi
+                done
+
+                if [ ''${#failed[@]} -ne 0 ]; then
+                  echo "Done, but these names failed: ''${failed[*]}"
+                  exit 1
+                fi
+                echo "All names published."
+              '');
+            };
+          }
+          // linuxApps;
 
         checks = linuxChecks;
       }

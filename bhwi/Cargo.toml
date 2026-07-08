@@ -11,7 +11,7 @@ description = "development kit"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["jade"]
+default = ["jade", "bitbox"]
 jade = ["serde", "serde_bytes", "serde_cbor"]
 bitbox = [
     "dep:byteorder",

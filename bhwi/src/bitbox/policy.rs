@@ -114,10 +114,12 @@ pub fn extract_script_config_policy(policy: &str) -> Result<Policy, BitBoxError>
             &descriptor_template
         };
 
-    Ok(Policy {
-        template: descriptor_template.to_string(),
-        pubkeys,
-    })
+    // The BitBox02 policy grammar uses the `/**` receive/change shorthand; normalize the
+    // equivalent `/<0;1>/*` form (what miniscript emits) so registration and address display
+    // produce the same template the device expects.
+    let template = descriptor_template.replace("/<0;1>/*", "/**");
+
+    Ok(Policy { template, pubkeys })
 }
 
 #[cfg(test)]
@@ -139,5 +141,17 @@ mod tests {
         let policy = extract_script_config_policy("wsh(pk([f5acc2fd/49'/1'/0']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/**))#abcdef").unwrap();
         assert!(!policy.template.contains('#'));
         assert_eq!(1, policy.pubkeys.len());
+    }
+
+    #[test]
+    fn test_extract_normalizes_multipath() {
+        // miniscript's `into_descriptor()` emits the `/<0;1>/*` form; the BitBox template
+        // grammar wants the `/**` shorthand.
+        let policy = extract_script_config_policy("wsh(andor(pk([f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*),older(12960),pk(tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<0;1>/*)))#gqf2ey6r").unwrap();
+        assert_eq!(2, policy.pubkeys.len());
+        assert_eq!(
+            "wsh(andor(pk(@0/**),older(12960),pk(@1/**)))",
+            policy.template
+        );
     }
 }

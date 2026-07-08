@@ -7,7 +7,9 @@ pub use bhwi::bitbox::{
 };
 use bhwi::device::DeviceId;
 
-pub const BITBOX02_DEVICE_ID: DeviceId = DeviceId::new(BITBOX02_VID).with_pid(BITBOX02_PID);
+pub const BITBOX02_DEVICE_ID: DeviceId = DeviceId::new(BITBOX02_VID)
+    .with_pid(BITBOX02_PID)
+    .with_emulator_path("tcp:127.0.0.1:15423");
 
 /// U2F HID CMD byte for BitBox02 firmware traffic (`0xC1`).
 const FIRMWARE_CMD: u8 = 0x80 + 0x40 + 0x01;

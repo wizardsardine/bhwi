@@ -80,6 +80,8 @@ pub enum BitBoxError {
     InvalidInput(&'static str),
     #[error("communication framing error: {0}")]
     Framing(&'static str),
+    #[error("transport error: {0}")]
+    Transport(String),
 }
 
 impl From<prost::DecodeError> for BitBoxError {

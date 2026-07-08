@@ -72,6 +72,11 @@ pub enum BitBoxCommand {
         index: u32,
         display: bool,
     },
+    /// Restore the device from its currently-loaded mnemonic (simulator seeding).
+    RestoreFromMnemonic {
+        timestamp: u32,
+        timezone_offset: i32,
+    },
 }
 
 #[derive(Debug)]
@@ -82,6 +87,9 @@ pub enum BitBoxResponse {
     Xpub(Xpub),
     Address(String),
     IsRegistered(bool),
+    /// A policy was registered on the device. BitBox02 has no equivalent of Ledger's wallet
+    /// hmac (address display re-sends the policy), so registration carries no token.
+    Registered,
     SignedPsbt(Box<Psbt>),
     Signature(u8, bitcoin::secp256k1::ecdsa::Signature),
 }
@@ -169,6 +177,7 @@ enum EncryptedContext {
     Address,
     IsRegistered,
     RegisterScriptConfig,
+    RestoreFromMnemonic,
 }
 
 pub struct BitBoxInterpreter<'a, C, T, R, E> {
@@ -542,7 +551,13 @@ impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
                     response: Some(pb::btc_response::Response::IsScriptConfigRegistered(x)),
                 }),
             ) => Ok(BitBoxResponse::IsRegistered(x.is_registered)),
-            (EncryptedContext::RegisterScriptConfig, R::Success(_)) => Ok(BitBoxResponse::TaskDone),
+            (
+                EncryptedContext::RegisterScriptConfig,
+                R::Btc(pb::BtcResponse {
+                    response: Some(pb::btc_response::Response::Success(_)),
+                }),
+            ) => Ok(BitBoxResponse::Registered),
+            (EncryptedContext::RestoreFromMnemonic, R::Success(_)) => Ok(BitBoxResponse::TaskDone),
             _ => Err(BitBoxError::UnexpectedResponse),
         }
     }
@@ -721,6 +736,22 @@ where
                     index,
                     display,
                 });
+                Ok(encrypted_transmit(bytes).into())
+            }
+            BitBoxCommand::RestoreFromMnemonic {
+                timestamp,
+                timezone_offset,
+            } => {
+                if !self.noise.is_paired() {
+                    return Err(BitBoxError::Noise("not paired").into());
+                }
+                let request =
+                    pb::request::Request::RestoreFromMnemonic(pb::RestoreFromMnemonicRequest {
+                        timestamp,
+                        timezone_offset,
+                    });
+                let bytes =
+                    self.start_encrypted_query(request, EncryptedContext::RestoreFromMnemonic)?;
                 Ok(encrypted_transmit(bytes).into())
             }
         }
@@ -973,7 +1004,13 @@ impl TryFrom<Command> for BitBoxCommand {
                 })
             }
             Command::RegisterWallet { name, policy } => {
-                let extracted = policy::extract_script_config_policy(&policy.to_string())?;
+                // `WalletPolicy::to_string()` emits the BIP-388 template (`@0/**`) with the
+                // xpubs stripped; the BitBox needs the full descriptor with key origins, so
+                // reconstruct it before extracting the script config.
+                let descriptor = policy.into_descriptor().map_err(|_| {
+                    BitBoxError::InvalidInput("wallet policy is missing key info for registration")
+                })?;
+                let extracted = policy::extract_script_config_policy(&descriptor.to_string())?;
                 Ok(BitBoxCommand::RegisterScriptConfig {
                     policy: extracted,
                     name,
@@ -1001,6 +1038,7 @@ impl From<BitBoxResponse> for Response {
             BitBoxResponse::Xpub(xpub) => Response::Xpub(xpub),
             BitBoxResponse::Address(addr) => Response::Address(addr),
             BitBoxResponse::IsRegistered(_) => Response::TaskDone,
+            BitBoxResponse::Registered => Response::WalletHmac([0u8; 32]),
             BitBoxResponse::SignedPsbt(psbt) => Response::SignedPsbt(*psbt),
             BitBoxResponse::Signature(header, sig) => Response::Signature(header, sig),
         }

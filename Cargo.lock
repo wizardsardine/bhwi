@@ -317,6 +317,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bhwi-e2e-bitbox"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bhwi",
+ "bhwi-async",
+ "bitcoin",
+ "tokio",
+]
+
+[[package]]
 name = "bhwi-e2e-cli"
 version = "0.1.0"
 dependencies = [

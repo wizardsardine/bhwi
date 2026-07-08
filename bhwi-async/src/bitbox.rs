@@ -72,6 +72,61 @@ impl<T> BitBox<T> {
     }
 }
 
+/// Feeds a `BitBoxCommand` straight into the interpreter, bypassing `common::Command`. Used
+/// for BitBox-only operations that have no place in the shared HWI command surface.
+struct RawCommand(BitBoxCommand);
+
+impl TryFrom<RawCommand> for BitBoxCommand {
+    type Error = BitBoxError;
+    fn try_from(cmd: RawCommand) -> Result<Self, Self::Error> {
+        Ok(cmd.0)
+    }
+}
+
+impl<T: Transport> BitBox<T> {
+    /// Restore the device from the mnemonic currently loaded on it. This is BitBox-specific
+    /// and intentionally not part of the shared `HWI` trait; its purpose here is to seed the
+    /// BitBox02 simulator with its fixed test mnemonic so derived keys are deterministic.
+    pub async fn restore_from_mnemonic(
+        &mut self,
+        timestamp: u32,
+        timezone_offset: i32,
+    ) -> Result<(), BitBoxError> {
+        self.run_bitbox(BitBoxCommand::RestoreFromMnemonic {
+            timestamp,
+            timezone_offset,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Drive one BitBox-specific command through the interpreter and transport.
+    async fn run_bitbox(&mut self, command: BitBoxCommand) -> Result<BitBoxResponse, BitBoxError> {
+        use crate::CommonInterface;
+        let (transport, _http, mut interpreter) = <BitBox<T> as CommonInterface<
+            RawCommand,
+            common::Transmit,
+            BitBoxResponse,
+            BitBoxError,
+        >>::components(self);
+        let transmit = interpreter.start(RawCommand(command))?;
+        let exchange = transport
+            .exchange(&transmit.payload, transmit.encrypted)
+            .await
+            .map_err(|e| BitBoxError::Transport(format!("{e:?}")))?;
+        let mut next = interpreter.exchange(exchange)?;
+        while let Some(t) = next {
+            // BitBox02 never talks to a pin server; every transmit targets the device.
+            let exchange = transport
+                .exchange(&t.payload, t.encrypted)
+                .await
+                .map_err(|e| BitBoxError::Transport(format!("{e:?}")))?;
+            next = interpreter.exchange(exchange)?;
+        }
+        interpreter.end()
+    }
+}
+
 impl<C, T, R, E, F> crate::CommonInterface<C, T, R, E> for BitBox<F>
 where
     C: TryInto<BitBoxCommand, Error = BitBoxError>,

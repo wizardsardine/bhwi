@@ -36,6 +36,35 @@ to add or maintain support for a hardware wallet in BHWI.
 - [Async-HWI](https://github.com/Wizardsardine/async-hwi): earlier Wizardsardine
   Rust implementation that informed and inspired BHWI.
 
+## BitBox02
+
+- Local code (gated behind the `bitbox` cargo feature):
+  - [Interpreter](../bhwi/src/bitbox/interpreter.rs)
+  - [Bitcoin request/response builders](../bhwi/src/bitbox/api.rs)
+  - [Protobuf messages](../bhwi/src/bitbox/proto.rs)
+  - [Noise pairing state](../bhwi/src/bitbox/noise.rs)
+  - [U2F-HID framing](../bhwi/src/bitbox/u2f.rs)
+  - [PSBT signing](../bhwi/src/bitbox/sign.rs)
+  - [Wallet policy handling](../bhwi/src/bitbox/policy.rs)
+  - [E2E docs](BITBOX.md)
+- Upstream references:
+  - [BitBox02 firmware and simulator](https://github.com/BitBoxSwiss/bitbox02-firmware)
+  - [bitbox-api-rs](https://github.com/BitBoxSwiss/bitbox-api-rs)
+- Onboarding notes:
+  - BitBox02 traffic rides U2F-HID framing and is encrypted with a Noise channel
+    established during pairing. The simulator auto-confirms pairing.
+  - Descriptor-based address display re-supplies the wallet policy each time via
+    `DeviceContext::BitBox`; the device holds no persistent policy token like a
+    Ledger HMAC.
+  - Wallet policies share the miniscript `WalletPolicy` extraction in
+    [`bhwi/src/policy.rs`](../bhwi/src/policy.rs) with the Ledger backend.
+  - Use these commands for emulator-backed tests:
+
+```sh
+nix run .#bitbox
+nix develop .#bitbox -c cargo test -p bhwi-e2e-bitbox -- --test-threads=1
+```
+
 ## Ledger
 
 - Local code:
