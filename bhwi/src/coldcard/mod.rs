@@ -10,7 +10,9 @@ use bitcoin::secp256k1::ecdsa::Signature;
 
 use crate::Interpreter;
 use crate::coldcard::api::response::ResponseMessage;
-use crate::common::{Command, DisplayAddress, Error, Info, Recipient, Response, Transmit};
+use crate::common::{
+    Command, DeviceBackup, DisplayAddress, Error, Info, Recipient, Response, Transmit,
+};
 use crate::device::DeviceId;
 
 pub const DEFAULT_CKCC_SOCKET: &str = "/tmp/ckcc-simulator.sock";
@@ -551,7 +553,7 @@ impl From<ColdcardResponse> for Response {
             ColdcardResponse::Ok => Response::TaskDone,
             ColdcardResponse::Busy => Response::TaskBusy,
             ColdcardResponse::Address(address) => Response::Address(address),
-            ColdcardResponse::Backup(bytes) => Response::Backup(bytes),
+            ColdcardResponse::Backup(bytes) => Response::Backup(DeviceBackup::File(bytes)),
             ColdcardResponse::SignedPsbt(psbt) => Response::SignedPsbt(psbt),
         }
     }
@@ -662,7 +664,7 @@ mod tests {
         );
 
         match interpreter.end().unwrap() {
-            Response::Backup(bytes) => assert_eq!(bytes, backup),
+            Response::Backup(DeviceBackup::File(bytes)) => assert_eq!(bytes, backup),
             _ => panic!("expected backup response"),
         }
     }

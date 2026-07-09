@@ -24,7 +24,7 @@ mod tests {
     use bhwi::miniscript::psbt::{PsbtInputExt, PsbtOutputExt};
     use bhwi_async::transport::Channel;
     use bhwi_async::transport::bitbox::hid::BitBoxTransportHID;
-    use bhwi_async::{DeviceContext, DisplayAddress, HWI, bitbox::BitBox};
+    use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, HWI, bitbox::BitBox};
     use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
     use bitcoin::hashes::{Hash, sha256d};
     use bitcoin::psbt::Psbt;
@@ -131,6 +131,13 @@ mod tests {
         let info = dev.get_info().await.unwrap();
         assert!(!info.version.is_empty());
         assert!(info.firmware.is_some());
+    }
+
+    #[tokio::test]
+    async fn can_backup_device() {
+        let mut dev = device().await;
+        let backup = dev.backup_device().await.unwrap();
+        assert_eq!(backup, DeviceBackup::Complete);
     }
 
     #[tokio::test]

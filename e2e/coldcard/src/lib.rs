@@ -44,7 +44,7 @@ impl DeviceControl {
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64, Encoding};
-    use bhwi_async::{DisplayAddress, HWI, transport::coldcard::DEFAULT_CKCC_SOCKET};
+    use bhwi_async::{DeviceBackup, DisplayAddress, HWI, transport::coldcard::DEFAULT_CKCC_SOCKET};
     use bitcoin::{
         Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
         Witness,
@@ -252,7 +252,10 @@ mod tests {
         let backup_task = dev.backup_device();
         let (backup_res, approve_res) = tokio::join!(backup_task, control.approve_backup());
         approve_res.unwrap();
-        let backup = backup_res.expect("failed to back up coldcard");
+        let backup = match backup_res.expect("failed to back up coldcard") {
+            DeviceBackup::File(bytes) => bytes,
+            DeviceBackup::Complete => panic!("coldcard backup should return file bytes"),
+        };
 
         assert!(backup.starts_with(b"7z\xbc\xaf'\x1c"));
         assert!(backup.len() > 1024);
