@@ -60,10 +60,10 @@ pub enum DeviceContext {
         wallet_policy: ledger::LedgerWalletPolicy,
         wallet_hmac: Option<[u8; 32]>,
     },
-    /// Required context for BitBox02 descriptor-based address display: the full wallet
-    /// descriptor (with key origins) of the registered policy.
+    /// Required context for BitBox02 descriptor-based address display: the wallet policy
+    /// (with key origins) of the registered descriptor.
     #[cfg(feature = "bitbox")]
-    BitBox { policy: String },
+    BitBox { policy: WalletPolicy },
 }
 
 pub enum Response {

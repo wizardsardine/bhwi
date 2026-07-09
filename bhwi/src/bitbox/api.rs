@@ -4,42 +4,10 @@
 //! Copyright 2023-2025 Shift Crypto AG. Licensed under the Apache License,
 //! Version 2.0 — see BITBOX_LICENSE at the repository root.
 
-use bitcoin::bip32::Xpub;
+use bitcoin::bip32::DerivationPath;
 
 use super::error::BitBoxError;
-use super::keypath::Keypath;
 use super::proto as pb;
-
-/// Convert a `bitcoin::bip32::Xpub` to the protobuf `pb::XPub` representation.
-pub fn convert_xpub(xpub: &Xpub) -> pb::XPub {
-    pb::XPub {
-        depth: vec![xpub.depth],
-        parent_fingerprint: xpub.parent_fingerprint[..].to_vec(),
-        child_num: xpub.child_number.into(),
-        chain_code: xpub.chain_code[..].to_vec(),
-        public_key: xpub.public_key.serialize().to_vec(),
-    }
-}
-
-/// Origin info for a single key in a wallet policy or multisig registration.
-#[derive(Clone, Debug, PartialEq)]
-pub struct KeyOriginInfo {
-    pub root_fingerprint: Option<bitcoin::bip32::Fingerprint>,
-    pub keypath: Option<Keypath>,
-    pub xpub: Xpub,
-}
-
-impl From<KeyOriginInfo> for pb::KeyOriginInfo {
-    fn from(value: KeyOriginInfo) -> Self {
-        pb::KeyOriginInfo {
-            root_fingerprint: value
-                .root_fingerprint
-                .map_or(vec![], |fp| fp.as_bytes().to_vec()),
-            keypath: value.keypath.map_or(vec![], |kp| kp.to_vec()),
-            xpub: Some(convert_xpub(&value.xpub)),
-        }
-    }
-}
 
 /// Create a single-sig script config.
 pub fn make_script_config_simple(
@@ -48,18 +16,6 @@ pub fn make_script_config_simple(
     pb::BtcScriptConfig {
         config: Some(pb::btc_script_config::Config::SimpleType(
             simple_type.into(),
-        )),
-    }
-}
-
-/// Create a wallet policy script config (BIP-388).
-pub fn make_script_config_policy(policy: &str, keys: &[KeyOriginInfo]) -> pb::BtcScriptConfig {
-    pb::BtcScriptConfig {
-        config: Some(pb::btc_script_config::Config::Policy(
-            pb::btc_script_config::Policy {
-                policy: policy.into(),
-                keys: keys.iter().cloned().map(pb::KeyOriginInfo::from).collect(),
-            },
         )),
     }
 }
@@ -86,13 +42,13 @@ pub fn xpub_type_from_network(network: bitcoin::Network) -> pb::btc_pub_request:
 /// Build a `BtcPub` request for a raw xpub.
 pub fn xpub_request(
     coin: pb::BtcCoin,
-    keypath: &Keypath,
+    keypath: &DerivationPath,
     xpub_type: pb::btc_pub_request::XPubType,
     display: bool,
 ) -> pb::request::Request {
     pb::request::Request::BtcPub(pb::BtcPubRequest {
         coin: coin as _,
-        keypath: keypath.to_vec(),
+        keypath: keypath.to_u32_vec(),
         display,
         output: Some(pb::btc_pub_request::Output::XpubType(xpub_type as _)),
     })
@@ -101,13 +57,13 @@ pub fn xpub_request(
 /// Build a `BtcPub` request for an address display.
 pub fn address_request(
     coin: pb::BtcCoin,
-    keypath: &Keypath,
+    keypath: &DerivationPath,
     script_config: pb::BtcScriptConfig,
     display: bool,
 ) -> pb::request::Request {
     pb::request::Request::BtcPub(pb::BtcPubRequest {
         coin: coin as _,
-        keypath: keypath.to_vec(),
+        keypath: keypath.to_u32_vec(),
         display,
         output: Some(pb::btc_pub_request::Output::ScriptConfig(script_config)),
     })
@@ -127,7 +83,7 @@ pub fn device_info_request() -> pb::request::Request {
 pub fn is_script_config_registered_request(
     coin: pb::BtcCoin,
     script_config: pb::BtcScriptConfig,
-    keypath_account: Option<&Keypath>,
+    keypath_account: Option<&DerivationPath>,
 ) -> pb::request::Request {
     pb::request::Request::Btc(pb::BtcRequest {
         request: Some(pb::btc_request::Request::IsScriptConfigRegistered(
@@ -135,7 +91,7 @@ pub fn is_script_config_registered_request(
                 registration: Some(pb::BtcScriptConfigRegistration {
                     coin: coin as _,
                     script_config: Some(script_config),
-                    keypath: keypath_account.map_or(vec![], |kp| kp.to_vec()),
+                    keypath: keypath_account.map_or(vec![], |kp| kp.to_u32_vec()),
                 }),
             },
         )),
@@ -146,7 +102,7 @@ pub fn is_script_config_registered_request(
 pub fn register_script_config_request(
     coin: pb::BtcCoin,
     script_config: pb::BtcScriptConfig,
-    keypath_account: Option<&Keypath>,
+    keypath_account: Option<&DerivationPath>,
     xpub_type: pb::btc_register_script_config_request::XPubType,
     name: Option<&str>,
 ) -> pb::request::Request {
@@ -156,7 +112,7 @@ pub fn register_script_config_request(
                 registration: Some(pb::BtcScriptConfigRegistration {
                     coin: coin as _,
                     script_config: Some(script_config),
-                    keypath: keypath_account.map_or(vec![], |kp| kp.to_vec()),
+                    keypath: keypath_account.map_or(vec![], |kp| kp.to_u32_vec()),
                 }),
                 name: name.unwrap_or("").into(),
                 xpub_type: xpub_type as _,

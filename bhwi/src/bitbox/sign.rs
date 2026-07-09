@@ -12,13 +12,21 @@ use std::collections::BTreeMap;
 
 use bitcoin::{
     Script,
+    bip32::DerivationPath,
     blockdata::{opcodes, script::Instruction},
 };
 
 use super::api::make_script_config_simple;
 use super::error::BitBoxError;
-use super::keypath::Keypath;
 use super::proto as pb;
+
+/// The leading run of hardened elements of a derivation path (the account-level prefix).
+fn hardened_prefix(path: &DerivationPath) -> DerivationPath {
+    path.into_iter()
+        .take_while(|c| c.is_hardened())
+        .cloned()
+        .collect()
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrevTxInput {
@@ -79,7 +87,7 @@ pub struct TxInput {
     pub prev_out_index: u32,
     pub prev_out_value: u64,
     pub sequence: u32,
-    pub keypath: Keypath,
+    pub keypath: DerivationPath,
     pub script_config_index: u32,
     /// Can be `None` if all transaction inputs are Taproot.
     pub prev_tx: Option<PrevTx>,
@@ -95,7 +103,7 @@ impl TxInput {
 
 #[derive(Debug, PartialEq)]
 pub struct TxInternalOutput {
-    pub keypath: Keypath,
+    pub keypath: DerivationPath,
     pub value: u64,
     pub script_config_index: u32,
 }
@@ -215,17 +223,17 @@ pub struct Transaction {
 /// to insert the returned signature back into the PSBT under the correct key.
 #[derive(Clone, Debug)]
 pub enum OurKey {
-    Segwit(bitcoin::secp256k1::PublicKey, Keypath),
-    TaprootInternal(Keypath),
+    Segwit(bitcoin::secp256k1::PublicKey, DerivationPath),
+    TaprootInternal(DerivationPath),
     TaprootScript(
         bitcoin::secp256k1::XOnlyPublicKey,
         bitcoin::taproot::TapLeafHash,
-        Keypath,
+        DerivationPath,
     ),
 }
 
 impl OurKey {
-    pub(crate) fn keypath(&self) -> Keypath {
+    pub(crate) fn keypath(&self) -> DerivationPath {
         match self {
             OurKey::Segwit(_, kp) => kp.clone(),
             OurKey::TaprootInternal(kp) => kp.clone(),
@@ -310,7 +318,7 @@ fn find_our_key<T: PsbtOutputInfo>(
                         "taproot key reused as internal and in leaf script".into(),
                     ));
                 }
-                return Ok(OurKey::TaprootInternal(derivation_path.into()));
+                return Ok(OurKey::TaprootInternal(derivation_path.clone()));
             }
             if leaf_hashes.len() != 1 {
                 return Err(BitBoxError::BtcSign(
@@ -320,13 +328,13 @@ fn find_our_key<T: PsbtOutputInfo>(
             return Ok(OurKey::TaprootScript(
                 *xonly,
                 leaf_hashes[0],
-                derivation_path.into(),
+                derivation_path.clone(),
             ));
         }
     }
     for (pubkey, (fingerprint, derivation_path)) in output_info.get_bip32_derivation().iter() {
         if &fingerprint[..] == our_root_fingerprint {
-            return Ok(OurKey::Segwit(*pubkey, derivation_path.into()));
+            return Ok(OurKey::Segwit(*pubkey, derivation_path.clone()));
         }
     }
     Err(BitBoxError::BtcSign(
@@ -336,16 +344,16 @@ fn find_our_key<T: PsbtOutputInfo>(
 
 fn script_config_from_utxo(
     output: &bitcoin::TxOut,
-    keypath: Keypath,
+    keypath: DerivationPath,
     redeem_script: Option<&bitcoin::ScriptBuf>,
 ) -> Result<pb::BtcScriptConfigWithKeypath, BitBoxError> {
-    let keypath = keypath.hardened_prefix();
+    let keypath = hardened_prefix(&keypath);
     if output.script_pubkey.is_p2wpkh() {
         return Ok(pb::BtcScriptConfigWithKeypath {
             script_config: Some(make_script_config_simple(
                 pb::btc_script_config::SimpleType::P2wpkh,
             )),
-            keypath: keypath.to_vec(),
+            keypath: keypath.to_u32_vec(),
         });
     }
     let redeem_is_p2wpkh = redeem_script.map(|s| s.is_p2wpkh()).unwrap_or(false);
@@ -354,7 +362,7 @@ fn script_config_from_utxo(
             script_config: Some(make_script_config_simple(
                 pb::btc_script_config::SimpleType::P2wpkhP2sh,
             )),
-            keypath: keypath.to_vec(),
+            keypath: keypath.to_u32_vec(),
         });
     }
     if output.script_pubkey.is_p2tr() {
@@ -362,7 +370,7 @@ fn script_config_from_utxo(
             script_config: Some(make_script_config_simple(
                 pb::btc_script_config::SimpleType::P2tr,
             )),
-            keypath: keypath.to_vec(),
+            keypath: keypath.to_u32_vec(),
         });
     }
     Err(BitBoxError::BtcSign(

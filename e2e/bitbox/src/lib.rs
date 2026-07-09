@@ -18,6 +18,7 @@
 mod tests {
     use async_trait::async_trait;
     use bhwi::bitbox::error::{BitBoxDeviceError, BitBoxError};
+    use bhwi::miniscript::descriptor::WalletPolicy;
     use bhwi_async::transport::Channel;
     use bhwi_async::transport::bitbox::hid::BitBoxTransportHID;
     use bhwi_async::{DeviceContext, DisplayAddress, HWI, bitbox::BitBox};
@@ -210,7 +211,7 @@ mod tests {
                     descriptor_name: "bhwi-e2e".to_string(),
                 },
                 Some(DeviceContext::BitBox {
-                    policy: policy.clone(),
+                    policy: WalletPolicy::from_str(&policy).unwrap(),
                 }),
             )
             .await

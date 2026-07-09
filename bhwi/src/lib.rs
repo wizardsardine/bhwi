@@ -8,6 +8,7 @@ pub mod common;
 pub mod device;
 pub mod jade;
 pub mod ledger;
+pub mod policy;
 
 pub trait Interpreter {
     type Command;

@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use bitcoin::bip32::{Fingerprint, Xpub};
+use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub};
 use bitcoin::psbt::Psbt;
 use prost::Message;
 
@@ -11,7 +11,6 @@ use crate::common::{
 
 use super::api;
 use super::error::BitBoxError;
-use super::keypath::Keypath;
 use super::noise::{HandshakeState, NoiseState};
 use super::proto as pb;
 use super::sign::{OurKey, Transaction, TxOutput, apply_signatures, is_schnorr};
@@ -30,18 +29,18 @@ pub enum BitBoxCommand {
     GetVersion,
     GetMasterFingerprint,
     GetXpub {
-        keypath: Keypath,
+        keypath: DerivationPath,
         display: bool,
     },
     /// P2WPKH (bip84) address at a plain BIP-32 keypath.
     ShowSimpleAddress {
-        keypath: Keypath,
+        keypath: DerivationPath,
         simple_type: pb::btc_script_config::SimpleType,
         display: bool,
     },
     /// Address derived from a registered miniscript policy.
     ShowPolicyAddress {
-        keypath: Keypath,
+        keypath: DerivationPath,
         policy: policy::Policy,
         display: bool,
     },
@@ -60,7 +59,7 @@ pub enum BitBoxCommand {
     },
     /// Sign a message with a single-sig key at `keypath`.
     SignMessage {
-        keypath: Keypath,
+        keypath: DerivationPath,
         simple_type: pb::btc_script_config::SimpleType,
         message: Vec<u8>,
     },
@@ -250,13 +249,11 @@ fn build_sign_init_request(coin: pb::BtcCoin, tx: &Transaction) -> pb::request::
 
 /// Pick the single-sig script type BitBox02 signs a message under, from the BIP-44-style
 /// purpose in the keypath. Defaults to native segwit.
-fn simple_type_from_path(
-    path: &bitcoin::bip32::DerivationPath,
-) -> pb::btc_script_config::SimpleType {
+fn simple_type_from_path(path: &DerivationPath) -> pb::btc_script_config::SimpleType {
     use pb::btc_script_config::SimpleType;
-    match path.to_u32_vec().first() {
-        Some(&p) if p == super::keypath::HARDENED + 49 => SimpleType::P2wpkhP2sh,
-        Some(&p) if p == super::keypath::HARDENED + 86 => SimpleType::P2tr,
+    match path.into_iter().next() {
+        Some(ChildNumber::Hardened { index: 49 }) => SimpleType::P2wpkhP2sh,
+        Some(ChildNumber::Hardened { index: 86 }) => SimpleType::P2tr,
         _ => SimpleType::P2wpkh,
     }
 }
@@ -268,8 +265,7 @@ fn descriptor_keypath(
     our_fingerprint: Fingerprint,
     change: bool,
     index: u32,
-) -> Result<Keypath, BitBoxError> {
-    use bitcoin::bip32::ChildNumber;
+) -> Result<DerivationPath, BitBoxError> {
     let our_key = policy
         .pubkeys
         .iter()
@@ -286,7 +282,7 @@ fn descriptor_keypath(
         ChildNumber::from_normal_idx(index)
             .map_err(|_| BitBoxError::InvalidInput("invalid address index"))?,
     ]);
-    Ok(Keypath::from(&full))
+    Ok(full)
 }
 
 /// Decode a `BtcSignNextResponse` from a top-level `Response`, accepting either the direct
@@ -388,7 +384,7 @@ impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
                     prev_out_index: input.prev_out_index,
                     prev_out_value: input.prev_out_value,
                     sequence: input.sequence,
-                    keypath: input.keypath.to_vec(),
+                    keypath: input.keypath.to_u32_vec(),
                     script_config_index: input.script_config_index,
                     host_nonce_commitment: host_nonce.as_ref().map(|n| {
                         pb::AntiKleptoHostNonceCommitment {
@@ -464,7 +460,7 @@ impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
                     TxOutput::Internal(o) => pb::BtcSignOutputRequest {
                         ours: true,
                         value: o.value,
-                        keypath: o.keypath.to_vec(),
+                        keypath: o.keypath.to_u32_vec(),
                         script_config_index: o.script_config_index,
                         ..Default::default()
                     },
@@ -705,7 +701,7 @@ where
                             coin: coin as _,
                             script_config: Some(pb::BtcScriptConfigWithKeypath {
                                 script_config: Some(api::make_script_config_simple(simple_type)),
-                                keypath: keypath.to_vec(),
+                                keypath: keypath.to_u32_vec(),
                             }),
                             msg: message,
                             host_nonce_commitment: Some(pb::AntiKleptoHostNonceCommitment {
@@ -967,12 +963,12 @@ impl TryFrom<Command> for BitBoxCommand {
             Command::GetVersion => Ok(BitBoxCommand::GetVersion),
             Command::GetMasterFingerprint => Ok(BitBoxCommand::GetMasterFingerprint),
             Command::GetXpub { path, display } => Ok(BitBoxCommand::GetXpub {
-                keypath: Keypath::from(&path),
+                keypath: path,
                 display,
             }),
             Command::DisplayAddress(DisplayAddress::ByPath { path, display, .. }, _) => {
                 Ok(BitBoxCommand::ShowSimpleAddress {
-                    keypath: Keypath::from(&path),
+                    keypath: path,
                     simple_type: pb::btc_script_config::SimpleType::P2wpkh,
                     display,
                 })
@@ -988,7 +984,7 @@ impl TryFrom<Command> for BitBoxCommand {
             ) => {
                 let policy = match context {
                     Some(DeviceContext::BitBox { policy }) => {
-                        policy::extract_script_config_policy(&policy)?
+                        policy::Policy::from_wallet_policy(&policy)?
                     }
                     _ => {
                         return Err(BitBoxError::InvalidInput(
@@ -1003,26 +999,17 @@ impl TryFrom<Command> for BitBoxCommand {
                     display,
                 })
             }
-            Command::RegisterWallet { name, policy } => {
-                // `WalletPolicy::to_string()` emits the BIP-388 template (`@0/**`) with the
-                // xpubs stripped; the BitBox needs the full descriptor with key origins, so
-                // reconstruct it before extracting the script config.
-                let descriptor = policy.into_descriptor().map_err(|_| {
-                    BitBoxError::InvalidInput("wallet policy is missing key info for registration")
-                })?;
-                let extracted = policy::extract_script_config_policy(&descriptor.to_string())?;
-                Ok(BitBoxCommand::RegisterScriptConfig {
-                    policy: extracted,
-                    name,
-                })
-            }
+            Command::RegisterWallet { name, policy } => Ok(BitBoxCommand::RegisterScriptConfig {
+                policy: policy::Policy::from_wallet_policy(&policy)?,
+                name,
+            }),
             Command::SignTx(psbt, _) => Ok(BitBoxCommand::SignPsbt {
                 psbt: Box::new(psbt),
                 force_script_config: None,
             }),
             Command::SignMessage { message, path } => Ok(BitBoxCommand::SignMessage {
-                keypath: Keypath::from(&path),
                 simple_type: simple_type_from_path(&path),
+                keypath: path,
                 message,
             }),
         }
@@ -1064,10 +1051,15 @@ impl From<BitBoxError> for Error {
 mod tests {
     use super::*;
     use bitcoin::bip32::DerivationPath;
+    use miniscript::descriptor::WalletPolicy;
     use std::str::FromStr;
 
     fn simple(path: &str) -> pb::btc_script_config::SimpleType {
         simple_type_from_path(&DerivationPath::from_str(path).unwrap())
+    }
+
+    fn policy_from(descriptor: &str) -> policy::Policy {
+        policy::Policy::from_wallet_policy(&WalletPolicy::from_str(descriptor).unwrap()).unwrap()
     }
 
     #[test]
@@ -1082,32 +1074,23 @@ mod tests {
 
     #[test]
     fn descriptor_keypath_appends_change_and_index() {
-        let policy = policy::extract_script_config_policy(
-            "wsh(or_d(pk([f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/**),and_v(v:pkh([00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/**),older(100))))",
-        )
-        .unwrap();
+        let policy = policy_from(
+            "wsh(or_d(pk([f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*),and_v(v:pkh([00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<0;1>/*),older(100))))",
+        );
         let our_fp = Fingerprint::from_str("f5acc2fd").unwrap();
         let keypath = descriptor_keypath(&policy, our_fp, true, 7).unwrap();
         // m/48'/1'/0'/2' + change(1) + index(7)
         assert_eq!(
-            keypath.to_vec(),
-            vec![
-                super::super::keypath::HARDENED + 48,
-                super::super::keypath::HARDENED + 1,
-                super::super::keypath::HARDENED,
-                super::super::keypath::HARDENED + 2,
-                1,
-                7,
-            ]
+            keypath,
+            DerivationPath::from_str("m/48'/1'/0'/2'/1/7").unwrap()
         );
     }
 
     #[test]
     fn descriptor_keypath_requires_our_key() {
-        let policy = policy::extract_script_config_policy(
-            "wsh(pk([f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/**))",
-        )
-        .unwrap();
+        let policy = policy_from(
+            "wsh(pk([f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*))",
+        );
         let unknown = Fingerprint::from_str("deadbeef").unwrap();
         assert!(descriptor_keypath(&policy, unknown, false, 0).is_err());
     }

@@ -330,7 +330,10 @@ impl Client {
                 let desc = wallet_descriptor.ok_or_else(|| {
                     JsValue::from_str("BitBox descriptor address requires wallet_descriptor")
                 })?;
-                Some(DeviceContext::BitBox { policy: desc })
+                let policy: WalletPolicy = desc
+                    .parse()
+                    .map_err(|e| JsValue::from_str(&format!("Invalid wallet descriptor: {e}")))?;
+                Some(DeviceContext::BitBox { policy })
             }
             Some(Device::Ledger(_)) => match (wallet_hmac_hex, wallet_descriptor) {
                 (Some(hmac_hex), Some(desc)) => {

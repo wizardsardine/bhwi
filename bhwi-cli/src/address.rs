@@ -60,7 +60,7 @@ impl DeviceManager {
                             )
                         })?;
                         Some(DeviceContext::BitBox {
-                            policy: wallet_policy.to_string(),
+                            policy: wallet_policy,
                         })
                     }
                     DeviceType::Ledger => match (hmac, wallet_descriptor) {

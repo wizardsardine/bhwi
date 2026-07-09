@@ -66,8 +66,6 @@ pub enum BitBoxError {
     ProtobufDecode(String),
     #[error("protobuf message could not be encoded: {0}")]
     ProtobufEncode(String),
-    #[error("failed parsing keypath: {0}")]
-    KeypathParse(String),
     #[error("PSBT error: {0}")]
     Psbt(String),
     #[error("unexpected signature format returned by BitBox")]

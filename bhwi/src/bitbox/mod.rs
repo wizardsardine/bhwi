@@ -2,7 +2,6 @@ pub mod antiklepto;
 pub mod api;
 pub mod error;
 pub mod interpreter;
-pub mod keypath;
 pub mod noise;
 pub mod policy;
 pub mod proto;
