@@ -6,7 +6,8 @@ use prost::Message;
 
 use crate::Interpreter;
 use crate::common::{
-    Command, DeviceContext, DisplayAddress, Error, Info, Recipient, Response, Transmit,
+    Command, DeviceBackup, DeviceContext, DisplayAddress, Error, Info, Recipient, Response,
+    Transmit,
 };
 
 use super::api;
@@ -79,6 +80,8 @@ pub enum BitBoxCommand {
         timestamp: u32,
         timezone_offset: i32,
     },
+    /// Start the BitBox02 mnemonic backup display flow.
+    Backup,
 }
 
 #[derive(Debug)]
@@ -94,6 +97,7 @@ pub enum BitBoxResponse {
     Registered,
     SignedPsbt(Box<Psbt>),
     Signature(u8, bitcoin::secp256k1::ecdsa::Signature),
+    Backup,
 }
 
 /// Internal state machine.
@@ -181,6 +185,7 @@ enum EncryptedContext {
     IsRegistered,
     RegisterScriptConfig,
     RestoreFromMnemonic,
+    Backup,
 }
 
 pub struct BitBoxInterpreter<'a, C, T, R, E> {
@@ -585,6 +590,7 @@ impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
                 }),
             ) => Ok(BitBoxResponse::Registered),
             (EncryptedContext::RestoreFromMnemonic, R::Success(_)) => Ok(BitBoxResponse::TaskDone),
+            (EncryptedContext::Backup, R::Success(_)) => Ok(BitBoxResponse::Backup),
             _ => Err(BitBoxError::UnexpectedResponse),
         }
     }
@@ -781,6 +787,16 @@ where
                     });
                 let bytes =
                     self.start_encrypted_query(request, EncryptedContext::RestoreFromMnemonic)?;
+                Ok(encrypted_transmit(bytes).into())
+            }
+            BitBoxCommand::Backup => {
+                if !self.noise.is_paired() {
+                    return Err(BitBoxError::Noise("not paired").into());
+                }
+                let bytes = self.start_encrypted_query(
+                    api::show_mnemonic_request(),
+                    EncryptedContext::Backup,
+                )?;
                 Ok(encrypted_transmit(bytes).into())
             }
         }
@@ -1070,6 +1086,7 @@ impl TryFrom<Command> for BitBoxCommand {
                 keypath: path,
                 message,
             }),
+            Command::Backup => Ok(BitBoxCommand::Backup),
         }
     }
 }
@@ -1086,6 +1103,7 @@ impl From<BitBoxResponse> for Response {
             BitBoxResponse::Registered => Response::WalletHmac([0u8; 32]),
             BitBoxResponse::SignedPsbt(psbt) => Response::SignedPsbt(*psbt),
             BitBoxResponse::Signature(header, sig) => Response::Signature(header, sig),
+            BitBoxResponse::Backup => Response::Backup(DeviceBackup::Complete),
         }
     }
 }
@@ -1181,5 +1199,17 @@ mod tests {
         let policy = policy_from(DECAYING_POLICY);
         let unknown = Fingerprint::from_str("deadbeef").unwrap();
         assert!(policy_script_config(&policy, &unknown.as_bytes()[..]).is_err());
+    }
+
+    #[test]
+    fn common_backup_maps_to_bitbox_backup() {
+        let command = BitBoxCommand::try_from(Command::Backup).unwrap();
+        assert!(matches!(command, BitBoxCommand::Backup));
+    }
+
+    #[test]
+    fn bitbox_backup_response_maps_to_completed_backup() {
+        let response = Response::from(BitBoxResponse::Backup);
+        assert!(matches!(response, Response::Backup(DeviceBackup::Complete)));
     }
 }

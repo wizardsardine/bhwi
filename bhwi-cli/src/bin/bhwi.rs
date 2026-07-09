@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
-use bhwi_async::DeviceContext;
+use bhwi_async::{DeviceBackup, DeviceContext};
 use bhwi_cli::{
     DeviceManager, OutputFormat, address::AddressTarget, config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
@@ -136,11 +136,17 @@ enum AddressCommands {
     },
 }
 
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum DeviceCommands {
     /// List all available devices
     #[command(alias = "enumerate")]
     List,
+    /// Start a backup on the selected device
+    Backup {
+        /// Output file for devices that export encrypted backup bytes
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -288,6 +294,35 @@ async fn main() -> Result<()> {
             }
             if let Some(OutputFormat::Json) = format {
                 println!("{}", serde_json::json![devices])
+            }
+        }
+        Commands::Device(DeviceCommands::Backup { output }) => {
+            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+                let backup = d.device().backup_device().await?;
+                match backup {
+                    DeviceBackup::File(bytes) => {
+                        let output = output.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "--output is required for devices that export backup files"
+                            )
+                        })?;
+                        std::fs::write(&output, &bytes)?;
+                        if let Some(OutputFormat::Json) = format {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "output": output,
+                                    "bytes": bytes.len(),
+                                })
+                            );
+                        }
+                    }
+                    DeviceBackup::Complete => {
+                        if let Some(OutputFormat::Json) = format {
+                            println!("{}", serde_json::json!({ "success": true }));
+                        }
+                    }
+                }
             }
         }
         Commands::Xpub(XpubCommands::Get { path }) => {
@@ -453,6 +488,27 @@ mod tests {
                 path,
                 output: None,
             } if message == "hello" && path.to_string() == "44'/1'/0'/0"
+        ));
+    }
+
+    #[test]
+    fn parses_device_backup_with_explicit_output() {
+        let args = Args::parse_from(["bhwi", "device", "backup", "--output", "backup.7z"]);
+
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Backup { output })
+                if output.as_deref() == Some(std::path::Path::new("backup.7z"))
+        ));
+    }
+
+    #[test]
+    fn parses_device_backup_without_output() {
+        let args = Args::parse_from(["bhwi", "device", "backup"]);
+
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Backup { output: None })
         ));
     }
 

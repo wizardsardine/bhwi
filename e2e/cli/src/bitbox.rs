@@ -17,6 +17,13 @@ fn bitbox_device_list() -> Result<()> {
 }
 
 #[test]
+fn bitbox_device_backup() -> Result<()> {
+    let stdout = Cli::for_device(BITBOX_FINGERPRINT).run_ok(["device", "backup"])?;
+    assert!(stdout.is_empty());
+    Ok(())
+}
+
+#[test]
 fn bitbox_descriptor_pubkeys() -> Result<()> {
     assert_command(CommandCase {
         name: "descriptor pubkeys account 0",

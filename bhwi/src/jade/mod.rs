@@ -431,6 +431,7 @@ impl TryFrom<Command> for JadeCommand {
 
     fn try_from(cmd: Command) -> Result<Self, Self::Error> {
         match cmd {
+            Command::Backup => Err(Error::MissingCommandInfo("Backup not supported by Jade")),
             Command::Unlock { .. } => Ok(Self::Auth),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
             Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),

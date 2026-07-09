@@ -8,6 +8,7 @@ pub mod transport;
 use std::{error::Error as StdError, fmt::Debug, str::FromStr};
 
 use async_trait::async_trait;
+pub use bhwi::common::DeviceBackup;
 pub use bhwi::common::DeviceContext;
 pub use bhwi::common::DisplayAddress;
 pub use bhwi::common::Info;
@@ -40,6 +41,7 @@ pub trait HttpClient {
 #[async_trait(?Send)]
 pub trait HWI {
     type Error: Debug;
+    async fn backup_device(&mut self) -> Result<DeviceBackup, Self::Error>;
     async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
     async fn get_info(&mut self) -> Result<Info, Self::Error>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, Self::Error>;
@@ -71,6 +73,7 @@ pub trait HWI {
 // generate the blanket impl which will map the errors to HWIDeviceError
 #[async_trait(?Send)]
 pub trait HWIDevice {
+    async fn backup_device(&mut self) -> Result<DeviceBackup, HWIDeviceError>;
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError>;
     async fn get_info(&mut self) -> Result<Info, HWIDeviceError>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError>;
@@ -130,6 +133,15 @@ where
         + OnUnlock,
 {
     type Error = Error<D::TransportError, D::HttpClientError>;
+    async fn backup_device(&mut self) -> Result<DeviceBackup, Self::Error> {
+        if let common::Response::Backup(backup) = run_command(self, common::Command::Backup).await?
+        {
+            Ok(backup)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
+
     async fn unlock(&mut self, network: Network) -> Result<(), Self::Error> {
         let res = run_command(
             self,
@@ -251,6 +263,10 @@ where
     T: HWI,
     T::Error: StdError + Send + Sync + 'static,
 {
+    async fn backup_device(&mut self) -> Result<DeviceBackup, HWIDeviceError> {
+        HWI::backup_device(self).await.map_err(HWIDeviceError::new)
+    }
+
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError> {
         HWI::unlock(self, network)
             .await

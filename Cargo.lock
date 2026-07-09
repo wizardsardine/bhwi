@@ -321,10 +321,13 @@ name = "bhwi-e2e-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bhwi-async",
+ "bhwi-cli",
  "bitcoin",
  "hex",
  "reqwest",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

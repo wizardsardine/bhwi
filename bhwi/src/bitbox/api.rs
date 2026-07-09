@@ -79,6 +79,11 @@ pub fn device_info_request() -> pb::request::Request {
     pb::request::Request::DeviceInfo(pb::DeviceInfoRequest {})
 }
 
+/// Build a request that asks the BitBox02 to display/export its mnemonic backup flow.
+pub fn show_mnemonic_request() -> pb::request::Request {
+    pb::request::Request::ShowMnemonic(pb::ShowMnemonicRequest {})
+}
+
 /// Build a nested `BtcRequest::IsScriptConfigRegistered`.
 pub fn is_script_config_registered_request(
     coin: pb::BtcCoin,
@@ -131,5 +136,18 @@ pub fn decode_response(bytes: &[u8]) -> Result<pb::response::Response, BitBoxErr
         )),
         Some(r) => Ok(r),
         None => Err(BitBoxError::UnexpectedResponse),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_mnemonic_request_uses_backup_flow() {
+        assert!(matches!(
+            show_mnemonic_request(),
+            pb::request::Request::ShowMnemonic(pb::ShowMnemonicRequest {})
+        ));
     }
 }

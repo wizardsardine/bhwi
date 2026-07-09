@@ -30,6 +30,7 @@ pub enum DisplayAddress {
 
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
+    Backup,
     GetMasterFingerprint,
     GetVersion,
     GetXpub {
@@ -67,6 +68,7 @@ pub enum DeviceContext {
 }
 
 pub enum Response {
+    Backup(DeviceBackup),
     TaskDone,
     TaskBusy,
     Info(Info),
@@ -77,6 +79,12 @@ pub enum Response {
     SignedPsbt(Psbt),
     Address(String),
     WalletHmac([u8; 32]),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeviceBackup {
+    Complete,
+    File(Vec<u8>),
 }
 
 /// Device Information
