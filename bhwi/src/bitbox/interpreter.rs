@@ -1057,6 +1057,9 @@ impl TryFrom<Command> for BitBoxCommand {
                     display,
                 })
             }
+            Command::DisplayAddress(DisplayAddress::ByMultisig(_), _) => Err(
+                BitBoxError::InvalidInput("BitBox raw multisig display is not implemented"),
+            ),
             Command::RegisterWallet { name, policy } => Ok(BitBoxCommand::RegisterScriptConfig {
                 policy: policy::Policy::from_wallet_policy(&policy)?,
                 name,

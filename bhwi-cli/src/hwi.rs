@@ -1683,6 +1683,7 @@ fn hwi_descriptor_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAdd
 
 fn hwi_can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
     match device_type {
+        DeviceType::BitBox02 => false,
         DeviceType::Ledger => true,
         DeviceType::Jade => false,
         DeviceType::Coldcard => model.contains("edge"),
@@ -1828,6 +1829,27 @@ fn hwi_unavailable_action_message(
         }
         (DeviceType::Coldcard, HwiUnsupportedDeviceAction::TogglePassphrase) => {
             "The Coldcard does not support toggling passphrase from the host"
+        }
+        (DeviceType::BitBox02, HwiUnsupportedDeviceAction::Setup { .. }) => {
+            "BitBox02 software setup is not implemented"
+        }
+        (DeviceType::BitBox02, HwiUnsupportedDeviceAction::Wipe) => {
+            "BitBox02 software wiping is not implemented"
+        }
+        (DeviceType::BitBox02, HwiUnsupportedDeviceAction::Restore { .. }) => {
+            "BitBox02 software restore is not implemented"
+        }
+        (DeviceType::BitBox02, HwiUnsupportedDeviceAction::Backup { .. }) => {
+            "BitBox02 software backup is not implemented"
+        }
+        (DeviceType::BitBox02, HwiUnsupportedDeviceAction::PromptPin) => {
+            "BitBox02 does not need a PIN sent from the host"
+        }
+        (DeviceType::BitBox02, HwiUnsupportedDeviceAction::SendPin { .. }) => {
+            "BitBox02 does not need a PIN sent from the host"
+        }
+        (DeviceType::BitBox02, HwiUnsupportedDeviceAction::TogglePassphrase) => {
+            "BitBox02 passphrase toggling is not implemented"
         }
     }
     .to_owned()
