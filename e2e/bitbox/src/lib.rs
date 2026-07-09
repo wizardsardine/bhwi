@@ -18,14 +18,21 @@
 mod tests {
     use async_trait::async_trait;
     use bhwi::bitbox::error::{BitBoxDeviceError, BitBoxError};
-    use bhwi::miniscript::descriptor::WalletPolicy;
+    use bhwi::miniscript::descriptor::{
+        DefiniteDescriptorKey, Descriptor, DescriptorPublicKey, WalletPolicy,
+    };
+    use bhwi::miniscript::psbt::{PsbtInputExt, PsbtOutputExt};
     use bhwi_async::transport::Channel;
     use bhwi_async::transport::bitbox::hid::BitBoxTransportHID;
     use bhwi_async::{DeviceContext, DisplayAddress, HWI, bitbox::BitBox};
-    use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+    use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
     use bitcoin::hashes::{Hash, sha256d};
+    use bitcoin::psbt::Psbt;
     use bitcoin::secp256k1::{All, Message, Secp256k1};
-    use bitcoin::{Address, Network};
+    use bitcoin::{
+        Address, Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn,
+        TxOut, Witness, absolute::LockTime, transaction::Version as TxVersion,
+    };
     use std::str::FromStr;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -220,5 +227,156 @@ mod tests {
         // The address is deterministic; pin the exact value once observed against the
         // simulator. For now assert it is a well-formed mainnet P2WSH address.
         assert!(address.starts_with("bc1"), "unexpected address: {address}");
+    }
+
+    #[tokio::test]
+    async fn can_sign_decaying_multisig_psbt() {
+        let secp = Secp256k1::new();
+        let mut dev = device().await;
+        let account: DerivationPath = "m/48'/0'/0'/2'".parse().unwrap();
+        let fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let our_xpub = dev
+            .get_extended_pubkey(account.clone(), false)
+            .await
+            .unwrap();
+
+        // Liana-style inheritance: the device key spends immediately; a recovery key derived
+        // from a fixed seed (never owned by the device) can spend only after a relative
+        // timelock. Signing the always-available primary path yields exactly one signature —
+        // the device's — so no locktime is needed on the PSBT.
+        let recovery_root = Xpriv::new_master(Network::Bitcoin, &[0xc3u8; 32]).unwrap();
+        let recovery_fp = recovery_root.fingerprint(&secp);
+        let recovery_xpub =
+            Xpub::from_priv(&secp, &recovery_root.derive_priv(&secp, &account).unwrap());
+        let policy = format!(
+            "wsh(or_d(pk([{fingerprint}/48'/0'/0'/2']{our_xpub}/<0;1>/*),and_v(v:pkh([{recovery_fp}/48'/0'/0'/2']{recovery_xpub}/<0;1>/*),older(10))))"
+        );
+
+        // BitBox02 requires the policy to be registered before it will sign under it.
+        dev.register_wallet("bhwi-e2e-sign", &policy)
+            .await
+            .expect("register policy");
+
+        let (receive, change) = definite_branches(&policy);
+        let psbt = build_psbt(&secp, &receive, &change);
+
+        let signed = dev
+            .sign_tx(
+                psbt,
+                Some(DeviceContext::BitBox {
+                    policy: WalletPolicy::from_str(&policy).unwrap(),
+                }),
+            )
+            .await
+            .expect("sign decaying multisig psbt");
+
+        assert_eq!(signed.inputs.len(), 1);
+        let input = &signed.inputs[0];
+        assert_eq!(
+            input.partial_sigs.len(),
+            1,
+            "expected exactly one signature"
+        );
+        assert!(
+            input
+                .partial_sigs
+                .contains_key(&receive_pubkey(&secp, &our_xpub)),
+            "device key signature missing"
+        );
+    }
+
+    /// Value of the single input the sign test spends (must equal the witness UTXO).
+    const INPUT_VALUE: Amount = Amount::from_sat(50_000);
+    /// Value sent to the change output (input minus fee).
+    const CHANGE_VALUE: Amount = Amount::from_sat(49_000);
+
+    /// Splits a multipath descriptor into definite receive (branch 0) and change (branch 1)
+    /// descriptors at index 0.
+    fn definite_branches(
+        descriptor: &str,
+    ) -> (
+        Descriptor<DefiniteDescriptorKey>,
+        Descriptor<DefiniteDescriptorKey>,
+    ) {
+        let desc = Descriptor::<DescriptorPublicKey>::from_str(descriptor).unwrap();
+        let mut branches = desc.into_single_descriptors().unwrap().into_iter();
+        let receive = branches.next().expect("receive branch");
+        let change = branches.next().expect("change branch");
+        (
+            receive.derive_at_index(0).unwrap(),
+            change.derive_at_index(0).unwrap(),
+        )
+    }
+
+    /// Builds a single-input PSBT spending a receive output back to a change output.
+    /// `update_with_descriptor_unchecked` fills the witness fields and per-key BIP-32
+    /// derivations so the device can recognize and sign its key.
+    fn build_psbt(
+        secp: &Secp256k1<All>,
+        receive: &Descriptor<DefiniteDescriptorKey>,
+        change: &Descriptor<DefiniteDescriptorKey>,
+    ) -> Psbt {
+        let input_script = receive.derived_descriptor(secp).script_pubkey();
+        let change_script = change.derived_descriptor(secp).script_pubkey();
+
+        let prev_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: INPUT_VALUE,
+                script_pubkey: input_script.clone(),
+            }],
+        };
+        let unsigned_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: prev_tx.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: CHANGE_VALUE,
+                script_pubkey: change_script,
+            }],
+        };
+
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: INPUT_VALUE,
+            script_pubkey: input_script,
+        });
+        psbt.inputs[0].non_witness_utxo = Some(prev_tx);
+        psbt.inputs[0]
+            .update_with_descriptor_unchecked(receive)
+            .unwrap();
+        psbt.outputs[0]
+            .update_with_descriptor_unchecked(change)
+            .unwrap();
+        psbt
+    }
+
+    /// Receive-branch public key at index 0, used to assert the device signed.
+    fn receive_pubkey(secp: &Secp256k1<All>, xpub: &Xpub) -> PublicKey {
+        let child = xpub
+            .derive_pub(
+                secp,
+                &[
+                    ChildNumber::from_normal_idx(0).unwrap(),
+                    ChildNumber::from_normal_idx(0).unwrap(),
+                ],
+            )
+            .unwrap();
+        PublicKey::new(child.public_key)
     }
 }

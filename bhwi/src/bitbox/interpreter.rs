@@ -56,6 +56,9 @@ pub enum BitBoxCommand {
         /// Optional pre-computed script config with keypath. If `None`, the interpreter
         /// infers per-input from the PSBT's redeem/witness scripts (single-sig only).
         force_script_config: Option<pb::BtcScriptConfigWithKeypath>,
+        /// Optional registered wallet policy to sign under. Resolved into a forced script
+        /// config once the device fingerprint is known (needed for multisig/miniscript).
+        policy: Option<policy::Policy>,
     },
     /// Sign a message with a single-sig key at `keypath`.
     SignMessage {
@@ -123,6 +126,7 @@ enum State {
 struct SignInit {
     psbt: Box<Psbt>,
     force_script_config: Option<pb::BtcScriptConfigWithKeypath>,
+    policy: Option<policy::Policy>,
 }
 
 struct ShowAddrInit {
@@ -283,6 +287,33 @@ fn descriptor_keypath(
             .map_err(|_| BitBoxError::InvalidInput("invalid address index"))?,
     ]);
     Ok(full)
+}
+
+/// Build the forced script config a policy PSBT signs under: the registered policy's script
+/// config plus the account-level keypath of the device's own key (identified by fingerprint).
+fn policy_script_config(
+    policy: &policy::Policy,
+    fingerprint: &[u8],
+) -> Result<pb::BtcScriptConfigWithKeypath, BitBoxError> {
+    let our_key = policy
+        .pubkeys
+        .iter()
+        .find(|k| {
+            k.master_fingerprint
+                .map(|fp| fp.as_bytes().to_vec())
+                .as_deref()
+                == Some(fingerprint)
+        })
+        .ok_or(BitBoxError::InvalidInput(
+            "device key not found in descriptor policy",
+        ))?;
+    let account = our_key.path.clone().ok_or(BitBoxError::InvalidInput(
+        "device key has no origin path in descriptor policy",
+    ))?;
+    Ok(pb::BtcScriptConfigWithKeypath {
+        script_config: Some(policy.clone().into()),
+        keypath: account.to_u32_vec(),
+    })
 }
 
 /// Decode a `BtcSignNextResponse` from a top-level `Response`, accepting either the direct
@@ -673,6 +704,7 @@ where
             BitBoxCommand::SignPsbt {
                 psbt,
                 force_script_config,
+                policy,
             } => {
                 if !self.noise.is_paired() {
                     return Err(BitBoxError::Noise("not paired").into());
@@ -682,6 +714,7 @@ where
                 self.state = State::SignPsbtWaitFingerprint(SignInit {
                     psbt,
                     force_script_config,
+                    policy,
                 });
                 Ok(encrypted_transmit(bytes).into())
             }
@@ -838,7 +871,16 @@ where
                 let SignInit {
                     psbt,
                     force_script_config,
+                    policy,
                 } = init;
+                // A registered policy needs the device fingerprint (only known now) to resolve
+                // the account keypath, so build the forced script config here rather than at
+                // command-conversion time.
+                let force_script_config = match (force_script_config, policy) {
+                    (Some(config), _) => Some(config),
+                    (None, Some(policy)) => Some(policy_script_config(&policy, &fingerprint)?),
+                    (None, None) => None,
+                };
                 let (transaction, our_keys) =
                     Transaction::from_psbt(&fingerprint, &psbt, force_script_config)?;
                 let coin = api::coin_from_network(self.network);
@@ -1003,10 +1045,26 @@ impl TryFrom<Command> for BitBoxCommand {
                 policy: policy::Policy::from_wallet_policy(&policy)?,
                 name,
             }),
-            Command::SignTx(psbt, _) => Ok(BitBoxCommand::SignPsbt {
-                psbt: Box::new(psbt),
-                force_script_config: None,
-            }),
+            Command::SignTx(psbt, context) => {
+                // A `DeviceContext::BitBox` carries the registered wallet policy to sign under;
+                // without it, only single-sig inputs (inferred from the PSBT) can be signed.
+                let policy = match context {
+                    None => None,
+                    Some(DeviceContext::BitBox { policy }) => {
+                        Some(policy::Policy::from_wallet_policy(&policy)?)
+                    }
+                    Some(_) => {
+                        return Err(BitBoxError::InvalidInput(
+                            "BitBox requires DeviceContext::BitBox for policy signing",
+                        ));
+                    }
+                };
+                Ok(BitBoxCommand::SignPsbt {
+                    psbt: Box::new(psbt),
+                    force_script_config: None,
+                    policy,
+                })
+            }
             Command::SignMessage { message, path } => Ok(BitBoxCommand::SignMessage {
                 simple_type: simple_type_from_path(&path),
                 keypath: path,
@@ -1093,5 +1151,35 @@ mod tests {
         );
         let unknown = Fingerprint::from_str("deadbeef").unwrap();
         assert!(descriptor_keypath(&policy, unknown, false, 0).is_err());
+    }
+
+    // A Liana-style decaying policy: device key spends immediately, recovery key after a
+    // relative timelock. Signing must force this registered policy's script config.
+    const DECAYING_POLICY: &str = "wsh(or_d(pk([f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*),and_v(v:pkh([00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<0;1>/*),older(100))))";
+
+    #[test]
+    fn policy_script_config_uses_account_keypath() {
+        let policy = policy_from(DECAYING_POLICY);
+        let fingerprint = Fingerprint::from_str("f5acc2fd").unwrap();
+        let config = policy_script_config(&policy, &fingerprint.as_bytes()[..]).unwrap();
+        assert_eq!(
+            config.keypath,
+            DerivationPath::from_str("m/48'/1'/0'/2'")
+                .unwrap()
+                .to_u32_vec()
+        );
+        assert!(matches!(
+            config.script_config,
+            Some(pb::BtcScriptConfig {
+                config: Some(pb::btc_script_config::Config::Policy(_))
+            })
+        ));
+    }
+
+    #[test]
+    fn policy_script_config_requires_our_key() {
+        let policy = policy_from(DECAYING_POLICY);
+        let unknown = Fingerprint::from_str("deadbeef").unwrap();
+        assert!(policy_script_config(&policy, &unknown.as_bytes()[..]).is_err());
     }
 }
