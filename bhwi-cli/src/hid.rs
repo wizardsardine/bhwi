@@ -20,10 +20,14 @@ impl HidChannel {
 #[async_trait(?Send)]
 impl Channel for HidChannel {
     async fn send(&self, data: &[u8]) -> Result<usize, std::io::Error> {
+        // async-hid takes the report ID as byte 0; prepend 0x00 for unnumbered reports.
+        let mut report = Vec::with_capacity(data.len() + 1);
+        report.push(0x00);
+        report.extend_from_slice(data);
         self.device
             .lock()
             .await
-            .write_output_report(data)
+            .write_output_report(&report)
             .await
             .map_err(std::io::Error::other)?;
         Ok(data.len())

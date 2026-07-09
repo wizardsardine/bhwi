@@ -1,0 +1,13 @@
+[package]
+name = "bhwi-e2e-bitbox"
+version = "0.1.0"
+edition = "2024"
+authors.workspace = true
+license-file.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bitcoin.workspace = true
+bhwi = { workspace = true, features = ["bitbox"] }
+bhwi-async = { workspace = true, features = ["bitbox"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }

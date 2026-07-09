@@ -1,3 +1,5 @@
+#[cfg(feature = "bitbox")]
+pub mod bitbox;
 pub mod coldcard;
 pub mod jade;
 pub mod ledger;

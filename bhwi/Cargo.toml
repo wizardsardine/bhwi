@@ -11,8 +11,21 @@ description = "development kit"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["jade"]
+default = ["jade", "bitbox"]
 jade = ["serde", "serde_bytes", "serde_cbor"]
+bitbox = [
+    "dep:byteorder",
+    "dep:either",
+    "dep:getrandom",
+    "dep:hex",
+    "dep:itertools",
+    "dep:noise-protocol",
+    "dep:noise-rust-crypto",
+    "dep:prost",
+    "dep:semver",
+    "dep:zeroize",
+    "dep:zeroize_derive",
+]
 
 [dependencies]
 base64ct = { workspace = true, features = ["alloc"] }
@@ -30,3 +43,16 @@ serde_bytes = { version = "0.11.14", optional = true }
 aes = "0.8.3"
 ctr = "0.9.2"
 k256 = { version = "0.13.3", features = ["arithmetic"] }
+
+# bitbox02
+byteorder = { version = "1.5", optional = true }
+hex = { workspace = true, optional = true }
+noise-protocol = { version = "=0.2.1", optional = true }
+noise-rust-crypto = { version = "=0.6.2", optional = true, default-features = false, features = ["use-x25519", "use-chacha20poly1305", "use-sha2"] }
+either = { version = "=1.15.0", optional = true }
+getrandom = { version = "=0.2.16", optional = true }
+itertools = { version = "=0.14.0", optional = true }
+prost = { version = "=0.13.5", optional = true }
+semver = { version = "=1.0.27", optional = true }
+zeroize = { version = "=1.8.1", optional = true }
+zeroize_derive = { version = "=1.4.3", optional = true }

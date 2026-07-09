@@ -1,3 +1,5 @@
+#[cfg(feature = "bitbox")]
+use crate::bitbox;
 use crate::miniscript::descriptor::WalletPolicy;
 use crate::{coldcard, jade, ledger};
 use bitcoin::Network;
@@ -50,6 +52,7 @@ pub enum Command {
 }
 
 /// Device-specific context data required by certain commands.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum DeviceContext {
     /// Required contexts for Ledger devices
@@ -57,6 +60,10 @@ pub enum DeviceContext {
         wallet_policy: ledger::LedgerWalletPolicy,
         wallet_hmac: Option<[u8; 32]>,
     },
+    /// Required context for BitBox02 descriptor-based address display: the wallet policy
+    /// (with key origins) of the registered descriptor.
+    #[cfg(feature = "bitbox")]
+    BitBox { policy: WalletPolicy },
 }
 
 pub enum Response {
@@ -127,6 +134,8 @@ impl Error {
     }
 }
 
+#[cfg(feature = "bitbox")]
+pub type BitBoxInterpreter<'a> = bitbox::BitBoxInterpreter<'a, Command, Transmit, Response, Error>;
 pub type ColdcardInterpreter<'a> =
     coldcard::ColdcardInterpreter<'a, Command, Transmit, Response, Error>;
 pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Error>;

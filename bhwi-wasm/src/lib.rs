@@ -6,11 +6,13 @@ pub mod webserial;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use bhwi::bitbox::{BITBOX02_PID, BITBOX02_VID};
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::miniscript::descriptor::WalletPolicy;
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
-    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, coldcard::Coldcard,
+    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, bitbox::BitBox,
+    coldcard::Coldcard, transport::bitbox::hid::BitBoxTransportHID,
     transport::coldcard::hid::ColdcardTransportHID, transport::ledger::hid::LedgerTransportHID,
 };
 use bitcoin::{Network, address::AddressType, bip32::DerivationPath};
@@ -117,6 +119,7 @@ pub enum Device {
     Ledger(Ledger<LedgerTransportHID<webhid::WebHidDevice>>),
     Coldcard(Coldcard<ColdcardTransportHID<webhid::WebHidDevice>>),
     Jade(Jade<WebSerialDevice, PinServer>),
+    BitBox(BitBox<BitBoxTransportHID<webhid::WebHidDevice>>),
 }
 
 impl<'a> AsRef<dyn HWI + 'a> for Device {
@@ -125,6 +128,7 @@ impl<'a> AsRef<dyn HWI + 'a> for Device {
             Device::Coldcard(l) => l,
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
+            Device::BitBox(b) => b,
         }
     }
 }
@@ -135,6 +139,7 @@ impl<'a> AsMut<dyn HWI + 'a> for Device {
             Device::Coldcard(l) => l,
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
+            Device::BitBox(b) => b,
         }
     }
 }
@@ -163,6 +168,34 @@ impl Client {
             ColdcardTransportHID::new(device),
             &mut rng,
         )));
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub async fn connect_bitbox(
+        &mut self,
+        network: &str,
+        on_close_cb: JsValue,
+        on_pairing_code_cb: JsValue,
+    ) -> Result<(), JsValue> {
+        let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let device = WebHidDevice::get_webhid_device(
+            "BitBox02",
+            BITBOX02_VID,
+            Some(BITBOX02_PID),
+            on_close_cb,
+        )
+        .await
+        .ok_or(JsValue::from_str("Failed to connect to bitbox"))?;
+        let mut bb = BitBox::new(BitBoxTransportHID::new(device), None).with_network(network);
+        // The pairing code hook fires synchronously inside `unlock`; forward it to JS so the
+        // website can render the code while the user confirms it on the device.
+        bb.set_pairing_code_hook(Box::new(move |code| {
+            if let Ok(f) = on_pairing_code_cb.clone().dyn_into::<js_sys::Function>() {
+                let _ = f.call1(&JsValue::NULL, &JsValue::from_str(code));
+            }
+        }));
+        self.device = Some(Device::BitBox(bb));
         Ok(())
     }
 
@@ -290,32 +323,46 @@ impl Client {
         wallet_hmac_hex: Option<String>,
         wallet_descriptor: Option<String>,
     ) -> Result<String, JsValue> {
-        let context = match (wallet_hmac_hex, wallet_descriptor) {
-            (Some(hmac_hex), Some(desc)) => {
-                let hmac_bytes = hex::decode(&hmac_hex)
-                    .map_err(|e| JsValue::from_str(&format!("Invalid hmac hex: {e}")))?;
-                let hmac: [u8; 32] = hmac_bytes
-                    .try_into()
-                    .map_err(|_| JsValue::from_str("hmac must be 32 bytes (64 hex chars)"))?;
-                let wallet_policy: WalletPolicy = desc
+        // BitBox re-supplies the policy descriptor on every address display; Ledger needs the
+        // registered policy plus its hmac; Coldcard/Jade resolve the wallet by name on-device.
+        let context = match &self.device {
+            Some(Device::BitBox(_)) => {
+                let desc = wallet_descriptor.ok_or_else(|| {
+                    JsValue::from_str("BitBox descriptor address requires wallet_descriptor")
+                })?;
+                let policy: WalletPolicy = desc
                     .parse()
                     .map_err(|e| JsValue::from_str(&format!("Invalid wallet descriptor: {e}")))?;
-                let ledger_policy = LedgerWalletPolicy::new(
-                    descriptor_name.to_string(),
-                    Version::V2,
-                    wallet_policy,
-                );
-                Some(DeviceContext::Ledger {
-                    wallet_policy: ledger_policy,
-                    wallet_hmac: Some(hmac),
-                })
+                Some(DeviceContext::BitBox { policy })
             }
-            (None, None) => None,
-            _ => {
-                return Err(JsValue::from_str(
-                    "Both wallet_hmac_hex and wallet_descriptor must be provided together",
-                ));
-            }
+            Some(Device::Ledger(_)) => match (wallet_hmac_hex, wallet_descriptor) {
+                (Some(hmac_hex), Some(desc)) => {
+                    let hmac_bytes = hex::decode(&hmac_hex)
+                        .map_err(|e| JsValue::from_str(&format!("Invalid hmac hex: {e}")))?;
+                    let hmac: [u8; 32] = hmac_bytes
+                        .try_into()
+                        .map_err(|_| JsValue::from_str("hmac must be 32 bytes (64 hex chars)"))?;
+                    let wallet_policy: WalletPolicy = desc.parse().map_err(|e| {
+                        JsValue::from_str(&format!("Invalid wallet descriptor: {e}"))
+                    })?;
+                    let ledger_policy = LedgerWalletPolicy::new(
+                        descriptor_name.to_string(),
+                        Version::V2,
+                        wallet_policy,
+                    );
+                    Some(DeviceContext::Ledger {
+                        wallet_policy: ledger_policy,
+                        wallet_hmac: Some(hmac),
+                    })
+                }
+                (None, None) => None,
+                _ => {
+                    return Err(JsValue::from_str(
+                        "Both wallet_hmac_hex and wallet_descriptor must be provided together",
+                    ));
+                }
+            },
+            _ => None,
         };
         let address = DisplayAddress::ByDescriptor {
             index,

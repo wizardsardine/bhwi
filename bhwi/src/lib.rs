@@ -1,11 +1,14 @@
 pub use bitcoin;
 pub use miniscript;
 
+#[cfg(feature = "bitbox")]
+pub mod bitbox;
 pub mod coldcard;
 pub mod common;
 pub mod device;
 pub mod jade;
 pub mod ledger;
+pub mod policy;
 
 pub trait Interpreter {
     type Command;

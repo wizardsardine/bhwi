@@ -4,7 +4,7 @@ use bhwi_async::{DeviceContext, DisplayAddress};
 use bitcoin::address::AddressType;
 use miniscript::descriptor::WalletPolicy;
 
-use crate::DeviceManager;
+use crate::{DeviceManager, DeviceType};
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
@@ -50,27 +50,42 @@ impl DeviceManager {
                 hmac,
                 wallet_descriptor,
             } => {
-                let context = match (hmac, wallet_descriptor) {
-                    (Some(hmac_hex), Some(wallet_policy)) => {
-                        let hmac = hex::decode(&hmac_hex)
-                            .map_err(|e| anyhow::anyhow!("invalid hmac hex: {e}"))?;
-                        let hmac: [u8; 32] = hmac
-                            .try_into()
-                            .map_err(|_| anyhow::anyhow!("hmac must be 32 bytes (64 hex chars)"))?;
-                        let ledger_policy = LedgerWalletPolicy::new(
-                            descriptor_name.clone(),
-                            Version::V2,
-                            wallet_policy,
-                        );
-                        Some(DeviceContext::Ledger {
-                            wallet_policy: ledger_policy,
-                            wallet_hmac: Some(hmac),
+                // BitBox re-supplies the policy descriptor each time; Ledger needs the
+                // registered policy plus its hmac; Coldcard/Jade resolve by name on-device.
+                let context = match device.device_type() {
+                    DeviceType::BitBox02 => {
+                        let wallet_policy = wallet_descriptor.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "--wallet-descriptor is required for BitBox descriptor addresses"
+                            )
+                        })?;
+                        Some(DeviceContext::BitBox {
+                            policy: wallet_policy,
                         })
                     }
-                    (None, None) => None,
-                    _ => anyhow::bail!(
-                        "both --hmac and --wallet-descriptor must be provided for Ledger descriptor addresses"
-                    ),
+                    DeviceType::Ledger => match (hmac, wallet_descriptor) {
+                        (Some(hmac_hex), Some(wallet_policy)) => {
+                            let hmac = hex::decode(&hmac_hex)
+                                .map_err(|e| anyhow::anyhow!("invalid hmac hex: {e}"))?;
+                            let hmac: [u8; 32] = hmac.try_into().map_err(|_| {
+                                anyhow::anyhow!("hmac must be 32 bytes (64 hex chars)")
+                            })?;
+                            let ledger_policy = LedgerWalletPolicy::new(
+                                descriptor_name.clone(),
+                                Version::V2,
+                                wallet_policy,
+                            );
+                            Some(DeviceContext::Ledger {
+                                wallet_policy: ledger_policy,
+                                wallet_hmac: Some(hmac),
+                            })
+                        }
+                        (None, None) => None,
+                        _ => anyhow::bail!(
+                            "both --hmac and --wallet-descriptor must be provided for Ledger descriptor addresses"
+                        ),
+                    },
+                    _ => None,
                 };
                 (
                     DisplayAddress::ByDescriptor {

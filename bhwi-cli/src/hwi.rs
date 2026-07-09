@@ -247,7 +247,7 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
 
 fn label_for(device_type: DeviceType) -> Option<Option<String>> {
     match device_type {
-        DeviceType::Coldcard | DeviceType::Ledger => Some(None),
+        DeviceType::BitBox02 | DeviceType::Coldcard | DeviceType::Ledger => Some(None),
         DeviceType::Jade => None,
     }
 }
@@ -273,6 +273,7 @@ fn print_response(response: HwiResponse) -> ExitCode {
 
 fn parse_device_type(value: &str) -> HwiResult<DeviceType> {
     match value.to_ascii_lowercase().as_str() {
+        "bitbox02" => Ok(DeviceType::BitBox02),
         "coldcard" => Ok(DeviceType::Coldcard),
         "jade" => Ok(DeviceType::Jade),
         "ledger" => Ok(DeviceType::Ledger),
@@ -433,6 +434,14 @@ mod tests {
 
         assert_eq!(error.code, HwiErrorCode::BadArgument.code());
         assert!(error.error.contains("Unsupported device type"));
+    }
+
+    #[test]
+    fn accepts_bitbox02_device_type() {
+        let request =
+            parse_args(["hwi", "--device-type", "bitbox02", "enumerate"]).expect("bitbox02 parses");
+
+        assert_eq!(request.selector.device_type, Some(DeviceType::BitBox02));
     }
 
     #[test]

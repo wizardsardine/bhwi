@@ -33,6 +33,51 @@ jobs:
           REFERENCE_HWI_BIN="$ref/bin/hwi-reference-bhwi" HWI_BIN="$PWD/target/debug/hwi" \
             nix develop -c cargo test -p bhwi-e2e-hwi-parity
 
+  bitbox-e2e:
+    needs: nix-flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Start BitBox02 simulator
+        run: |
+          nix run .#bitbox > bitbox.log 2>&1 &
+          echo $! > bitbox.pid
+          tail -n +1 -F bitbox.log &
+          echo $! > bitbox-tail.pid
+          bash nix/scripts/wait-for-port.sh localhost 15423 600 "$(cat bitbox.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox startup log" bitbox.log
+            cat bitbox.log || true
+            exit 1
+          }
+          kill "$(cat bitbox-tail.pid)" || true
+      - name: Run BitBox e2e
+        run: |
+          set -o pipefail
+          nix develop .#bitbox -c cargo test -p bhwi-e2e-bitbox -- --test-threads=1 2>&1 | tee bitbox-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox e2e log" bitbox-e2e.log
+            cat bitbox-e2e.log || true
+            exit 1
+          }
+      - name: Build bhwi CLI
+        run: nix develop .#bitbox -c cargo build -p bhwi-cli
+      - name: Run BitBox CLI e2e
+        # Runs after the package e2e, which seeds the simulator's mnemonic (the CLI has no
+        # restore command). The CLI reaches the simulator over TCP via the emulator path.
+        run: |
+          set -o pipefail
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#bitbox -c cargo test -p bhwi-e2e-cli bitbox -- --test-threads=1 2>&1 | tee bitbox-cli-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox CLI e2e log" bitbox-cli-e2e.log
+            cat bitbox-cli-e2e.log || true
+            exit 1
+          }
+      - name: BitBox logs
+        if: always()
+        run: |
+          cat bitbox.log || true
+          if [ -f bitbox.pid ]; then kill "$(cat bitbox.pid)" || true; fi
+
   coldcard-e2e:
     needs: nix-flake
     runs-on: ubuntu-latest

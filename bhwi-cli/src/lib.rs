@@ -8,10 +8,12 @@ use serde::{Serialize, Serializer};
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::{
-    coldcard::ColdcardDevice, config::DeviceSelector, jade::JadeDevice, ledger::LedgerDevice,
+    bitbox::BitBoxDevice, coldcard::ColdcardDevice, config::DeviceSelector, jade::JadeDevice,
+    ledger::LedgerDevice,
 };
 
 pub mod address;
+pub mod bitbox;
 pub mod coldcard;
 pub mod config;
 pub mod get_descriptors;
@@ -133,6 +135,7 @@ impl Device {
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum DeviceType {
+    BitBox02,
     Coldcard,
     Jade,
     Ledger,
@@ -141,6 +144,7 @@ pub enum DeviceType {
 impl DeviceType {
     pub async fn enumerate(self, selector: &DeviceSelector) -> Result<Vec<Device>> {
         Ok(match self {
+            DeviceType::BitBox02 => BitBoxDevice::enumerate(selector).await?,
             DeviceType::Ledger => LedgerDevice::enumerate(selector).await?,
             DeviceType::Coldcard => ColdcardDevice::enumerate(selector).await?,
             DeviceType::Jade => JadeDevice::enumerate(selector).await?,

@@ -12,6 +12,7 @@ the same commands available locally.
 
 - `nix flake show --allow-import-from-derivation`
 - `nix build .#checks.x86_64-linux.emulator-scripts`
+- `cargo test -p bhwi-e2e-bitbox -- --test-threads=1`
 - `cargo test -p bhwi-e2e-coldcard -- --test-threads=1`
 - `cargo test -p bhwi-e2e-ledger -- --test-threads=1`
 - `cargo test -p bhwi-e2e-jade -- --test-threads=1`
@@ -30,6 +31,7 @@ come from the public binary caches configured by the installer.
 
 Apps:
 
+- `nix run .#bitbox`
 - `nix run .#coldcard`
 - `nix run .#ledger`
 - `nix run .#ledger-build-app`
@@ -40,6 +42,7 @@ Apps:
 
 Development shells:
 
+- `nix develop .#bitbox`
 - `nix develop .#coldcard`
 - `nix develop .#ledger`
 - `nix develop .#jade`
@@ -47,6 +50,7 @@ Development shells:
 Packages/checks:
 
 - `nix build .#speculos`
+- `nix build .#bitbox02-simulator`
 - `nix build .#coldcard-simulator`
 - `nix build .#hwi-reference`
 - `nix build .#hwi-upstream-suite`
@@ -59,6 +63,16 @@ Packages/checks:
 Run each emulator in its own terminal, then run the matching test command from
 another terminal after the emulator is ready. The first run may take a while
 because firmware and Python environments are built under `$XDG_CACHE_HOME/bhwi`.
+
+BitBox02:
+
+```sh
+# Terminal 1
+nix run .#bitbox
+
+# Terminal 2
+nix develop .#bitbox -c cargo test -p bhwi-e2e-bitbox -- --test-threads=1
+```
 
 Coldcard:
 
@@ -141,6 +155,14 @@ The runner also accepts `HWI_BITCOIND` to override the `bitcoind` used by the
 upstream suite, and `HWI_LEDGER_APP_ELF` to use a prebuilt Ledger app.
 
 ## Device Details
+
+BitBox02:
+
+- Downloads a pinned `BitBoxSwiss/bitbox02-firmware` multi-edition simulator
+  release binary (autopatched to run on NixOS).
+- Starts the simulator on TCP `localhost:15423`.
+- The simulator auto-confirms Noise pairing and restores a fixed mnemonic when
+  the package e2e seeds it.
 
 Coldcard:
 
