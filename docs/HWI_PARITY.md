@@ -42,7 +42,7 @@ mirrors each with its own `--emulators` enumerate.
 | Device    | HWI parity | Notes |
 |-----------|------------|-------|
 | Ledger    | Wired      | `hwi-parity-ledger`, in Emulator CI. |
-| Coldcard  | Wired      | `hwi-parity-coldcard`, in Emulator CI. |
+| Coldcard  | Wired      | `hwi-parity-coldcard`, in Emulator CI, including file-producing `backup`. |
 | Jade      | Wired      | `hwi-parity-jade`, in Emulator CI. |
 | BitBox02  | Wired      | `hwi-parity-bitbox`, in Emulator CI. |
 

@@ -35,7 +35,7 @@ Coldcard, BHWI still tests Python HWI-compatible unsupported-action errors.
 |`setup`           |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Python HWI supports software setup for the unchecked devices.         |
 |`wipe`            |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Python HWI supports software wipe for the unchecked devices.          |
 |`restore`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[ ]`   |Python HWI support excludes Ledger, Jade, Coldcard, and BitBox01.     |
-|`backup`          |`n/a` |`n/a`|`[ ]`   |`n/a` |`n/a`  |`[ ]`   |`[x]`   |BitBox02 mnemonic-export backup is covered. Coldcard and BitBox01 remain open.|
+|`backup`          |`n/a` |`n/a`|`[x]`   |`n/a` |`n/a`  |`[ ]`   |`[x]`   |Coldcard file backup and BitBox02 mnemonic-export backup are covered. BitBox01 remains open.|
 |`promptpin`       |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN prompting for Trezor-class devices.      |
 |`sendpin`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN entry for Trezor-class devices.          |
 |`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[ ]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
