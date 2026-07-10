@@ -473,7 +473,7 @@
         hwiReferenceBhwiMain = pkgs.writeText "hwi-reference-bhwi.py" ''
           from hwilib import commands
 
-          commands.all_devs = ["ledger", "coldcard", "jade"]
+          commands.all_devs = ["ledger", "coldcard", "jade", "bitbox02"]
 
           from hwilib._cli import main
 
@@ -512,6 +512,7 @@
         hwiParityColdcard = mkHwiParityRunner "bhwi-hwi-parity-coldcard" "coldcard" (coldcardInputs ++ inputs) coldcardE2eEnv;
         hwiParityLedger = mkHwiParityRunner "bhwi-hwi-parity-ledger" "ledger" (ledgerInputs ++ inputs) commonE2eEnv;
         hwiParityJade = mkHwiParityRunner "bhwi-hwi-parity-jade" "jade" (jadeInputs ++ inputs) commonE2eEnv;
+        hwiParityBitbox = mkHwiParityRunner "bhwi-hwi-parity-bitbox" "bitbox02" inputs commonE2eEnv;
         linuxPackages = pkgs.lib.optionalAttrs emulatorSystem (
           {
             inherit speculos;
@@ -536,6 +537,7 @@
           }
           // pkgs.lib.optionalAttrs (!isDarwin) {
             hwi-upstream-suite = mkApp hwiUpstreamSuite;
+            hwi-parity-bitbox = mkApp hwiParityBitbox;
             hwi-parity-coldcard = mkApp hwiParityColdcard;
             hwi-parity-ledger = mkApp hwiParityLedger;
             hwi-parity-jade = mkApp hwiParityJade;
