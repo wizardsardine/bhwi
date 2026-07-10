@@ -532,8 +532,8 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
         };
         response.push(HwiEnumeratedDevice {
             device_type: device.device_type().to_string(),
-            model: device.model().to_owned(),
-            path: device.path().to_owned(),
+            model: hwi_enumerate_model(device.device_type(), device.model(), device.is_emulated()),
+            path: hwi_enumerate_path(device.device_type(), device.path(), device.is_emulated()),
             label: label_for(device.device_type()),
             fingerprint,
             needs_pin_sent: false,
@@ -1757,8 +1757,22 @@ fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
 
 fn label_for(device_type: DeviceType) -> Option<Option<String>> {
     match device_type {
-        DeviceType::BitBox02 | DeviceType::Coldcard | DeviceType::Ledger => Some(None),
-        DeviceType::Jade => None,
+        DeviceType::Coldcard | DeviceType::Ledger => Some(None),
+        DeviceType::BitBox02 | DeviceType::Jade => None,
+    }
+}
+
+fn hwi_enumerate_model(device_type: DeviceType, model: &str, is_emulated: bool) -> String {
+    match (device_type, is_emulated) {
+        (DeviceType::BitBox02, true) => "bitbox02_multi".to_owned(),
+        _ => model.to_owned(),
+    }
+}
+
+fn hwi_enumerate_path(device_type: DeviceType, path: &str, is_emulated: bool) -> String {
+    match (device_type, is_emulated) {
+        (DeviceType::BitBox02, true) => path.strip_prefix("tcp:").unwrap_or(path).to_owned(),
+        _ => path.to_owned(),
     }
 }
 
@@ -2641,6 +2655,26 @@ mod tests {
 
         assert!(json.get("label").is_none());
         assert!(json.get("fingerprint").is_none());
+    }
+
+    #[test]
+    fn bitbox_emulator_enumerate_shape_matches_python_hwi() {
+        let json = serde_json::to_value(HwiEnumeratedDevice {
+            device_type: "bitbox02".to_owned(),
+            model: hwi_enumerate_model(DeviceType::BitBox02, "bitbox02_simulator", true),
+            path: hwi_enumerate_path(DeviceType::BitBox02, "tcp:127.0.0.1:15423", true),
+            label: label_for(DeviceType::BitBox02),
+            fingerprint: None,
+            needs_pin_sent: false,
+            needs_passphrase_sent: false,
+            error: None,
+            code: None,
+        })
+        .expect("json");
+
+        assert_eq!(json["model"], "bitbox02_multi");
+        assert_eq!(json["path"], "127.0.0.1:15423");
+        assert!(json.get("label").is_none());
     }
 
     #[test]
