@@ -53,7 +53,7 @@ pinned reference backend probes `127.0.0.1:15423`, so the BitBox emulator must b
 running and initialized before `hwi-parity-bitbox` starts.
 
 The suite covers the same implemented read/sign/display command set as the
-other wired devices. Device-management commands (`setup`, `wipe`, `restore`,
-`backup`, `togglepassphrase`) remain separate tracked gaps because Python HWI has
-stateful BitBox implementations for some of them and BHWI has not claimed that
+other wired devices, plus BitBox02 mnemonic-export `backup`. The remaining
+stateful BitBox device-management commands (`setup`, `wipe`, `restore`,
+`togglepassphrase`) stay as tracked gaps because BHWI has not claimed that
 compatibility surface yet.

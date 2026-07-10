@@ -402,6 +402,31 @@ mod tests {
     }
 
     #[test]
+    fn candidate_backup_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+
+        for case in backup_arg_cases(&device_type) {
+            match case.expect {
+                ExpectedResult::Success => assert_json_parity(case.args.clone())
+                    .with_context(|| format!("backup parity failed for args: {:?}", case.args))?,
+                ExpectedResult::Error => {
+                    assert_error_json_parity(case.args.clone()).with_context(|| {
+                        format!("backup error parity failed for args: {:?}", case.args)
+                    })?
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn candidate_unsupported_device_actions_match_reference() -> Result<()> {
         if env::var("HWI_BIN").is_err() {
             return Ok(());
@@ -2270,6 +2295,67 @@ mod tests {
                     device_type,
                     "togglepassphrase",
                 ]),
+            },
+        ]
+    }
+
+    fn backup_arg_cases(device_type: &str) -> Vec<CommandCase> {
+        if device_type != "bitbox02" {
+            return Vec::new();
+        }
+
+        vec![
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "backup",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "backup",
+                    "--label",
+                    "HWI Test",
+                ]),
+                expect: ExpectedResult::Error,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "backup",
+                    "--backup_passphrase",
+                    "backup passphrase",
+                ]),
+                expect: ExpectedResult::Error,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "backup",
+                    "--label",
+                    "HWI Test",
+                    "--backup_passphrase",
+                    "backup passphrase",
+                ]),
+                expect: ExpectedResult::Error,
             },
         ]
     }

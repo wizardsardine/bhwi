@@ -11,7 +11,7 @@ use bhwi::{
     common::{MultisigAddressType, MultisigDisplayAddress, MultisigDisplayKey},
     ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
 };
-use bhwi_async::{DeviceContext, DisplayAddress};
+use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress};
 use bitcoin::{
     Network, NetworkKind, PublicKey, ScriptBuf,
     base64::prelude::{BASE64_STANDARD, Engine as _},
@@ -193,6 +193,10 @@ pub enum HwiCommand {
         addr_type: HwiAddressType,
         all: bool,
         path: Option<String>,
+    },
+    Backup {
+        label: String,
+        backup_passphrase: String,
     },
     UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
     InstallUdevRules {
@@ -431,6 +435,10 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
             )
             .await
         }
+        HwiCommand::Backup {
+            label,
+            backup_passphrase,
+        } => backup_device(request.selector, label, backup_passphrase).await,
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
@@ -598,6 +606,65 @@ async fn unsupported_device_action(
     };
 
     HwiResponse::Error(HwiError::new(HwiErrorCode::UnsupportedCommand, error))
+}
+
+async fn backup_device(
+    selector: DeviceSelector,
+    label: String,
+    backup_passphrase: String,
+) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    let unsupported = HwiUnsupportedDeviceAction::Backup {
+        label: label.clone(),
+        backup_passphrase: backup_passphrase.clone(),
+    };
+    if device.device_type() != DeviceType::BitBox02 {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            hwi_unavailable_action_message(device.device_type(), &unsupported),
+        ));
+    }
+    if !label.is_empty() || !backup_passphrase.is_empty() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            "Label/passphrase not needed when exporting mnemonic from the BitBox02.",
+        ));
+    }
+
+    match device.device().backup_device().await {
+        Ok(DeviceBackup::Complete) => HwiResponse::Success(HwiSuccessResponse { success: true }),
+        Ok(DeviceBackup::File(_)) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceFailure,
+            "BitBox02 backup unexpectedly returned file data",
+        )),
+        Err(err) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            err.to_string(),
+        )),
+    }
 }
 
 async fn get_master_xpub(
@@ -1984,10 +2051,10 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         HwiCliCommand::Backup {
             label,
             backup_passphrase,
-        } => HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Backup {
+        } => HwiCommand::Backup {
             label,
             backup_passphrase,
-        }),
+        },
         HwiCliCommand::Promptpin => {
             HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::PromptPin)
         }
@@ -2494,7 +2561,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_backup_unsupported_action() {
+    fn parses_backup_action() {
         let request = parse_args([
             "hwi",
             "--device-type",
@@ -2509,10 +2576,10 @@ mod tests {
 
         assert_eq!(
             request.command,
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Backup {
+            HwiCommand::Backup {
                 label: "HWI Coldcard".to_owned(),
                 backup_passphrase: "backup passphrase".to_owned(),
-            })
+            }
         );
     }
 
