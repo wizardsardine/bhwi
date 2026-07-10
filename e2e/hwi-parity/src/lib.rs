@@ -2,6 +2,7 @@ use std::{
     env,
     ffi::OsStr,
     io::Write,
+    path::Path,
     process::{Command, Output, Stdio},
 };
 
@@ -63,6 +64,26 @@ impl HwiBinary {
             .envs(envs.iter().copied())
             .output()
             .with_context(|| format!("failed to spawn {} hwi at {}", self.label, self.path))?;
+        parse_output(self.label, output)
+    }
+
+    pub fn run_in_dir<I, S>(&self, args: I, cwd: &Path) -> Result<HwiOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let output = Command::new(&self.path)
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to spawn {} hwi at {} in {}",
+                    self.label,
+                    self.path,
+                    cwd.display()
+                )
+            })?;
         parse_output(self.label, output)
     }
 
@@ -413,7 +434,7 @@ mod tests {
 
         for case in backup_arg_cases(&device_type) {
             match case.expect {
-                ExpectedResult::Success => assert_json_parity(case.args.clone())
+                ExpectedResult::Success => assert_backup_parity(&device_type, case.args.clone())
                     .with_context(|| format!("backup parity failed for args: {:?}", case.args))?,
                 ExpectedResult::Error => {
                     assert_error_json_parity(case.args.clone()).with_context(|| {
@@ -421,6 +442,64 @@ mod tests {
                     })?
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    fn assert_backup_parity(device_type: &str, args: Vec<String>) -> Result<()> {
+        if device_type != "coldcard" {
+            assert_json_parity(args)?;
+            return Ok(());
+        }
+
+        let temp = temp_path("coldcard-backup")?;
+        let reference_dir = temp.join("reference");
+        let candidate_dir = temp.join("candidate");
+        fs::create_dir_all(&reference_dir)?;
+        fs::create_dir_all(&candidate_dir)?;
+
+        let reference_approval = spawn_coldcard_backup_approval();
+        let reference = HwiBinary::reference()?.run_in_dir(args.clone(), &reference_dir)?;
+        let _ = reference_approval.join();
+        let candidate_approval = spawn_coldcard_backup_approval();
+        let candidate = HwiBinary::candidate()?.run_in_dir(args, &candidate_dir)?;
+        let _ = candidate_approval.join();
+
+        assert_success("reference", &reference)?;
+        assert_success("candidate", &candidate)?;
+        assert_eq!(reference.json, serde_json::json!({ "success": true }));
+        assert_eq!(candidate.json, reference.json);
+        assert_backup_artifact("reference", &reference_dir)?;
+        assert_backup_artifact("candidate", &candidate_dir)?;
+
+        Ok(())
+    }
+
+    fn assert_backup_artifact(label: &str, dir: &Path) -> Result<()> {
+        let files = fs::read_dir(dir)?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("backup-") && name.ends_with(".7z")
+            })
+            .collect::<Vec<_>>();
+        if files.len() != 1 {
+            bail!(
+                "{label} backup wrote {} matching artifacts in {}",
+                files.len(),
+                dir.display()
+            );
+        }
+
+        let bytes = fs::read(files[0].path())?;
+        if !bytes.starts_with(b"7z\xbc\xaf'\x1c") {
+            bail!("{label} backup artifact does not look like a 7z file");
+        }
+        if bytes.len() <= 1024 {
+            bail!("{label} backup artifact is unexpectedly small");
         }
 
         Ok(())
@@ -437,27 +516,12 @@ mod tests {
         };
 
         for case in unsupported_device_action_cases(&device_type) {
-            if device_type == "coldcard" && case.command == "backup" {
-                let candidate =
-                    assert_candidate_error_json(case.args.clone()).with_context(|| {
-                        format!(
-                            "candidate Coldcard backup deviation failed for args: {:?}",
-                            case.args
-                        )
-                    })?;
-                assert_eq!(candidate["code"], -9);
-                assert_eq!(
-                    candidate["error"],
-                    "The Coldcard does not support creating a backup via software"
-                );
-            } else {
-                assert_error_json_parity(case.args.clone()).with_context(|| {
-                    format!(
-                        "unsupported device action parity failed for args: {:?}",
-                        case.args
-                    )
-                })?;
-            }
+            assert_error_json_parity(case.args.clone()).with_context(|| {
+                format!(
+                    "unsupported device action parity failed for args: {:?}",
+                    case.args
+                )
+            })?;
         }
 
         Ok(())
@@ -668,12 +732,6 @@ mod tests {
         }
 
         Ok(())
-    }
-
-    fn assert_candidate_error_json(args: Vec<String>) -> Result<Value> {
-        let candidate = HwiBinary::candidate()?.run(args)?;
-        assert_error_shape("candidate", &candidate.json)?;
-        Ok(candidate.json)
     }
 
     fn assert_signmessage_parity(args: Vec<String>) -> Result<()> {
@@ -1844,6 +1902,13 @@ mod tests {
         });
     }
 
+    fn spawn_coldcard_backup_approval() -> std::thread::JoinHandle<()> {
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = send_coldcard_backup_approval();
+        })
+    }
+
     fn send_coldcard_approval() -> Result<()> {
         let client_socket = format!("/tmp/bhwi-hwi-parity-ckcc-{}.sock", std::process::id());
         let _ = std::fs::remove_file(&client_socket);
@@ -1851,6 +1916,24 @@ mod tests {
         socket.set_read_timeout(Some(Duration::from_secs(2)))?;
         socket.connect("/tmp/ckcc-simulator.sock")?;
         coldcard_hid_exchange(&socket, b"XKEYy")?;
+        let _ = std::fs::remove_file(client_socket);
+        Ok(())
+    }
+
+    fn send_coldcard_backup_approval() -> Result<()> {
+        let client_socket = format!(
+            "/tmp/bhwi-hwi-parity-ckcc-backup-{}.sock",
+            std::process::id()
+        );
+        let _ = std::fs::remove_file(&client_socket);
+        let socket = UnixDatagram::bind(&client_socket)?;
+        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+        socket.connect("/tmp/ckcc-simulator.sock")?;
+        coldcard_hid_exchange(&socket, b"XKEYy")?;
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(250));
+            coldcard_hid_exchange(&socket, b"XKEY1")?;
+        }
         let _ = std::fs::remove_file(client_socket);
         Ok(())
     }
@@ -2079,7 +2162,6 @@ mod tests {
     }
 
     struct UnsupportedDeviceActionCase {
-        command: &'static str,
         args: Vec<String>,
     }
 
@@ -2177,9 +2259,8 @@ mod tests {
             return Vec::new();
         }
 
-        vec![
+        let mut cases = vec![
             UnsupportedDeviceActionCase {
-                command: "setup",
                 args: args([
                     "--emulators",
                     "--chain",
@@ -2190,7 +2271,6 @@ mod tests {
                 ]),
             },
             UnsupportedDeviceActionCase {
-                command: "setup",
                 args: args([
                     "--emulators",
                     "--chain",
@@ -2206,7 +2286,6 @@ mod tests {
                 ]),
             },
             UnsupportedDeviceActionCase {
-                command: "wipe",
                 args: args([
                     "--emulators",
                     "--chain",
@@ -2217,7 +2296,6 @@ mod tests {
                 ]),
             },
             UnsupportedDeviceActionCase {
-                command: "restore",
                 args: args([
                     "--emulators",
                     "--chain",
@@ -2232,7 +2310,6 @@ mod tests {
                 ]),
             },
             UnsupportedDeviceActionCase {
-                command: "restore",
                 args: args([
                     "--emulators",
                     "--chain",
@@ -2248,22 +2325,6 @@ mod tests {
                 ]),
             },
             UnsupportedDeviceActionCase {
-                command: "backup",
-                args: args([
-                    "--emulators",
-                    "--chain",
-                    "test",
-                    "--device-type",
-                    device_type,
-                    "backup",
-                    "--label",
-                    "HWI Test",
-                    "--backup_passphrase",
-                    "backup passphrase",
-                ]),
-            },
-            UnsupportedDeviceActionCase {
-                command: "promptpin",
                 args: args([
                     "--emulators",
                     "--chain",
@@ -2274,7 +2335,6 @@ mod tests {
                 ]),
             },
             UnsupportedDeviceActionCase {
-                command: "sendpin",
                 args: args([
                     "--emulators",
                     "--chain",
@@ -2286,7 +2346,6 @@ mod tests {
                 ]),
             },
             UnsupportedDeviceActionCase {
-                command: "togglepassphrase",
                 args: args([
                     "--emulators",
                     "--chain",
@@ -2296,68 +2355,118 @@ mod tests {
                     "togglepassphrase",
                 ]),
             },
-        ]
+        ];
+
+        if device_type != "coldcard" {
+            cases.push(UnsupportedDeviceActionCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "backup",
+                    "--label",
+                    "HWI Test",
+                    "--backup_passphrase",
+                    "backup passphrase",
+                ]),
+            });
+        }
+
+        cases
     }
 
     fn backup_arg_cases(device_type: &str) -> Vec<CommandCase> {
-        if device_type != "bitbox02" {
-            return Vec::new();
+        if device_type == "coldcard" {
+            return vec![
+                CommandCase {
+                    args: args([
+                        "--emulators",
+                        "--chain",
+                        "test",
+                        "--device-type",
+                        device_type,
+                        "backup",
+                    ]),
+                    expect: ExpectedResult::Success,
+                },
+                CommandCase {
+                    args: args([
+                        "--emulators",
+                        "--chain",
+                        "test",
+                        "--device-type",
+                        device_type,
+                        "backup",
+                        "--label",
+                        "HWI Test",
+                        "--backup_passphrase",
+                        "backup passphrase",
+                    ]),
+                    expect: ExpectedResult::Success,
+                },
+            ];
         }
 
-        vec![
-            CommandCase {
-                args: args([
-                    "--emulators",
-                    "--chain",
-                    "test",
-                    "--device-type",
-                    device_type,
-                    "backup",
-                ]),
-                expect: ExpectedResult::Success,
-            },
-            CommandCase {
-                args: args([
-                    "--emulators",
-                    "--chain",
-                    "test",
-                    "--device-type",
-                    device_type,
-                    "backup",
-                    "--label",
-                    "HWI Test",
-                ]),
-                expect: ExpectedResult::Error,
-            },
-            CommandCase {
-                args: args([
-                    "--emulators",
-                    "--chain",
-                    "test",
-                    "--device-type",
-                    device_type,
-                    "backup",
-                    "--backup_passphrase",
-                    "backup passphrase",
-                ]),
-                expect: ExpectedResult::Error,
-            },
-            CommandCase {
-                args: args([
-                    "--emulators",
-                    "--chain",
-                    "test",
-                    "--device-type",
-                    device_type,
-                    "backup",
-                    "--label",
-                    "HWI Test",
-                    "--backup_passphrase",
-                    "backup passphrase",
-                ]),
-                expect: ExpectedResult::Error,
-            },
-        ]
+        if device_type == "bitbox02" {
+            return vec![
+                CommandCase {
+                    args: args([
+                        "--emulators",
+                        "--chain",
+                        "test",
+                        "--device-type",
+                        device_type,
+                        "backup",
+                    ]),
+                    expect: ExpectedResult::Success,
+                },
+                CommandCase {
+                    args: args([
+                        "--emulators",
+                        "--chain",
+                        "test",
+                        "--device-type",
+                        device_type,
+                        "backup",
+                        "--label",
+                        "HWI Test",
+                    ]),
+                    expect: ExpectedResult::Error,
+                },
+                CommandCase {
+                    args: args([
+                        "--emulators",
+                        "--chain",
+                        "test",
+                        "--device-type",
+                        device_type,
+                        "backup",
+                        "--backup_passphrase",
+                        "backup passphrase",
+                    ]),
+                    expect: ExpectedResult::Error,
+                },
+                CommandCase {
+                    args: args([
+                        "--emulators",
+                        "--chain",
+                        "test",
+                        "--device-type",
+                        device_type,
+                        "backup",
+                        "--label",
+                        "HWI Test",
+                        "--backup_passphrase",
+                        "backup passphrase",
+                    ]),
+                    expect: ExpectedResult::Error,
+                },
+            ];
+        }
+
+        Vec::new()
     }
 
     fn enumerate_python_hwi_arg_cases(
