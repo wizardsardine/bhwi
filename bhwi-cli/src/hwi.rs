@@ -893,7 +893,7 @@ async fn get_descriptors(selector: DeviceSelector, account: u32) -> HwiResponse 
     };
 
     for internal in [false, true] {
-        for addr_type in hwi_descriptor_addr_types(device_type, &model) {
+        for addr_type in hwi_getdescriptors_addr_types(device_type, &model) {
             let descriptor_type = descriptor_type_for(addr_type);
             let options = GetDescriptorOptions::with_account(
                 fingerprint,
@@ -1679,6 +1679,13 @@ fn hwi_descriptor_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAdd
         types.push(HwiAddressType::Tap);
     }
     types
+}
+
+fn hwi_getdescriptors_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAddressType> {
+    match device_type {
+        DeviceType::BitBox02 => vec![HwiAddressType::Wit, HwiAddressType::ShWit],
+        _ => hwi_descriptor_addr_types(device_type, model),
+    }
 }
 
 fn hwi_can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
@@ -2914,6 +2921,10 @@ mod tests {
                 HwiAddressType::Wit,
                 HwiAddressType::ShWit,
             ]
+        );
+        assert_eq!(
+            hwi_getdescriptors_addr_types(DeviceType::BitBox02, "bitbox02_multi"),
+            vec![HwiAddressType::Wit, HwiAddressType::ShWit]
         );
         assert!(hwi_can_sign_taproot(
             DeviceType::Coldcard,
