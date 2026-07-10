@@ -1,9 +1,11 @@
 use std::{
     ffi::OsString,
+    fs,
     io::{self, BufRead},
     path::PathBuf,
     process::ExitCode,
     str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bhwi::{
@@ -637,34 +639,87 @@ async fn backup_device(
         }
     };
 
-    let unsupported = HwiUnsupportedDeviceAction::Backup {
-        label: label.clone(),
-        backup_passphrase: backup_passphrase.clone(),
-    };
-    if device.device_type() != DeviceType::BitBox02 {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::UnsupportedCommand,
-            hwi_unavailable_action_message(device.device_type(), &unsupported),
-        ));
-    }
-    if !label.is_empty() || !backup_passphrase.is_empty() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::UnsupportedCommand,
-            "Label/passphrase not needed when exporting mnemonic from the BitBox02.",
-        ));
+    let device_type = device.device_type();
+    match device_type {
+        DeviceType::BitBox02 => {
+            if !label.is_empty() || !backup_passphrase.is_empty() {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::UnsupportedCommand,
+                    "Label/passphrase not needed when exporting mnemonic from the BitBox02.",
+                ));
+            }
+        }
+        DeviceType::Coldcard => {}
+        DeviceType::Ledger | DeviceType::Jade => {
+            let unsupported = HwiUnsupportedDeviceAction::Backup {
+                label,
+                backup_passphrase,
+            };
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::UnsupportedCommand,
+                hwi_unavailable_action_message(device_type, &unsupported),
+            ));
+        }
     }
 
     match device.device().backup_device().await {
         Ok(DeviceBackup::Complete) => HwiResponse::Success(HwiSuccessResponse { success: true }),
-        Ok(DeviceBackup::File(_)) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceFailure,
-            "BitBox02 backup unexpectedly returned file data",
-        )),
+        Ok(DeviceBackup::File(bytes)) => match write_hwi_backup_file(&bytes) {
+            Ok(()) => HwiResponse::Success(HwiSuccessResponse { success: true }),
+            Err(err) => HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceFailure,
+                format!("backup failed: {err}"),
+            )),
+        },
         Err(err) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::DeviceConnectionError,
             err.to_string(),
         )),
     }
+}
+
+fn write_hwi_backup_file(bytes: &[u8]) -> io::Result<()> {
+    fs::write(hwi_backup_filename()?, bytes)
+}
+
+fn hwi_backup_filename() -> io::Result<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?;
+    let timestamp = now.as_secs().try_into().map_err(io::Error::other)?;
+    let tm = local_time(timestamp)?;
+
+    Ok(format!(
+        "backup-{:04}{:02}{:02}-{:02}{:02}.7z",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    ))
+}
+
+#[cfg(unix)]
+fn local_time(timestamp: libc::time_t) -> io::Result<libc::tm> {
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // Python HWI uses `time.strftime`, i.e. the process local timezone.
+    unsafe {
+        if libc::localtime_r(&timestamp, tm.as_mut_ptr()).is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(tm.assume_init())
+    }
+}
+
+#[cfg(windows)]
+fn local_time(timestamp: libc::time_t) -> io::Result<libc::tm> {
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // Windows uses the bounds-checked variant with destination first.
+    let code = unsafe { libc::localtime_s(tm.as_mut_ptr(), &timestamp) };
+    if code != 0 {
+        return Err(io::Error::from_raw_os_error(code));
+    }
+    Ok(unsafe { tm.assume_init() })
 }
 
 async fn get_master_xpub(
