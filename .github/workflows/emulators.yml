@@ -72,6 +72,14 @@ jobs:
             cat bitbox-cli-e2e.log || true
             exit 1
           }
+      - name: Run HWI parity tests
+        run: |
+          set -o pipefail
+          nix run .#hwi-parity-bitbox -- -- --test-threads=1 2>&1 | tee bitbox-hwi-parity.log || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox HWI parity log" bitbox-hwi-parity.log
+            cat bitbox-hwi-parity.log || true
+            exit 1
+          }
       - name: BitBox logs
         if: always()
         run: |

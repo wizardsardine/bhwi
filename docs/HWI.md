@@ -24,14 +24,14 @@ Coldcard, BHWI still tests Python HWI-compatible unsupported-action errors.
 
 |Command           |Ledger|Jade |Coldcard|Trezor|KeepKey|BitBox01|BitBox02|Notes                                                                 |
 |------------------|------|-----|--------|------|-------|--------|--------|----------------------------------------------------------------------|
-|`enumerate`       |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Covered for expected Python HWI fields and global selection arguments.|
-|`getmasterxpub`   |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Covered for supported address types.                                  |
-|`getxpub`         |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Covered for normal and expert output shape.                           |
-|`getdescriptors`  |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Covered for account descriptors.                                      |
-|`getkeypool`      |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Covered for receive/change ranges and address types.                  |
-|`signtx`          |`[~]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Ledger registered-wallet and non-default policy signing remains open. |
-|`signmessage`     |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Covered for emulator-supported paths.                                 |
-|`displayaddress`  |`[x]` |`[x]`|`[~]`   |`[ ]` |`[ ]`  |`n/a`   |`[ ]`   |Coldcard registered multisig display coverage remains open.           |
+|`enumerate`       |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for expected Python HWI fields and global selection arguments.|
+|`getmasterxpub`   |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for supported address types.                                  |
+|`getxpub`         |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for normal and expert output shape.                           |
+|`getdescriptors`  |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for account descriptors.                                      |
+|`getkeypool`      |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for receive/change ranges and address types.                  |
+|`signtx`          |`[~]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Ledger registered-wallet and non-default policy signing remains open. |
+|`signmessage`     |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for emulator-supported paths.                                 |
+|`displayaddress`  |`[x]` |`[x]`|`[~]`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Coldcard registered multisig display coverage remains open.           |
 |`setup`           |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Python HWI supports software setup for the unchecked devices.         |
 |`wipe`            |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Python HWI supports software wipe for the unchecked devices.          |
 |`restore`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[ ]`   |Python HWI support excludes Ledger, Jade, Coldcard, and BitBox01.     |
@@ -51,6 +51,7 @@ start the matching emulator environment, and run the focused parity package.
 nix run .#hwi-parity-ledger
 nix run .#hwi-parity-jade
 nix run .#hwi-parity-coldcard
+nix run .#hwi-parity-bitbox
 ```
 
 To pass additional Cargo test filters or flags, append them after `--`:
