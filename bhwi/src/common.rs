@@ -78,7 +78,22 @@ pub enum Response {
     Signature(u8, Signature),
     SignedPsbt(Psbt),
     Address(String),
-    WalletHmac([u8; 32]),
+    WalletRegistration(WalletRegistration),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WalletRegistration {
+    Complete { hmac: Option<[u8; 32]> },
+    PendingUserConfirmation,
+}
+
+impl WalletRegistration {
+    pub fn hmac(self) -> Option<[u8; 32]> {
+        match self {
+            Self::Complete { hmac } => hmac,
+            Self::PendingUserConfirmation => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

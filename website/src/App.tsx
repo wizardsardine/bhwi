@@ -40,6 +40,12 @@ const ADDRESS_FORMAT_PURPOSE: Record<AddressFormat, number> = {
 interface RegisterWalletResult {
     name: string;
     policy: string;
+    status: 'complete' | 'pending_user_confirmation';
+    hmac: string | null;
+}
+
+interface WalletRegistration {
+    status: 'complete' | 'pending_user_confirmation';
     hmac: string | null;
 }
 
@@ -247,8 +253,13 @@ const App = () => {
         setRegisteringWallet(true);
         setProcessing(true);
         try {
-            const hmac = await device.client.register_wallet(walletName, walletPolicy);
-            setRegisterWalletResults(prev => [{ name: walletName, policy: walletPolicy, hmac: hmac ?? null }, ...prev]);
+            const registration = await device.client.register_wallet(walletName, walletPolicy) as WalletRegistration;
+            setRegisterWalletResults(prev => [{
+                name: walletName,
+                policy: walletPolicy,
+                status: registration.status,
+                hmac: registration.hmac,
+            }, ...prev]);
         } catch (err) {
             const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to register wallet";
             showError(message);
@@ -602,6 +613,9 @@ const App = () => {
                                             <div key={index} className="bg-gray-700/50 rounded-lg p-4">
                                                 <div className="text-sm text-gray-400 mb-1">{result.name}</div>
                                                 <div className="font-mono text-sm break-all mb-1">{result.policy}</div>
+                                                {result.status === 'pending_user_confirmation' && (
+                                                    <div className="text-sm text-amber-300">Pending device confirmation</div>
+                                                )}
                                                 {result.hmac && (
                                                     <div className="text-sm">
                                                         <span className="text-gray-400">HMAC: </span>

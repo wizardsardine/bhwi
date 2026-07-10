@@ -1100,7 +1100,11 @@ impl From<BitBoxResponse> for Response {
             BitBoxResponse::Xpub(xpub) => Response::Xpub(xpub),
             BitBoxResponse::Address(addr) => Response::Address(addr),
             BitBoxResponse::IsRegistered(_) => Response::TaskDone,
-            BitBoxResponse::Registered => Response::WalletHmac([0u8; 32]),
+            BitBoxResponse::Registered => {
+                Response::WalletRegistration(crate::common::WalletRegistration::Complete {
+                    hmac: None,
+                })
+            }
             BitBoxResponse::SignedPsbt(psbt) => Response::SignedPsbt(*psbt),
             BitBoxResponse::Signature(header, sig) => Response::Signature(header, sig),
             BitBoxResponse::Backup => Response::Backup(DeviceBackup::Complete),

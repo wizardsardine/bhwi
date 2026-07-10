@@ -11,8 +11,8 @@ use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::miniscript::descriptor::WalletPolicy;
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
-    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, bitbox::BitBox,
-    coldcard::Coldcard, transport::bitbox::hid::BitBoxTransportHID,
+    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, WalletRegistration,
+    bitbox::BitBox, coldcard::Coldcard, transport::bitbox::hid::BitBoxTransportHID,
     transport::coldcard::hid::ColdcardTransportHID, transport::ledger::hid::LedgerTransportHID,
 };
 use bitcoin::{Network, address::AddressType, bip32::DerivationPath};
@@ -31,6 +31,21 @@ pub fn initialize_logging(level: &str) {
     console_log::init_with_level(log_level).expect("error initializing log");
 }
 
+fn wallet_registration_js(registration: WalletRegistration) -> Result<JsValue, JsValue> {
+    let result = js_sys::Object::new();
+    let (status, hmac) = match registration {
+        WalletRegistration::Complete { hmac } => (
+            "complete",
+            hmac.map(|value| JsValue::from_str(&hex::encode(value)))
+                .unwrap_or(JsValue::NULL),
+        ),
+        WalletRegistration::PendingUserConfirmation => ("pending_user_confirmation", JsValue::NULL),
+    };
+    js_sys::Reflect::set(&result, &"status".into(), &JsValue::from_str(status))?;
+    js_sys::Reflect::set(&result, &"hmac".into(), &hmac)?;
+    Ok(result.into())
+}
+
 #[async_trait(?Send)]
 pub trait HWI {
     async fn unlock(&mut self, network: &str) -> Result<(), JsValue>;
@@ -41,7 +56,11 @@ pub trait HWI {
         address: DisplayAddress,
         context: Option<DeviceContext>,
     ) -> Result<String, JsValue>;
-    async fn register_wallet(&mut self, name: &str, policy: &str) -> Result<Vec<u8>, JsValue>;
+    async fn register_wallet(
+        &mut self,
+        name: &str,
+        policy: &str,
+    ) -> Result<WalletRegistration, JsValue>;
     async fn get_info(&mut self) -> Result<JsValue, JsValue>;
 }
 
@@ -80,10 +99,13 @@ impl<T: AsyncHWI> HWI for T {
             .map_err(|e| JsValue::from_str(&format!("Failed to display address: {:?}", e)))
     }
 
-    async fn register_wallet(&mut self, name: &str, policy: &str) -> Result<Vec<u8>, JsValue> {
+    async fn register_wallet(
+        &mut self,
+        name: &str,
+        policy: &str,
+    ) -> Result<WalletRegistration, JsValue> {
         AsyncHWI::register_wallet(self, name, policy)
             .await
-            .map(|hmac| hmac.to_vec())
             .map_err(|e| JsValue::from_str(&format!("Failed to register wallet: {:?}", e)))
     }
 
@@ -260,26 +282,12 @@ impl Client {
     }
 
     #[wasm_bindgen]
-    pub async fn register_wallet(
-        &mut self,
-        name: &str,
-        policy: &str,
-    ) -> Result<Option<String>, JsValue> {
-        match &mut self.device {
-            Some(Device::Ledger(l)) => {
-                let hmac = AsyncHWI::register_wallet(l, name, policy)
-                    .await
-                    .map_err(|e| {
-                        JsValue::from_str(&format!("Failed to register wallet: {:?}", e))
-                    })?;
-                Ok(Some(hex::encode(hmac)))
-            }
-            Some(d) => {
-                d.as_mut().register_wallet(name, policy).await?;
-                Ok(None)
-            }
+    pub async fn register_wallet(&mut self, name: &str, policy: &str) -> Result<JsValue, JsValue> {
+        let registration = match &mut self.device {
+            Some(d) => d.as_mut().register_wallet(name, policy).await,
             None => Err(JsValue::from_str("Device not connected")),
-        }
+        }?;
+        wallet_registration_js(registration)
     }
 
     #[wasm_bindgen]

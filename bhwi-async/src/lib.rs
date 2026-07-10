@@ -12,6 +12,7 @@ pub use bhwi::common::DeviceBackup;
 pub use bhwi::common::DeviceContext;
 pub use bhwi::common::DisplayAddress;
 pub use bhwi::common::Info;
+pub use bhwi::common::WalletRegistration;
 use bhwi::miniscript::descriptor::WalletPolicy;
 use bhwi::{
     Interpreter,
@@ -60,7 +61,11 @@ pub trait HWI {
         address: common::DisplayAddress,
         context: Option<common::DeviceContext>,
     ) -> Result<String, Self::Error>;
-    async fn register_wallet(&mut self, name: &str, policy: &str) -> Result<[u8; 32], Self::Error>;
+    async fn register_wallet(
+        &mut self,
+        name: &str,
+        policy: &str,
+    ) -> Result<WalletRegistration, Self::Error>;
     async fn sign_tx(
         &mut self,
         psbt: Psbt,
@@ -96,7 +101,7 @@ pub trait HWIDevice {
         &mut self,
         name: &str,
         policy: &str,
-    ) -> Result<[u8; 32], HWIDeviceError>;
+    ) -> Result<WalletRegistration, HWIDeviceError>;
     async fn sign_tx(
         &mut self,
         psbt: Psbt,
@@ -224,10 +229,14 @@ where
         }
     }
 
-    async fn register_wallet(&mut self, name: &str, policy: &str) -> Result<[u8; 32], Self::Error> {
+    async fn register_wallet(
+        &mut self,
+        name: &str,
+        policy: &str,
+    ) -> Result<WalletRegistration, Self::Error> {
         let wallet_policy = WalletPolicy::from_str(policy)
             .map_err(|e| common::Error::Serialization(e.to_string()))?;
-        if let common::Response::WalletHmac(hmac) = run_command(
+        if let common::Response::WalletRegistration(registration) = run_command(
             self,
             common::Command::RegisterWallet {
                 name: name.to_string(),
@@ -236,7 +245,7 @@ where
         )
         .await?
         {
-            Ok(hmac)
+            Ok(registration)
         } else {
             Err(common::Error::NoErrorOrResult.into())
         }
@@ -317,7 +326,7 @@ where
         &mut self,
         name: &str,
         policy: &str,
-    ) -> Result<[u8; 32], HWIDeviceError> {
+    ) -> Result<WalletRegistration, HWIDeviceError> {
         HWI::register_wallet(self, name, policy)
             .await
             .map_err(HWIDeviceError::new)

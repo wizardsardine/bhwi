@@ -186,7 +186,9 @@ mod tests {
         let hmac = dev
             .register_wallet(name, &policy_str)
             .await
-            .expect("failed to register wallet");
+            .expect("failed to register wallet")
+            .hmac()
+            .expect("ledger registration must return an HMAC");
         let wallet_policy = WalletPolicy::from_str(&policy_str).unwrap();
         let ledger_policy = LedgerWalletPolicy::new(name.to_string(), Version::V2, wallet_policy);
         let ctx = DeviceContext::Ledger {
@@ -306,7 +308,9 @@ mod tests {
         let hmac = dev
             .register_wallet(name, &policy)
             .await
-            .expect("failed to register psbt wallet");
+            .expect("failed to register psbt wallet")
+            .hmac()
+            .expect("ledger registration must return an HMAC");
 
         client
             .set_automation(

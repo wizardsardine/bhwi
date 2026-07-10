@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
-use bhwi_async::{DeviceBackup, DeviceContext};
+use bhwi_async::{DeviceBackup, DeviceContext, WalletRegistration};
 use bhwi_cli::{
     DeviceManager, OutputFormat, address::AddressTarget, config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
@@ -332,8 +332,29 @@ async fn main() -> Result<()> {
         }
         Commands::RegisterWallet { name, descriptor } => {
             if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
-                let hmac = d.device().register_wallet(&name, &descriptor).await?;
-                println!("{}", hex::encode(hmac));
+                let registration = d.device().register_wallet(&name, &descriptor).await?;
+                match format {
+                    Some(OutputFormat::Json) => {
+                        let (status, hmac) = match registration {
+                            WalletRegistration::Complete { hmac } => {
+                                ("complete", hmac.map(hex::encode))
+                            }
+                            WalletRegistration::PendingUserConfirmation => {
+                                ("pending_user_confirmation", None)
+                            }
+                        };
+                        println!("{}", serde_json::json!({ "status": status, "hmac": hmac }));
+                    }
+                    _ => match registration {
+                        WalletRegistration::Complete { hmac: Some(hmac) } => {
+                            println!("{}", hex::encode(hmac));
+                        }
+                        WalletRegistration::Complete { hmac: None } => {}
+                        WalletRegistration::PendingUserConfirmation => {
+                            eprintln!("Wallet registration is pending confirmation on the device.");
+                        }
+                    },
+                }
             }
         }
         Commands::SignPsbt {
