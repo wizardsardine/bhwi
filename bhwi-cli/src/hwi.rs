@@ -893,7 +893,7 @@ async fn get_descriptors(selector: DeviceSelector, account: u32) -> HwiResponse 
     };
 
     for internal in [false, true] {
-        for addr_type in hwi_getdescriptors_addr_types(device_type, &model) {
+        for addr_type in hwi_descriptor_addr_types(device_type, &model) {
             let descriptor_type = descriptor_type_for(addr_type);
             let options = GetDescriptorOptions::with_account(
                 fingerprint,
@@ -1681,13 +1681,6 @@ fn hwi_descriptor_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAdd
     types
 }
 
-fn hwi_getdescriptors_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAddressType> {
-    match device_type {
-        DeviceType::BitBox02 => vec![HwiAddressType::Wit, HwiAddressType::ShWit],
-        _ => hwi_descriptor_addr_types(device_type, model),
-    }
-}
-
 fn hwi_can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
     match device_type {
         DeviceType::BitBox02 => false,
@@ -1771,7 +1764,7 @@ fn label_for(device_type: DeviceType) -> Option<Option<String>> {
 
 fn hwi_enumerate_model(device_type: DeviceType, model: &str, is_emulated: bool) -> String {
     match (device_type, is_emulated) {
-        (DeviceType::BitBox02, true) => "bitbox02_multi".to_owned(),
+        (DeviceType::BitBox02, true) => "bitbox02_nova_multi".to_owned(),
         _ => model.to_owned(),
     }
 }
@@ -2679,7 +2672,7 @@ mod tests {
         })
         .expect("json");
 
-        assert_eq!(json["model"], "bitbox02_multi");
+        assert_eq!(json["model"], "bitbox02_nova_multi");
         assert_eq!(json["path"], "127.0.0.1:15423");
         assert!(json.get("label").is_none());
     }
@@ -2921,10 +2914,6 @@ mod tests {
                 HwiAddressType::Wit,
                 HwiAddressType::ShWit,
             ]
-        );
-        assert_eq!(
-            hwi_getdescriptors_addr_types(DeviceType::BitBox02, "bitbox02_multi"),
-            vec![HwiAddressType::Wit, HwiAddressType::ShWit]
         );
         assert!(hwi_can_sign_taproot(
             DeviceType::Coldcard,
