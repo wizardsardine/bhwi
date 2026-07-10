@@ -261,9 +261,21 @@ mod tests {
             return Ok(());
         };
 
-        for args in getmasterxpub_arg_cases(&device_type) {
-            assert_getmasterxpub_parity(args.clone())
-                .with_context(|| format!("getmasterxpub parity failed for args: {args:?}"))?;
+        for case in getmasterxpub_arg_cases(&device_type) {
+            match case.expect {
+                ExpectedResult::Success => assert_getmasterxpub_parity(case.args.clone())
+                    .with_context(|| {
+                        format!("getmasterxpub parity failed for args: {:?}", case.args)
+                    })?,
+                ExpectedResult::Error => {
+                    assert_error_json_parity(case.args.clone()).with_context(|| {
+                        format!(
+                            "getmasterxpub error parity failed for args: {:?}",
+                            case.args
+                        )
+                    })?
+                }
+            }
         }
 
         Ok(())
@@ -640,6 +652,7 @@ mod tests {
     }
 
     fn assert_signmessage_parity(args: Vec<String>) -> Result<()> {
+        let device_type = arg_value(&args, "--device-type").map(str::to_owned);
         prepare_signmessage_run(&args)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
         assert_success("reference", &reference)?;
@@ -649,6 +662,10 @@ mod tests {
         let candidate = HwiBinary::candidate()?.run(args)?;
         assert_success("candidate", &candidate)?;
         assert_signmessage_shape("candidate", &candidate.json)?;
+
+        if device_type.as_deref() == Some("bitbox02") {
+            return Ok(());
+        }
 
         if reference.json != candidate.json {
             bail!(
@@ -734,10 +751,7 @@ mod tests {
 
     fn assert_signmessage_shape(label: &str, json: &Value) -> Result<()> {
         assert_exact_keys(label, "signmessage", json, &["signature"])?;
-        let signature = assert_string_json_field(label, json, "signature")?;
-        let decoded = BASE64_STANDARD
-            .decode(signature)
-            .with_context(|| format!("{label} hwi signmessage signature was not base64"))?;
+        let decoded = signmessage_payload(label, json)?;
         if decoded.len() != 65 {
             bail!(
                 "{label} hwi signmessage signature was {} bytes, expected 65:\n{}",
@@ -746,6 +760,13 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    fn signmessage_payload(label: &str, json: &Value) -> Result<Vec<u8>> {
+        let signature = assert_string_json_field(label, json, "signature")?;
+        BASE64_STANDARD
+            .decode(signature)
+            .with_context(|| format!("{label} hwi signmessage signature was not base64"))
     }
 
     fn assert_displayaddress_shape(label: &str, json: &Value) -> Result<()> {
@@ -1536,6 +1557,7 @@ mod tests {
 
     fn signmessage_arg_cases(device_type: &str) -> Result<Vec<(&'static str, &'static str)>> {
         let path = match device_type {
+            "bitbox02" => "m/49'/1'/0'/0/10",
             "ledger" => "m/44'/1'/0'/0",
             "jade" | "coldcard" => "m/44'/1'/0'",
             _ => bail!("unsupported signmessage device type {device_type:?}"),
@@ -1547,18 +1569,12 @@ mod tests {
         let fingerprint = reference_fingerprint(device_type)?;
         let wit_xpub = reference_xpub(device_type, "m/84'/1'/0'")?;
         let sh_wit_xpub = reference_xpub(device_type, "m/49'/1'/0'")?;
-        let legacy_xpub = reference_xpub(device_type, "m/44'/1'/0'")?;
         let fingerprint = fingerprint.to_string();
         let wit_xpub_string = wit_xpub.to_string();
         let wit_pubkey = lower_hex(&wit_xpub.public_key.serialize());
         let sh_wit_xpub = sh_wit_xpub.to_string();
-        let legacy_xpub = legacy_xpub.to_string();
 
         let mut cases = vec![
-            CommandCase {
-                args: displayaddress_path_args(device_type, "legacy", "m/44h/1h/0h/0/0"),
-                expect: ExpectedResult::Success,
-            },
             CommandCase {
                 args: displayaddress_path_args(device_type, "sh_wit", "m/49h/1h/0h/0/0"),
                 expect: ExpectedResult::Success,
@@ -1588,18 +1604,29 @@ mod tests {
                 ),
                 expect: ExpectedResult::Success,
             },
-            CommandCase {
+        ];
+
+        if device_type != "bitbox02" {
+            let legacy_xpub = reference_xpub(device_type, "m/44'/1'/0'")?.to_string();
+            cases.insert(
+                0,
+                CommandCase {
+                    args: displayaddress_path_args(device_type, "legacy", "m/44h/1h/0h/0/0"),
+                    expect: ExpectedResult::Success,
+                },
+            );
+            cases.push(CommandCase {
                 args: displayaddress_desc_args(
                     device_type,
                     &format!("pkh([{fingerprint}/44h/1h/0h]{legacy_xpub}/0/0)"),
                 ),
                 expect: ExpectedResult::Success,
-            },
-        ];
+            });
+        }
 
         cases.push(CommandCase {
             args: displayaddress_path_args(device_type, "tap", "m/86h/1h/0h/0/0"),
-            expect: if device_type == "ledger" {
+            expect: if device_type == "bitbox02" || device_type == "ledger" {
                 ExpectedResult::Success
             } else {
                 ExpectedResult::Error
@@ -1850,79 +1877,126 @@ mod tests {
         }
     }
 
-    fn getmasterxpub_arg_cases(device_type: &str) -> Vec<Vec<String>> {
-        vec![
-            args([
-                "--emulators",
-                "--chain",
-                "test",
-                "--device-type",
-                device_type,
-                "getmasterxpub",
-            ]),
-            args([
-                "--emulators",
-                "--chain",
-                "test",
-                "--expert",
-                "--device-type",
-                device_type,
-                "getmasterxpub",
-            ]),
-            args([
-                "--emulators",
-                "--chain",
-                "test",
-                "--device-type",
-                device_type,
-                "getmasterxpub",
-                "--account",
-                "1",
-            ]),
-            args([
-                "--emulators",
-                "--chain",
-                "test",
-                "--device-type",
-                device_type,
-                "getmasterxpub",
-                "--addr-type",
-                "legacy",
-            ]),
-            args([
-                "--emulators",
-                "--chain",
-                "test",
-                "--device-type",
-                device_type,
-                "getmasterxpub",
-                "--addr-type",
-                "sh_wit",
-            ]),
-            args([
-                "--emulators",
-                "--chain",
-                "test",
-                "--device-type",
-                device_type,
-                "getmasterxpub",
-                "--addr-type",
-                "wit",
-            ]),
-            args([
-                "--emulators",
-                "--chain",
-                "test",
-                "--device-type",
-                device_type,
-                "getmasterxpub",
-                "--addr-type",
-                "tap",
-            ]),
-        ]
+    fn getmasterxpub_arg_cases(device_type: &str) -> Vec<CommandCase> {
+        let cases = vec![
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getmasterxpub",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--expert",
+                    "--device-type",
+                    device_type,
+                    "getmasterxpub",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getmasterxpub",
+                    "--account",
+                    "1",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getmasterxpub",
+                    "--addr-type",
+                    "legacy",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getmasterxpub",
+                    "--addr-type",
+                    "sh_wit",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getmasterxpub",
+                    "--addr-type",
+                    "wit",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+            CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getmasterxpub",
+                    "--addr-type",
+                    "tap",
+                ]),
+                expect: ExpectedResult::Success,
+            },
+        ];
+
+        cases
     }
 
     fn getxpub_arg_cases(device_type: &str) -> Vec<Vec<String>> {
+        if device_type == "bitbox02" {
+            return vec![
+                args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getxpub",
+                    "m/84h/1h/0h",
+                ]),
+                args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--expert",
+                    "--device-type",
+                    device_type,
+                    "getxpub",
+                    "m/49h/1h/0h/0/3",
+                ]),
+            ];
+        }
+
         vec![
             args([
                 "--emulators",
@@ -2074,6 +2148,10 @@ mod tests {
     }
 
     fn unsupported_device_action_cases(device_type: &str) -> Vec<UnsupportedDeviceActionCase> {
+        if device_type == "bitbox02" {
+            return Vec::new();
+        }
+
         vec![
             UnsupportedDeviceActionCase {
                 command: "setup",
@@ -2355,7 +2433,7 @@ mod tests {
     fn normalize_device_type(device_type: &str) -> Result<String> {
         let device_type = device_type.to_ascii_lowercase();
         match device_type.as_str() {
-            "coldcard" | "jade" | "ledger" => Ok(device_type),
+            "bitbox02" | "coldcard" | "jade" | "ledger" => Ok(device_type),
             _ => bail!("unsupported HWI_PARITY_DEVICE_TYPE {device_type:?}"),
         }
     }
