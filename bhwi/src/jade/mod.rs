@@ -1,5 +1,6 @@
 pub mod api;
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -46,6 +47,11 @@ pub enum JadeCommand {
     GetInfo,
     GetXpub(DerivationPath),
     GetReceiveAddress(ReceiveAddress),
+    RegisterDescriptor {
+        descriptor_name: String,
+        descriptor: String,
+        datavalues: BTreeMap<String, String>,
+    },
     SignMessage {
         message: Vec<u8>,
         path: DerivationPath,
@@ -74,6 +80,7 @@ pub enum JadeResponse {
     TaskDone,
     Xpub(Xpub),
     Address(String),
+    RegisteredDescriptor,
     SignedPsbt(Psbt),
 }
 
@@ -245,6 +252,19 @@ where
                     }),
                 ),
             },
+            JadeCommand::RegisterDescriptor {
+                descriptor_name,
+                descriptor,
+                datavalues,
+            } => request(
+                "register_descriptor",
+                Some(api::RegisterDescriptorParams {
+                    network: self.network,
+                    descriptor_name,
+                    descriptor: descriptor.clone(),
+                    datavalues: datavalues.clone(),
+                }),
+            ),
             JadeCommand::GetInfo => request("get_version_info", None::<api::EmptyRequest>),
         };
 
@@ -404,6 +424,17 @@ where
                 response = Some(JadeResponse::Address(address));
                 None
             }
+            State::Running(JadeCommand::RegisterDescriptor { .. }) => {
+                let registered: bool = from_response(&data)?.into_result()?;
+                if !registered {
+                    return Err(JadeError::UnexpectedResult(
+                        "register_descriptor returned false".to_string(),
+                    )
+                    .into());
+                }
+                response = Some(JadeResponse::RegisteredDescriptor);
+                None
+            }
             State::Running(JadeCommand::GetInfo) => {
                 let info: GetInfoResponse = from_response(&data)?.into_result()?;
                 response = Some(JadeResponse::GetInfo(info));
@@ -461,9 +492,23 @@ impl TryFrom<Command> for JadeCommand {
             })),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
             Command::GetVersion => Ok(Self::GetInfo),
-            Command::RegisterWallet { .. } => Err(Error::MissingCommandInfo(
-                "RegisterWallet not supported by Jade",
-            )),
+            Command::RegisterWallet { name, policy } => {
+                let (descriptor, keys) = crate::policy::extract_parts(&policy)
+                    .map_err(|err| Error::Serialization(err.to_string()))?;
+                // Jade's descriptor parser uses the explicit multipath spelling,
+                // while BIP-388 WalletPolicy display canonicalizes it to `/**`.
+                let descriptor = descriptor.replace("/**", "/<0;1>/*");
+                let datavalues = keys
+                    .iter()
+                    .enumerate()
+                    .map(|(index, key)| (format!("@{index}"), crate::policy::format_key_info(key)))
+                    .collect();
+                Ok(Self::RegisterDescriptor {
+                    descriptor_name: name,
+                    descriptor,
+                    datavalues,
+                })
+            }
             Command::SignTx(psbt, _) => Ok(Self::SignPsbt { psbt }),
         }
     }
@@ -496,6 +541,11 @@ impl From<JadeResponse> for Response {
                 firmware: None,
             }),
             JadeResponse::Address(address) => Response::Address(address),
+            JadeResponse::RegisteredDescriptor => {
+                Response::WalletRegistration(crate::common::WalletRegistration::Complete {
+                    hmac: None,
+                })
+            }
             JadeResponse::SignedPsbt(psbt) => Response::SignedPsbt(psbt),
         }
     }
@@ -544,6 +594,7 @@ mod tests {
     use super::*;
     use crate::Interpreter;
     use crate::common::{Command, DisplayAddress, JadeInterpreter};
+    use crate::miniscript::descriptor::WalletPolicy;
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -558,6 +609,22 @@ mod tests {
         path: Vec<u32>,
         variant: String,
     }
+
+    #[derive(Debug, Deserialize)]
+    struct OwnedRegistrationRequest {
+        method: String,
+        params: Option<OwnedRegistrationParams>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct OwnedRegistrationParams {
+        network: String,
+        descriptor_name: String,
+        descriptor: String,
+        datavalues: BTreeMap<String, String>,
+    }
+
+    const REGISTRATION_POLICY: &str = "wsh(or_d(pk([f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*),and_v(v:pkh([00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<0;1>/*),older(100))))";
 
     #[test]
     fn path_display_request_encodes_jade_path_params() {
@@ -596,5 +663,91 @@ mod tests {
         ));
 
         assert!(matches!(result, Err(Error::UnsupportedDisplayAddress(_))));
+    }
+
+    #[test]
+    fn register_wallet_encodes_jade_descriptor_params() {
+        let mut interpreter = JadeInterpreter::default().with_network(Network::Testnet);
+        let transmit = interpreter
+            .start(Command::RegisterWallet {
+                name: "inheritance".to_string(),
+                policy: WalletPolicy::from_str(REGISTRATION_POLICY).unwrap(),
+            })
+            .unwrap();
+
+        let request: OwnedRegistrationRequest = serde_cbor::from_slice(&transmit.payload).unwrap();
+        let params = request.params.unwrap();
+        assert_eq!(request.method, "register_descriptor");
+        assert_eq!(params.network, JADE_NETWORK_TESTNET);
+        assert_eq!(params.descriptor_name, "inheritance");
+        assert_eq!(
+            params.descriptor,
+            "wsh(or_d(pk(@0/<0;1>/*),and_v(v:pkh(@1/<0;1>/*),older(100))))"
+        );
+        assert_eq!(params.datavalues.len(), 2);
+        assert_eq!(
+            params.datavalues.get("@0").unwrap(),
+            "[f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP"
+        );
+        assert_eq!(
+            params.datavalues.get("@1").unwrap(),
+            "[00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S"
+        );
+    }
+
+    #[test]
+    fn register_wallet_maps_true_to_completed_registration() {
+        let mut interpreter = JadeInterpreter::default();
+        interpreter
+            .start(Command::RegisterWallet {
+                name: "inheritance".to_string(),
+                policy: WalletPolicy::from_str(REGISTRATION_POLICY).unwrap(),
+            })
+            .unwrap();
+        let response = serde_cbor::to_vec(&api::Response {
+            id: "1".to_string(),
+            seqlen: None,
+            seqnum: None,
+            result: Some(true),
+            error: None,
+        })
+        .unwrap();
+
+        assert!(interpreter.exchange(response).unwrap().is_none());
+        assert!(matches!(
+            interpreter.end().unwrap(),
+            Response::WalletRegistration(crate::common::WalletRegistration::Complete {
+                hmac: None
+            })
+        ));
+    }
+
+    #[test]
+    fn register_wallet_rejects_false_result() {
+        let mut interpreter = JadeInterpreter::default();
+        interpreter
+            .start(Command::RegisterWallet {
+                name: "inheritance".to_string(),
+                policy: WalletPolicy::from_str(REGISTRATION_POLICY).unwrap(),
+            })
+            .unwrap();
+        let response = serde_cbor::to_vec(&api::Response {
+            id: "1".to_string(),
+            seqlen: None,
+            seqnum: None,
+            result: Some(false),
+            error: None,
+        })
+        .unwrap();
+
+        let error = match interpreter.exchange(response) {
+            Err(error) => error,
+            Ok(_) => panic!("false registration result must fail"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("register_descriptor returned false")
+        );
     }
 }
