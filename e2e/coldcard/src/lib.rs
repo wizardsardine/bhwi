@@ -39,18 +39,39 @@ impl DeviceControl {
         }
         Ok(())
     }
+
+    pub async fn reset_multisig(&mut self) -> Result<()> {
+        self.client
+            .exchange(b"EXECsettings.set('multisig', []); settings.save()", false)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn multisig_settings(&mut self) -> Result<String> {
+        let response = self
+            .client
+            .exchange(b"EVALsettings.get('multisig', [])", false)
+            .await?;
+        let value = response
+            .strip_prefix(b"biny")
+            .ok_or_else(|| anyhow::anyhow!("unexpected Coldcard EVAL response"))?;
+        Ok(String::from_utf8(value.to_vec())?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64, Encoding};
-    use bhwi_async::{DeviceBackup, DisplayAddress, HWI, transport::coldcard::DEFAULT_CKCC_SOCKET};
+    use bhwi_async::{
+        DeviceBackup, DisplayAddress, HWI, WalletRegistration,
+        transport::coldcard::DEFAULT_CKCC_SOCKET,
+    };
     use bitcoin::{
         Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
         Witness,
         absolute::LockTime,
         address::Address,
-        bip32::{ChildNumber, DerivationPath},
+        bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
         psbt::{Input, Output, Psbt},
         secp256k1::Secp256k1,
         transaction::Version as TxVersion,
@@ -158,6 +179,49 @@ mod tests {
         // The simulator returns err_Unknown cmd for msas, so we expect an error.
         // On real hardware with a registered descriptor, this would succeed.
         assert!(display_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn can_enroll_multisig_descriptor() {
+        let (mut dev, mut control) = device().await;
+        control.reset_multisig().await.unwrap();
+        let secp = Secp256k1::new();
+        let account_path: DerivationPath = "48'/1'/0'/2'".parse().unwrap();
+        let device_fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let device_xpub = dev
+            .get_extended_pubkey(account_path.clone(), false)
+            .await
+            .unwrap();
+        let cosigner_master = Xpriv::new_master(Network::Testnet, &[9u8; 32]).unwrap();
+        let cosigner_fingerprint = cosigner_master.fingerprint(&secp);
+        let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path).unwrap();
+        let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
+        let policy = format!(
+            "wsh(sortedmulti(2,[{device_fingerprint}/{account_path}]{device_xpub}/<0;1>/*,[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/<0;1>/*))"
+        );
+
+        let registration = dev
+            .register_wallet("cold-e2e", &policy)
+            .await
+            .expect("start Coldcard enrollment");
+        assert_eq!(registration, WalletRegistration::PendingUserConfirmation);
+
+        control
+            .approve_after(std::time::Duration::from_millis(250))
+            .await
+            .unwrap();
+        for _ in 0..40 {
+            if control
+                .multisig_settings()
+                .await
+                .unwrap()
+                .contains("cold-e2e")
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("Coldcard multisig registration was not persisted");
     }
 
     #[tokio::test]
