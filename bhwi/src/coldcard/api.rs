@@ -105,6 +105,13 @@ pub mod request {
         rv
     }
 
+    pub fn multisig_enroll(length: u32, file_sha: &[u8; 32]) -> Vec<u8> {
+        let mut data = b"enrl".to_vec();
+        data.extend(length.to_le_bytes());
+        data.extend(file_sha);
+        data
+    }
+
     pub fn get_signed_transaction() -> Vec<u8> {
         b"stok".to_vec()
     }
@@ -155,6 +162,15 @@ mod tests {
         assert_eq!(u32::from_le_bytes(req[4..8].try_into().unwrap()), 99);
         assert_eq!(u32::from_le_bytes(req[8..12].try_into().unwrap()), 0);
         assert_eq!(&req[12..], &hash);
+    }
+
+    #[test]
+    fn multisig_enroll_request_encodes_length_and_hash() {
+        let hash = [4u8; 32];
+        let req = super::request::multisig_enroll(321, &hash);
+        assert_eq!(&req[..4], b"enrl");
+        assert_eq!(u32::from_le_bytes(req[4..8].try_into().unwrap()), 321);
+        assert_eq!(&req[8..], &hash);
     }
 
     #[test]
@@ -386,6 +402,10 @@ pub mod response {
                 &[ResponseMessage::Okay, ResponseMessage::Busy],
             )),
         }
+    }
+
+    pub fn okay(res: &[u8]) -> Result<(), ColdcardError> {
+        ResponseHandler::expect_response(res, ResponseMessage::Okay).map(|_| ())
     }
 
     pub fn signed_transaction(res: &[u8]) -> Result<SignedTransactionStatus, ColdcardError> {

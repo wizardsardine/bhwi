@@ -141,6 +141,9 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("request error: {0}")]
     Request(&'static str),
 
