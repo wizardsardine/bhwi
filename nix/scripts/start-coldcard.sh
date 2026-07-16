@@ -5,10 +5,26 @@ cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/bhwi/coldcard"
 src="${COLDCARD_FIRMWARE_SRC:?COLDCARD_FIRMWARE_SRC must point to Coldcard firmware source}"
 rev="${COLDCARD_FIRMWARE_REV:-$(basename "$src")}"
 src_key="${rev//[^A-Za-z0-9_.-]/_}"
-work="$cache_root/firmware-$src_key"
+prepare_hwi_patch=""
+if [[ "${1:-}" == "--prepare-hwi" ]]; then
+  prepare_hwi_patch="${2:?--prepare-hwi requires the upstream compatibility patch}"
+  shift 2
+fi
+if [[ $# -ne 0 ]]; then
+  echo "usage: start-coldcard.sh [--prepare-hwi PATCH]" >&2
+  exit 2
+fi
+
+work_suffix=""
+build_variant="unpatched-mk5-v1"
+if [[ -n "$prepare_hwi_patch" ]]; then
+  work_suffix="-hwi"
+  build_variant="hwi-v2-$(sha256sum "$prepare_hwi_patch" | cut -d' ' -f1)"
+fi
+work="$cache_root/firmware-$src_key$work_suffix"
 marker="$work/.bhwi-built"
 build_key_file="$work/.bhwi-build-key"
-build_key="rev=$rev simulator=unpatched-mk5-v1"
+build_key="rev=$rev simulator=$build_variant"
 socket="${COLDCARD_SOCKET:-/tmp/ckcc-simulator.sock}"
 
 dump_build_logs() {
@@ -26,7 +42,7 @@ dump_build_logs() {
 }
 trap dump_build_logs ERR
 
-if [[ -S "$socket" ]]; then
+if [[ -z "$prepare_hwi_patch" && -S "$socket" ]]; then
   echo "Coldcard socket already exists: $socket" >&2
   echo "Stop the existing simulator or remove the stale socket before starting a new one." >&2
   exit 1
@@ -52,6 +68,9 @@ if [[ ! -f "$marker" || ! -f "$build_key_file" || "$(cat "$build_key_file")" != 
   chmod -R u+w "$work"
 
   cd "$work"
+  if [[ -n "$prepare_hwi_patch" ]]; then
+    git apply "$prepare_hwi_patch"
+  fi
   # Upstream ships OS-specific micropython patches (clang vs gcc warning flags).
   if [[ "$(uname)" == "Darwin" && -f macos-mpy.patch ]]; then
     (cd external/micropython && git apply ../../macos-mpy.patch)
@@ -78,6 +97,11 @@ if [[ ! -f "$marker" || ! -f "$build_key_file" || "$(cat "$build_key_file")" != 
   make -C unix PWD="$work/unix" PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}" CFLAGS_EXTRA="$mpy_cflags_extra"
   printf '%s\n' "$build_key" > "$build_key_file"
   touch "$marker"
+fi
+
+if [[ -n "$prepare_hwi_patch" ]]; then
+  printf '%s\n' "$work/unix/simulator.py"
+  exit 0
 fi
 
 cd "$work/unix"

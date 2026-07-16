@@ -3,7 +3,7 @@
 
   inputs = {
     app-bitcoin-new = {
-      url = "github:LedgerHQ/app-bitcoin-new";
+      url = "github:LedgerHQ/app-bitcoin-new/2.4.1";
       flake = false;
     };
     coldcard-firmware = {
@@ -492,23 +492,147 @@
           runtimeInputs =
             inputs
             ++ ledgerInputs
+            ++ coldcardInputs
+            ++ jadeQemuInputs
             ++ [
               hwiPython
               pkgs.bitcoin
             ];
           text = ''
+            ${commonE2eEnv}
+            unset C_INCLUDE_PATH
+            unset CPLUS_INCLUDE_PATH
+            unset LIBRARY_PATH
+            unset OBJC_INCLUDE_PATH
+            unset OBJCPLUS_INCLUDE_PATH
+
+            export HWI_PYTHON="${hwiPython}/bin/python"
             export HWI_UPSTREAM_SRC="${python-hwi}"
             export HWI_BITCOIND="''${HWI_BITCOIND:-${pkgs.bitcoin}/bin/bitcoind}"
+            export HWI_BITBOX02_SIMULATOR="''${HWI_BITBOX02_SIMULATOR:-${bitboxSimulator}/bin/bitbox02-simulator}"
             export HWI_LEDGER_SPECULOS_BIN="''${HWI_LEDGER_SPECULOS_BIN:-${speculos}/bin/speculos}"
             export LEDGER_BUILD_APP_SCRIPT="''${LEDGER_BUILD_APP_SCRIPT:-${./nix/scripts/build-ledger-app.sh}}"
             export APP_BITCOIN_NEW_SRC="${app-bitcoin-new}"
             export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
             export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
+            export HWI_COLDCARD_PREPARE_SCRIPT="${coldcardRunner}/bin/bhwi-start-coldcard"
+            export COLDCARD_FIRMWARE_SRC="${coldcard-firmware}"
+            export COLDCARD_FIRMWARE_REV="${coldcard-firmware.rev or "locked"}"
+            export COLDCARD_FIRMWARE_URL="https://github.com/Coldcard/firmware.git"
+            export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
+              coldcardPkgs.SDL2
+              coldcardPkgs.gcc13.cc.lib
+              coldcardPkgs.glibc
+              coldcardPkgs.libffi
+              coldcardPkgs.openssl.out
+              coldcardPkgs.pcsclite
+              coldcardPkgs.systemd
+            ]}"
+            export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
+            export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
+            export PYSDL2_DLL_PATH="${coldcardPkgs.SDL2}/lib"
+            export CFLAGS="-I${coldcardPkgs.pcsclite.dev}/include/PCSC ''${CFLAGS:-}"
+            export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
+            export HWI_JADE_PREPARE_SCRIPT="${./nix/scripts/start-jade.sh}"
+            export JADE_FIRMWARE_SRC="${jade-firmware}"
+            export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
+            export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
+            export IDF_PATH="${jadeEspIdf}"
+            export IDF_TOOLS_PATH="$IDF_PATH/tools"
+            export IDF_PYTHON_CHECK_CONSTRAINTS=no
+            IDF_PYTHON_ENV_PATH="$(readlink "$IDF_PATH/python-env")"
+            export IDF_PYTHON_ENV_PATH
+            export PATH="$IDF_TOOLS_PATH:$IDF_PATH/components/espcoredump:$IDF_PATH/components/partition_table:$IDF_PATH/components/app_update:$PATH"
+            if [ -e "$IDF_PATH/.tool-env" ]; then
+              # shellcheck disable=SC1091
+              . "$IDF_PATH/.tool-env"
+            fi
+            if [ -e "$IDF_PATH/etc/gitconfig" ]; then
+              export GIT_CONFIG_SYSTEM="$IDF_PATH/etc/gitconfig"
+            fi
             export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+            export HWI_BIN="''${HWI_BIN:-$PWD/target/debug/hwi}"
 
+            cargo build -p bhwi-cli --bin hwi
             exec ${pkgs.bash}/bin/bash ${./nix/scripts/run-hwi-upstream-suite.sh} "$@"
           '';
         };
+        mkHwiUpstreamDevice = name: device: runtimeInputs: env:
+          pkgs.writeShellApplication {
+            inherit name runtimeInputs;
+            text =
+              commonE2eEnv
+              + env
+              + ''
+
+                export HWI_PYTHON="${hwiPython}/bin/python"
+                export HWI_UPSTREAM_SRC="${python-hwi}"
+                export HWI_BITCOIND="''${HWI_BITCOIND:-${pkgs.bitcoin}/bin/bitcoind}"
+                export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+                export HWI_BIN="''${HWI_BIN:-$PWD/target/debug/hwi}"
+
+                cargo build -p bhwi-cli --bin hwi
+                exec ${pkgs.bash}/bin/bash ${./nix/scripts/run-hwi-upstream-suite.sh} ${device} "$@"
+              '';
+          };
+        hwiUpstreamBitbox =
+          mkHwiUpstreamDevice "hwi-upstream-bitbox" "bitbox02" (inputs ++ [hwiPython pkgs.bitcoin]) ''
+            export HWI_BITBOX02_SIMULATOR="${bitboxSimulator}/bin/bitbox02-simulator"
+          '';
+        hwiUpstreamColdcard =
+          mkHwiUpstreamDevice "hwi-upstream-coldcard" "coldcard" (inputs ++ coldcardInputs ++ [hwiPython pkgs.bitcoin]) ''
+            unset C_INCLUDE_PATH
+            unset CPLUS_INCLUDE_PATH
+            unset LIBRARY_PATH
+            unset OBJC_INCLUDE_PATH
+            unset OBJCPLUS_INCLUDE_PATH
+            export HWI_COLDCARD_PREPARE_SCRIPT="${coldcardRunner}/bin/bhwi-start-coldcard"
+            export COLDCARD_FIRMWARE_SRC="${coldcard-firmware}"
+            export COLDCARD_FIRMWARE_REV="${coldcard-firmware.rev or "locked"}"
+            export COLDCARD_FIRMWARE_URL="https://github.com/Coldcard/firmware.git"
+            export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
+              coldcardPkgs.SDL2
+              coldcardPkgs.gcc13.cc.lib
+              coldcardPkgs.glibc
+              coldcardPkgs.libffi
+              coldcardPkgs.openssl.out
+              coldcardPkgs.pcsclite
+              coldcardPkgs.systemd
+            ]}"
+            export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
+            export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
+            export PYSDL2_DLL_PATH="${coldcardPkgs.SDL2}/lib"
+            export CFLAGS="-I${coldcardPkgs.pcsclite.dev}/include/PCSC ''${CFLAGS:-}"
+            export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
+          '';
+        hwiUpstreamLedger =
+          mkHwiUpstreamDevice "hwi-upstream-ledger" "ledger" (inputs ++ ledgerInputs ++ [hwiPython pkgs.bitcoin]) ''
+            export HWI_LEDGER_SPECULOS_BIN="${speculos}/bin/speculos"
+            export LEDGER_BUILD_APP_SCRIPT="${./nix/scripts/build-ledger-app.sh}"
+            export APP_BITCOIN_NEW_SRC="${app-bitcoin-new}"
+            export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
+            export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
+          '';
+        hwiUpstreamJade =
+          mkHwiUpstreamDevice "hwi-upstream-jade" "jade" (inputs ++ jadeQemuInputs ++ [hwiPython pkgs.bitcoin]) ''
+            export HWI_JADE_PREPARE_SCRIPT="${./nix/scripts/start-jade.sh}"
+            export JADE_FIRMWARE_SRC="${jade-firmware}"
+            export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
+            export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
+            export IDF_PATH="${jadeEspIdf}"
+            export IDF_TOOLS_PATH="$IDF_PATH/tools"
+            export IDF_PYTHON_CHECK_CONSTRAINTS=no
+            IDF_PYTHON_ENV_PATH="$(readlink "$IDF_PATH/python-env")"
+            export IDF_PYTHON_ENV_PATH
+            export PATH="$IDF_TOOLS_PATH:$IDF_PATH/components/espcoredump:$IDF_PATH/components/partition_table:$IDF_PATH/components/app_update:$PATH"
+            if [ -e "$IDF_PATH/.tool-env" ]; then
+              # shellcheck disable=SC1091
+              . "$IDF_PATH/.tool-env"
+            fi
+            if [ -e "$IDF_PATH/etc/gitconfig" ]; then
+              export GIT_CONFIG_SYSTEM="$IDF_PATH/etc/gitconfig"
+            fi
+          '';
         hwiParityColdcard = mkHwiParityRunner "bhwi-hwi-parity-coldcard" "coldcard" (coldcardInputs ++ inputs) coldcardE2eEnv;
         hwiParityLedger = mkHwiParityRunner "bhwi-hwi-parity-ledger" "ledger" (ledgerInputs ++ inputs) commonE2eEnv;
         hwiParityJade = mkHwiParityRunner "bhwi-hwi-parity-jade" "jade" (jadeInputs ++ inputs) commonE2eEnv;
@@ -537,6 +661,10 @@
           }
           // pkgs.lib.optionalAttrs (!isDarwin) {
             hwi-upstream-suite = mkApp hwiUpstreamSuite;
+            hwi-upstream-bitbox = mkApp hwiUpstreamBitbox;
+            hwi-upstream-coldcard = mkApp hwiUpstreamColdcard;
+            hwi-upstream-ledger = mkApp hwiUpstreamLedger;
+            hwi-upstream-jade = mkApp hwiUpstreamJade;
             hwi-parity-bitbox = mkApp hwiParityBitbox;
             hwi-parity-coldcard = mkApp hwiParityColdcard;
             hwi-parity-ledger = mkApp hwiParityLedger;
@@ -570,6 +698,8 @@
             test -f ${./nix/scripts/start-jade-pinserver.sh}
             test -f ${./nix/scripts/init-jade.sh}
             test -f ${./nix/scripts/emit-gh-error-log.sh}
+            test -f ${./nix/scripts/run-hwi-upstream-suite.sh}
+            test -f ${./nix/scripts/stop-emulator.sh}
             touch $out
           '';
         };
@@ -593,6 +723,10 @@
           }
           // pkgs.lib.optionalAttrs (!isDarwin) {
             hwi-upstream-suite = hwiUpstreamSuite;
+            hwi-upstream-bitbox = hwiUpstreamBitbox;
+            hwi-upstream-coldcard = hwiUpstreamColdcard;
+            hwi-upstream-ledger = hwiUpstreamLedger;
+            hwi-upstream-jade = hwiUpstreamJade;
           }
           // linuxPackages;
 

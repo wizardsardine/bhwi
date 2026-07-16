@@ -3,15 +3,16 @@
     "app-bitcoin-new": {
       "flake": false,
       "locked": {
-        "lastModified": 1779205252,
-        "narHash": "sha256-LNvZm7ZpKO+ruHQPTcCkjoMT4dm8Tt45lI5VrN5ZQ0Y=",
+        "lastModified": 1751527834,
+        "narHash": "sha256-+u5sPi2qLfGiWwm3+aBIjn4CPFIMdS9jkHP/yLDrvjg=",
         "owner": "LedgerHQ",
         "repo": "app-bitcoin-new",
-        "rev": "3ac253258f8cec4922255a0296eeb6119f72f572",
+        "rev": "e674f4223eb7cf3dd8defbc323b90c7c90de3908",
         "type": "github"
       },
       "original": {
         "owner": "LedgerHQ",
+        "ref": "2.4.1",
         "repo": "app-bitcoin-new",
         "type": "github"
       }

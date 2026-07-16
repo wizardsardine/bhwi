@@ -131,7 +131,7 @@ mod tests {
     async fn can_get_version() {
         let (mut dev, _) = init().await;
         let info = dev.get_info().await.unwrap();
-        assert_eq!(info.version.to_string(), "2.4.6");
+        assert_eq!(info.version.to_string(), "2.4.1");
         assert_eq!(info.firmware, Some("Bitcoin Test".to_string()));
         assert_eq!(info.networks.first().unwrap().to_string(), "testnet");
     }

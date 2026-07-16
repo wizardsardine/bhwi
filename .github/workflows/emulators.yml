@@ -80,11 +80,13 @@ jobs:
             cat bitbox-hwi-parity.log || true
             exit 1
           }
-      - name: BitBox logs
+      - name: Stop BitBox simulator before upstream gate
+        run: bash nix/scripts/stop-emulator.sh bitbox.pid tcp localhost 15423 60
+      - name: Run upstream HWI BitBox02 suite
+        run: timeout 45m nix run .#hwi-upstream-bitbox
+      - name: Stop BitBox simulator
         if: always()
-        run: |
-          cat bitbox.log || true
-          if [ -f bitbox.pid ]; then kill "$(cat bitbox.pid)" || true; fi
+        run: bash nix/scripts/stop-emulator.sh bitbox.pid tcp localhost 15423 60
 
   coldcard-e2e:
     needs: nix-flake
@@ -114,7 +116,7 @@ jobs:
       - name: Run HWI parity tests
         run: |
           set -o pipefail
-          nix run .#hwi-parity-coldcard 2>&1 | tee coldcard-hwi-parity.log || {
+          nix run .#hwi-parity-coldcard -- -- --test-threads=1 2>&1 | tee coldcard-hwi-parity.log || {
             bash nix/scripts/emit-gh-error-log.sh "Coldcard HWI parity log" coldcard-hwi-parity.log
             cat coldcard-hwi-parity.log || true
             exit 1
@@ -135,11 +137,13 @@ jobs:
             cat coldcard-e2e.log || true
             exit 1
           }
-      - name: Coldcard logs
+      - name: Stop Coldcard simulator before upstream gate
+        run: bash nix/scripts/stop-emulator.sh coldcard.pid socket /tmp/ckcc-simulator.sock 60
+      - name: Run upstream HWI Coldcard suite
+        run: timeout 90m nix run .#hwi-upstream-coldcard
+      - name: Stop Coldcard simulator
         if: always()
-        run: |
-          cat coldcard.log || true
-          if [ -f coldcard.pid ]; then kill "$(cat coldcard.pid)" || true; fi
+        run: bash nix/scripts/stop-emulator.sh coldcard.pid socket /tmp/ckcc-simulator.sock 60
 
   ledger-e2e:
     needs: nix-flake
@@ -156,8 +160,13 @@ jobs:
             ledger-${{ runner.os }}-
       - name: Start Ledger Speculos
         run: |
-          nix run .#ledger > ledger.log 2>&1 &
-          echo $! > ledger.pid
+          rm -f ledger.pid
+          setsid bash -c 'echo "$$" > ledger.pid; exec nix run .#ledger' > ledger.log 2>&1 &
+          for _ in {1..100}; do
+            [[ -s ledger.pid ]] && break
+            sleep 0.1
+          done
+          test -s ledger.pid
           tail -n +1 -F ledger.log &
           echo $! > ledger-tail.pid
           bash nix/scripts/wait-for-port.sh localhost 9999 1800 "$(cat ledger.pid)" || {
@@ -174,32 +183,142 @@ jobs:
       - name: Run HWI parity tests
         run: |
           set -o pipefail
-          nix run .#hwi-parity-ledger 2>&1 | tee ledger-hwi-parity.log || {
+          nix run .#hwi-parity-ledger -- -- --test-threads=1 2>&1 | tee ledger-hwi-parity.log || {
             bash nix/scripts/emit-gh-error-log.sh "Ledger HWI parity log" ledger-hwi-parity.log
             cat ledger-hwi-parity.log || true
             exit 1
           }
-      - name: Run Ledger CLI e2e
+      - name: Restart Ledger Speculos after HWI parity tests
+        run: |
+          bash nix/scripts/stop-emulator.sh ledger.pid tcp localhost 9999 60
+          rm -f ledger.pid
+          setsid bash -c 'echo "$$" > ledger.pid; exec nix run .#ledger' > ledger.log 2>&1 &
+          for _ in {1..100}; do
+            [[ -s ledger.pid ]] && break
+            sleep 0.1
+          done
+          test -s ledger.pid
+          tail -n +1 -F ledger.log &
+          echo $! > ledger-tail.pid
+          bash nix/scripts/wait-for-port.sh localhost 9999 1800 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          bash nix/scripts/wait-for-port.sh localhost 5000 300 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          kill "$(cat ledger-tail.pid)" || true
+      - name: Run Ledger CLI e2e except PSBT signing
         run: |
           set -o pipefail
-          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#ledger -c cargo test -p bhwi-e2e-cli ledger -- --test-threads=1 2>&1 | tee ledger-cli-e2e.log || {
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#ledger -c cargo test -p bhwi-e2e-cli ledger -- --skip ledger_sign_psbt --test-threads=1 2>&1 | tee ledger-cli-e2e.log || {
             bash nix/scripts/emit-gh-error-log.sh "Ledger CLI e2e log" ledger-cli-e2e.log
             cat ledger-cli-e2e.log || true
             exit 1
           }
-      - name: Run Ledger e2e
+      - name: Restart Ledger Speculos before PSBT CLI e2e
+        run: |
+          bash nix/scripts/stop-emulator.sh ledger.pid tcp localhost 9999 60
+          rm -f ledger.pid
+          setsid bash -c 'echo "$$" > ledger.pid; exec nix run .#ledger' > ledger.log 2>&1 &
+          for _ in {1..100}; do
+            [[ -s ledger.pid ]] && break
+            sleep 0.1
+          done
+          test -s ledger.pid
+          tail -n +1 -F ledger.log &
+          echo $! > ledger-tail.pid
+          bash nix/scripts/wait-for-port.sh localhost 9999 1800 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          bash nix/scripts/wait-for-port.sh localhost 5000 300 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          kill "$(cat ledger-tail.pid)" || true
+      - name: Run Ledger PSBT CLI e2e
         run: |
           set -o pipefail
-          nix develop .#ledger -c cargo test -p bhwi-e2e-ledger -- --test-threads=1 2>&1 | tee ledger-e2e.log || {
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#ledger -c cargo test -p bhwi-e2e-cli ledger_sign_psbt -- --test-threads=1 2>&1 | tee ledger-cli-psbt-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger PSBT CLI e2e log" ledger-cli-psbt-e2e.log
+            cat ledger-cli-psbt-e2e.log || true
+            exit 1
+          }
+      - name: Restart Ledger Speculos before Ledger e2e
+        run: |
+          bash nix/scripts/stop-emulator.sh ledger.pid tcp localhost 9999 60
+          rm -f ledger.pid
+          setsid bash -c 'echo "$$" > ledger.pid; exec nix run .#ledger' > ledger.log 2>&1 &
+          for _ in {1..100}; do
+            [[ -s ledger.pid ]] && break
+            sleep 0.1
+          done
+          test -s ledger.pid
+          tail -n +1 -F ledger.log &
+          echo $! > ledger-tail.pid
+          bash nix/scripts/wait-for-port.sh localhost 9999 1800 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          bash nix/scripts/wait-for-port.sh localhost 5000 300 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          kill "$(cat ledger-tail.pid)" || true
+      - name: Run Ledger e2e except PSBT signing
+        run: |
+          set -o pipefail
+          nix develop .#ledger -c cargo test -p bhwi-e2e-ledger -- --skip can_sign_psbt --test-threads=1 2>&1 | tee ledger-e2e.log || {
             bash nix/scripts/emit-gh-error-log.sh "Ledger e2e log" ledger-e2e.log
             cat ledger-e2e.log || true
             exit 1
           }
-      - name: Ledger logs
-        if: always()
+      - name: Restart Ledger Speculos before PSBT e2e
         run: |
-          cat ledger.log || true
-          if [ -f ledger.pid ]; then kill "$(cat ledger.pid)" || true; fi
+          bash nix/scripts/stop-emulator.sh ledger.pid tcp localhost 9999 60
+          rm -f ledger.pid
+          setsid bash -c 'echo "$$" > ledger.pid; exec nix run .#ledger' > ledger.log 2>&1 &
+          for _ in {1..100}; do
+            [[ -s ledger.pid ]] && break
+            sleep 0.1
+          done
+          test -s ledger.pid
+          tail -n +1 -F ledger.log &
+          echo $! > ledger-tail.pid
+          bash nix/scripts/wait-for-port.sh localhost 9999 1800 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          bash nix/scripts/wait-for-port.sh localhost 5000 300 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          kill "$(cat ledger-tail.pid)" || true
+      - name: Run Ledger PSBT e2e
+        run: |
+          set -o pipefail
+          nix develop .#ledger -c cargo test -p bhwi-e2e-ledger can_sign_psbt -- --test-threads=1 2>&1 | tee ledger-psbt-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger PSBT e2e log" ledger-psbt-e2e.log
+            cat ledger-psbt-e2e.log || true
+            exit 1
+          }
+      - name: Stop Ledger Speculos before upstream gate
+        run: bash nix/scripts/stop-emulator.sh ledger.pid tcp localhost 9999 60
+      - name: Run upstream HWI Ledger suite
+        run: timeout 90m nix run .#hwi-upstream-ledger
+      - name: Stop Ledger Speculos
+        if: always()
+        run: bash nix/scripts/stop-emulator.sh ledger.pid tcp localhost 9999 60
 
   jade-e2e:
     needs: nix-flake
@@ -248,7 +367,7 @@ jobs:
       - name: Run HWI parity tests
         run: |
           set -o pipefail
-          nix run .#hwi-parity-jade 2>&1 | tee jade-hwi-parity.log || {
+          nix run .#hwi-parity-jade -- -- --test-threads=1 2>&1 | tee jade-hwi-parity.log || {
             bash nix/scripts/emit-gh-error-log.sh "Jade HWI parity log" jade-hwi-parity.log
             cat jade-hwi-parity.log || true
             exit 1
@@ -269,10 +388,14 @@ jobs:
             cat jade-e2e.log || true
             exit 1
           }
-      - name: Jade logs
+      - name: Stop Jade services before upstream gate
+        run: |
+          bash nix/scripts/stop-emulator.sh jade.pid tcp localhost 30121 60
+          bash nix/scripts/stop-emulator.sh jade-pinserver.pid tcp localhost 8096 60
+      - name: Run upstream HWI Jade suite
+        run: timeout 120m nix run .#hwi-upstream-jade
+      - name: Stop Jade services
         if: always()
         run: |
-          cat jade-pinserver.log || true
-          cat jade.log || true
-          if [ -f jade.pid ]; then kill "$(cat jade.pid)" || true; fi
-          if [ -f jade-pinserver.pid ]; then kill "$(cat jade-pinserver.pid)" || true; fi
+          bash nix/scripts/stop-emulator.sh jade.pid tcp localhost 30121 60
+          bash nix/scripts/stop-emulator.sh jade-pinserver.pid tcp localhost 8096 60
