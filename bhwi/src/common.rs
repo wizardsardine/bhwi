@@ -1,12 +1,12 @@
 #[cfg(feature = "bitbox")]
 use crate::bitbox;
-use crate::miniscript::descriptor::WalletPolicy;
+use crate::miniscript::descriptor::{DescriptorPublicKey, WalletPolicy};
 use crate::{coldcard, jade, ledger};
 use bitcoin::Network;
 use bitcoin::address::AddressType;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::psbt::Psbt;
-use bitcoin::secp256k1::{PublicKey, ecdsa::Signature};
+use bitcoin::secp256k1::ecdsa::Signature;
 
 #[derive(Default)]
 pub struct UnlockOptions {
@@ -33,7 +33,8 @@ pub enum DisplayAddress {
 pub struct MultisigDisplayAddress {
     pub threshold: u8,
     pub address_type: MultisigAddressType,
-    pub keys: Vec<MultisigDisplayKey>,
+    pub sorted: bool,
+    pub keys: Vec<DescriptorPublicKey>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -41,13 +42,6 @@ pub enum MultisigAddressType {
     Legacy,
     ShWit,
     Wit,
-}
-
-#[derive(Clone, Debug)]
-pub struct MultisigDisplayKey {
-    pub fingerprint: Fingerprint,
-    pub path: DerivationPath,
-    pub public_key: PublicKey,
 }
 
 #[allow(clippy::large_enum_variant)]

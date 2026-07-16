@@ -2,8 +2,6 @@
 pub mod request {
     use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
 
-    use crate::common::MultisigDisplayKey;
-
     pub const MAX_UPLOAD_CHUNK_LEN: usize = 2048;
 
     pub fn start_encryption(version: Option<u32>, key: &[u8; 64]) -> Vec<u8> {
@@ -63,18 +61,18 @@ pub mod request {
 
     pub fn show_p2sh_address(
         threshold: u8,
-        keys: &[MultisigDisplayKey],
+        key_paths: &[(Fingerprint, DerivationPath)],
         redeem_script: &[u8],
         addr_fmt: u32,
     ) -> Vec<u8> {
         let mut data = b"p2sh".to_vec();
         data.extend(addr_fmt.to_le_bytes());
         data.push(threshold);
-        data.push(keys.len() as u8);
+        data.push(key_paths.len() as u8);
         data.extend((redeem_script.len() as u16).to_le_bytes());
         data.extend(redeem_script);
-        for key in keys {
-            let path = coldcard_xfp_path(key.fingerprint, &key.path);
+        for (fingerprint, derivation_path) in key_paths {
+            let path = coldcard_xfp_path(*fingerprint, derivation_path);
             data.push(path.len() as u8);
             for child in path {
                 data.extend(child.to_le_bytes());

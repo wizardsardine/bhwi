@@ -10,7 +10,7 @@ use std::{
 
 use bhwi::{
     bitcoin::psbt::Psbt,
-    common::{MultisigAddressType, MultisigDisplayAddress, MultisigDisplayKey},
+    common::{MultisigAddressType, MultisigDisplayAddress},
     ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
 };
 use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress};
@@ -263,6 +263,7 @@ pub struct HwiError {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HwiErrorCode {
     NoDeviceType,
+    UnknownDevice,
     BadArgument,
     UnsupportedCommand,
     DeviceFailure,
@@ -274,6 +275,7 @@ impl HwiErrorCode {
     fn code(self) -> i32 {
         match self {
             HwiErrorCode::NoDeviceType => -1,
+            HwiErrorCode::UnknownDevice => -4,
             HwiErrorCode::BadArgument => -7,
             HwiErrorCode::UnsupportedCommand => -9,
             HwiErrorCode::DeviceFailure => -13,
@@ -662,7 +664,13 @@ async fn backup_device(
         }
     }
 
-    match device.device().backup_device().await {
+    let approval =
+        coldcard_emulator_approval(coldcard_emulator_path(&device), ColdcardApproval::Backup);
+    let (backup, approval) = tokio::join!(device.device().backup_device(), approval);
+    if let Err(err) = approval {
+        return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceConnectionError, err));
+    }
+    match backup {
         Ok(DeviceBackup::Complete) => HwiResponse::Success(HwiSuccessResponse { success: true }),
         Ok(DeviceBackup::File(bytes)) => match write_hwi_backup_file(&bytes) {
             Ok(()) => HwiResponse::Success(HwiSuccessResponse { success: true }),
@@ -831,7 +839,16 @@ async fn sign_message(
     };
 
     let device_type = device.device_type();
-    match device.device().sign_message(message.as_bytes(), path).await {
+    let approval =
+        coldcard_emulator_approval(coldcard_emulator_path(&device), ColdcardApproval::Once);
+    let (signature, approval) = tokio::join!(
+        device.device().sign_message(message.as_bytes(), path),
+        approval
+    );
+    if let Err(err) = approval {
+        return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceConnectionError, err));
+    }
+    match signature {
         Ok((header, signature)) => HwiResponse::SignMessage(HwiSignMessageResponse {
             signature: message_signature_base64(
                 python_hwi_message_header(device_type, header),
@@ -894,7 +911,10 @@ async fn display_address(
             match singlesig_display_address_from_descriptor(&mut device, &descriptor).await {
                 Ok(address) => Ok(address),
                 Err(single_sig_error) => {
-                    if device.device_type() == DeviceType::Coldcard {
+                    if matches!(
+                        device.device_type(),
+                        DeviceType::Coldcard | DeviceType::Jade
+                    ) {
                         match multisig_display_address_from_descriptor(&descriptor) {
                             Ok(address) => Ok(DisplayAddress::ByMultisig(address)),
                             Err(_) => return HwiResponse::Error(single_sig_error),
@@ -912,10 +932,92 @@ async fn display_address(
         Err(error) => return HwiResponse::Error(error),
     };
 
-    match device.device().display_address(display, None).await {
+    let approval =
+        coldcard_emulator_approval(coldcard_emulator_path(&device), ColdcardApproval::Once);
+    let (address, approval) =
+        tokio::join!(device.device().display_address(display, None), approval);
+    if let Err(err) = approval {
+        return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceConnectionError, err));
+    }
+    match address {
         Ok(address) => HwiResponse::DisplayAddress(HwiDisplayAddressResponse { address }),
         Err(err) => display_address_error(err.to_string()),
     }
+}
+
+#[derive(Clone, Copy)]
+enum ColdcardApproval {
+    Once,
+    Backup,
+}
+
+fn coldcard_emulator_path(device: &Device) -> Option<String> {
+    (device.device_type() == DeviceType::Coldcard && device.is_emulated())
+        .then(|| device.path().to_string())
+}
+
+async fn coldcard_emulator_approval(
+    socket_path: Option<String>,
+    approval: ColdcardApproval,
+) -> Result<(), String> {
+    match socket_path {
+        Some(socket_path) => coldcard_emulator_keypresses(&socket_path, approval).await,
+        None => Ok(()),
+    }
+}
+
+#[cfg(unix)]
+async fn coldcard_emulator_keypresses(
+    socket_path: &str,
+    approval: ColdcardApproval,
+) -> Result<(), String> {
+    use tokio::net::UnixDatagram;
+
+    let client_path = format!(
+        "/tmp/bhwi-hwi-approval-{}-{}.sock",
+        std::process::id(),
+        generate_hwi_socket_id()
+    );
+    let _ = fs::remove_file(&client_path);
+    let socket = UnixDatagram::bind(&client_path).map_err(|err| err.to_string())?;
+    socket.connect(socket_path).map_err(|err| err.to_string())?;
+    send_coldcard_simulator_keypress(&socket, b'y').await?;
+    if matches!(approval, ColdcardApproval::Backup) {
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            send_coldcard_simulator_keypress(&socket, b'1').await?;
+        }
+    }
+    drop(socket);
+    let _ = fs::remove_file(client_path);
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn send_coldcard_simulator_keypress(
+    socket: &tokio::net::UnixDatagram,
+    key: u8,
+) -> Result<(), String> {
+    let mut packet = [0u8; 64];
+    packet[0] = 0x80 | 5;
+    packet[1..5].copy_from_slice(b"XKEY");
+    packet[5] = key;
+    socket.send(&packet).await.map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn coldcard_emulator_keypresses(
+    _socket_path: &str,
+    _approval: ColdcardApproval,
+) -> Result<(), String> {
+    Ok(())
+}
+
+fn generate_hwi_socket_id() -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 fn python_hwi_message_header(device_type: DeviceType, header: u8) -> u8 {
@@ -1225,11 +1327,14 @@ async fn ledger_multisig_context(
         return Ok(None);
     };
     let name = ledger_multisig_wallet_name(&policy);
-    let hmac = device
+    let registration = device
         .device()
         .register_wallet(&name, &policy)
         .await
         .map_err(|err| err.to_string())?;
+    let hmac = registration
+        .hmac()
+        .ok_or_else(|| "Ledger wallet registration returned no HMAC".to_string())?;
     let wallet_policy = WalletPolicy::from_str(&policy).map_err(|err| err.to_string())?;
     Ok(Some(DeviceContext::Ledger {
         wallet_policy: LedgerWalletPolicy::new(name, Version::V2, wallet_policy),
@@ -1649,32 +1754,13 @@ fn multisig_display_address_from_descriptor(
     descriptor: &str,
 ) -> Result<MultisigDisplayAddress, HwiError> {
     let descriptor = strip_descriptor_checksum(descriptor);
-    let (address_type, inner) = if let Some(inner) = descriptor
-        .strip_prefix("sh(wsh(sortedmulti(")
-        .and_then(|value| value.strip_suffix(")))"))
-    {
-        (MultisigAddressType::ShWit, inner)
-    } else if let Some(inner) = descriptor
-        .strip_prefix("wsh(sortedmulti(")
-        .and_then(|value| value.strip_suffix("))"))
-    {
-        (MultisigAddressType::Wit, inner)
-    } else if let Some(inner) = descriptor
-        .strip_prefix("sh(sortedmulti(")
-        .and_then(|value| value.strip_suffix("))"))
-    {
-        (MultisigAddressType::Legacy, inner)
-    } else if descriptor.contains("multi(") {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "Coldcards only allow sortedmulti descriptors",
-        ));
-    } else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Unsupported displayaddress descriptor: {descriptor}"),
-        ));
-    };
+    let (address_type, sorted, inner) =
+        parse_multisig_descriptor_envelope(descriptor).ok_or_else(|| {
+            HwiError::new(
+                HwiErrorCode::BadArgument,
+                format!("Unsupported displayaddress descriptor: {descriptor}"),
+            )
+        })?;
 
     let mut parts = inner.split(',');
     let threshold = parts
@@ -1687,8 +1773,11 @@ fn multisig_display_address_from_descriptor(
         })?
         .parse::<u8>()
         .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
-    let mut keys = parts
-        .map(parse_multisig_display_key)
+    let keys = parts
+        .map(|key| {
+            DescriptorPublicKey::from_str(key)
+                .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if keys.is_empty() || threshold == 0 || usize::from(threshold) > keys.len() {
         return Err(HwiError::new(
@@ -1696,37 +1785,43 @@ fn multisig_display_address_from_descriptor(
             "Either the redeem script provided is invalid or the keypaths provided are insufficient",
         ));
     }
-    keys.sort_by_key(|key| key.public_key.serialize());
-
     Ok(MultisigDisplayAddress {
         threshold,
         address_type,
+        sorted,
         keys,
     })
 }
 
-fn parse_multisig_display_key(key_expr: &str) -> Result<MultisigDisplayKey, HwiError> {
-    let Some(rest) = key_expr.strip_prefix('[') else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "Coldcard multisig display requires key origin information",
-        ));
-    };
-    let Some((origin, key_and_suffix)) = rest.split_once(']') else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "Coldcard multisig display requires key origin information",
-        ));
-    };
-    let (fingerprint, origin_path) = parse_key_origin(origin)?;
-    let (key, suffix_path) = split_key_suffix(key_and_suffix)?;
-    let public_key = SecpPublicKey::from_str(key)
-        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
-    Ok(MultisigDisplayKey {
-        fingerprint,
-        path: join_derivation_path(&origin_path, &suffix_path),
-        public_key,
-    })
+fn parse_multisig_descriptor_envelope(
+    descriptor: &str,
+) -> Option<(MultisigAddressType, bool, &str)> {
+    let wrappers = [
+        ("sh(wsh(", "))", MultisigAddressType::ShWit),
+        ("wsh(", ")", MultisigAddressType::Wit),
+        ("sh(", ")", MultisigAddressType::Legacy),
+    ];
+    for (prefix, suffix, address_type) in wrappers {
+        let Some(inner) = descriptor
+            .strip_prefix(prefix)
+            .and_then(|value| value.strip_suffix(suffix))
+        else {
+            continue;
+        };
+        if let Some(inner) = inner
+            .strip_prefix("sortedmulti(")
+            .and_then(|value| value.strip_suffix(')'))
+        {
+            return Some((address_type, true, inner));
+        }
+        if let Some(inner) = inner
+            .strip_prefix("multi(")
+            .and_then(|value| value.strip_suffix(')'))
+        {
+            return Some((address_type, false, inner));
+        }
+    }
+    None
 }
 
 fn strip_descriptor_checksum(descriptor: &str) -> &str {
@@ -1781,9 +1876,10 @@ fn display_address_error(error: String) -> HwiResponse {
     let code = if error.contains("unsupported display address")
         || error.contains("does not support displaying")
         || error.contains("does not support this path address format")
+        || error.contains("does not support this address format")
     {
         HwiErrorCode::UnsupportedCommand
-    } else if error.contains("Coldcard Error:") {
+    } else if error.contains("Coldcard Error:") || error.starts_with("invalid input:") {
         HwiErrorCode::BadArgument
     } else {
         HwiErrorCode::DeviceConnectionError
@@ -2017,10 +2113,28 @@ fn parse_device_type(value: &str) -> HwiResult<DeviceType> {
         "jade" => Ok(DeviceType::Jade),
         "ledger" => Ok(DeviceType::Ledger),
         _ => Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Unsupported device type: {value}"),
+            HwiErrorCode::UnknownDevice,
+            "Unknown device type specified",
         )),
     }
+}
+
+fn is_known_emulator_path(device_type: Option<DeviceType>, path: Option<&str>) -> bool {
+    matches!(
+        (device_type, path),
+        (
+            Some(DeviceType::BitBox02),
+            Some("127.0.0.1:15423" | "tcp:127.0.0.1:15423")
+        ) | (Some(DeviceType::Coldcard), Some("/tmp/ckcc-simulator.sock"))
+            | (
+                Some(DeviceType::Jade),
+                Some("127.0.0.1:30121" | "tcp:127.0.0.1:30121")
+            )
+            | (
+                Some(DeviceType::Ledger),
+                Some("127.0.0.1:9999" | "tcp:127.0.0.1:9999")
+            )
+    )
 }
 
 fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
@@ -2037,6 +2151,8 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         .as_deref()
         .map(parse_device_type)
         .transpose()?;
+    let include_emulators =
+        args.emulators || is_known_emulator_path(device_type, args.device_path.as_deref());
     let network = parse_chain(&args.chain)?;
     let command = match args.command {
         HwiCliCommand::Enumerate => HwiCommand::Enumerate,
@@ -2135,7 +2251,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             fingerprint: args.fingerprint,
             device_type,
             device_path: args.device_path,
-            include_emulators: args.emulators,
+            include_emulators,
         },
         command,
     })
@@ -2549,8 +2665,8 @@ mod tests {
         let error = parse_args(["hwi", "--device-type", "trezor", "enumerate"])
             .expect_err("unsupported device type");
 
-        assert_eq!(error.code, HwiErrorCode::BadArgument.code());
-        assert!(error.error.contains("Unsupported device type"));
+        assert_eq!(error.code, HwiErrorCode::UnknownDevice.code());
+        assert_eq!(error.error, "Unknown device type specified");
     }
 
     #[test]
@@ -2830,6 +2946,17 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_bitbox_address_format_uses_hwi_unsupported_code() {
+        let response = display_address_error(
+            "invalid input: BitBox does not support this address format".into(),
+        );
+        let HwiResponse::Error(error) = response else {
+            panic!("expected HWI error");
+        };
+        assert_eq!(error.code, HwiErrorCode::UnsupportedCommand.code());
+    }
+
+    #[test]
     fn getdescriptors_serializes_receive_and_internal() {
         let json = serde_json::to_value(HwiResponse::GetDescriptors(HwiGetDescriptorsResponse {
             receive: vec!["wpkh(...)#receive".to_owned()],
@@ -2999,14 +3126,22 @@ mod tests {
 
         assert_eq!(parsed.threshold, 2);
         assert!(matches!(parsed.address_type, MultisigAddressType::ShWit));
+        assert!(parsed.sorted);
         assert_eq!(parsed.keys.len(), 2);
+        let origins = parsed
+            .keys
+            .iter()
+            .map(|key| match key {
+                DescriptorPublicKey::Single(key) => key.origin.clone().unwrap().1,
+                _ => panic!("expected concrete public key"),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            parsed.keys[0].path,
-            DerivationPath::from_str("m/48h/1h/0h/0h/0").unwrap()
-        );
-        assert_eq!(
-            parsed.keys[1].path,
-            DerivationPath::from_str("m/48h/1h/1h/0h/0").unwrap()
+            origins,
+            vec![
+                DerivationPath::from_str("m/48h/1h/0h/0h/0").unwrap(),
+                DerivationPath::from_str("m/48h/1h/1h/0h/0").unwrap(),
+            ]
         );
     }
 

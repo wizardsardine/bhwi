@@ -3,15 +3,12 @@ pub mod encrypt;
 
 use std::string::FromUtf8Error;
 
+use bitcoin::PublicKey;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::blockdata::{opcodes::all::OP_CHECKMULTISIG, script::Builder};
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::psbt::Psbt;
-use bitcoin::secp256k1::ecdsa::Signature;
-use miniscript::{
-    Descriptor, Miniscript, ScriptContext, Terminal,
-    descriptor::{DescriptorPublicKey, ShInner, WalletPolicy, Wildcard},
-};
+use bitcoin::secp256k1::{Secp256k1, ecdsa::Signature};
 
 use crate::Interpreter;
 use crate::coldcard::api::response::ResponseMessage;
@@ -20,6 +17,10 @@ use crate::common::{
     MultisigDisplayAddress, Recipient, Response, Transmit,
 };
 use crate::device::DeviceId;
+use crate::miniscript::{
+    Descriptor, Miniscript, ScriptContext, Terminal,
+    descriptor::{DescriptorPublicKey, ShInner, SinglePubKey, WalletPolicy, Wildcard},
+};
 
 pub const DEFAULT_CKCC_SOCKET: &str = "/tmp/ckcc-simulator.sock";
 pub const COLDCARD_DEVICE_ID: DeviceId = DeviceId::new(0xd13e)
@@ -83,7 +84,7 @@ pub enum ColdcardCommand {
         addr_fmt: u32,
     },
     ShowP2shAddress {
-        address: MultisigDisplayAddress,
+        address: ColdcardMultisigDisplayAddress,
     },
     MiniscriptAddress {
         name: String,
@@ -96,6 +97,18 @@ pub enum ColdcardCommand {
     RegisterWallet {
         payload: Vec<u8>,
     },
+}
+
+pub struct ColdcardMultisigDisplayAddress {
+    threshold: u8,
+    address_type: MultisigAddressType,
+    keys: Vec<ColdcardMultisigDisplayKey>,
+}
+
+struct ColdcardMultisigDisplayKey {
+    fingerprint: Fingerprint,
+    path: DerivationPath,
+    public_key: PublicKey,
 }
 
 pub enum ColdcardResponse {
@@ -252,7 +265,11 @@ where
             ColdcardCommand::ShowP2shAddress { address } => request(
                 api::request::show_p2sh_address(
                     address.threshold,
-                    &address.keys,
+                    &address
+                        .keys
+                        .iter()
+                        .map(|key| (key.fingerprint, key.path.clone()))
+                        .collect::<Vec<_>>(),
                     &multisig_redeem_script(address)?,
                     multisig_addr_fmt(address.address_type),
                 ),
@@ -591,7 +608,9 @@ impl TryFrom<Command> for ColdcardCommand {
                 index,
             }),
             Command::DisplayAddress(DisplayAddress::ByMultisig(address), ..) => {
-                Ok(Self::ShowP2shAddress { address })
+                Ok(Self::ShowP2shAddress {
+                    address: coldcard_multisig_display_address(address)?,
+                })
             }
             Command::RegisterWallet { name, policy } => Ok(Self::RegisterWallet {
                 payload: coldcard_registration_payload(&name, &policy)?,
@@ -724,10 +743,76 @@ fn multisig_addr_fmt(address_type: MultisigAddressType) -> u32 {
     }
 }
 
-fn multisig_redeem_script(address: &MultisigDisplayAddress) -> Result<Vec<u8>, ColdcardError> {
+fn coldcard_multisig_display_address(
+    address: MultisigDisplayAddress,
+) -> Result<ColdcardMultisigDisplayAddress, ColdcardError> {
+    if !address.sorted {
+        return Err(ColdcardError::Device(
+            "Coldcards only allow sortedmulti descriptors".to_string(),
+        ));
+    }
+    let secp = Secp256k1::verification_only();
+    let mut keys = address
+        .keys
+        .into_iter()
+        .map(|key| match key {
+            DescriptorPublicKey::Single(single) => {
+                let (fingerprint, path) = single.origin.ok_or_else(|| {
+                    ColdcardError::Serialization(
+                        "Coldcard multisig display requires key origin information".to_string(),
+                    )
+                })?;
+                let SinglePubKey::FullKey(public_key) = single.key else {
+                    return Err(ColdcardError::Serialization(
+                        "Coldcard multisig display requires full public keys".to_string(),
+                    ));
+                };
+                Ok(ColdcardMultisigDisplayKey {
+                    fingerprint,
+                    path,
+                    public_key,
+                })
+            }
+            DescriptorPublicKey::XPub(xpub) => {
+                if xpub.wildcard != Wildcard::None {
+                    return Err(ColdcardError::Serialization(
+                        "Coldcard multisig display requires a concrete derivation path".to_string(),
+                    ));
+                }
+                let (fingerprint, origin_path) = xpub.origin.ok_or_else(|| {
+                    ColdcardError::Serialization(
+                        "Coldcard multisig display requires key origin information".to_string(),
+                    )
+                })?;
+                let derived = xpub
+                    .xkey
+                    .derive_pub(&secp, &xpub.derivation_path)
+                    .map_err(|err| ColdcardError::Serialization(err.to_string()))?;
+                Ok(ColdcardMultisigDisplayKey {
+                    fingerprint,
+                    path: origin_path.extend(&xpub.derivation_path),
+                    public_key: PublicKey::new(derived.public_key),
+                })
+            }
+            DescriptorPublicKey::MultiXPub(_) => Err(ColdcardError::Serialization(
+                "Coldcard multisig display does not support multipath keys".to_string(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    keys.sort_by_key(|key| key.public_key.inner.serialize());
+    Ok(ColdcardMultisigDisplayAddress {
+        threshold: address.threshold,
+        address_type: address.address_type,
+        keys,
+    })
+}
+
+fn multisig_redeem_script(
+    address: &ColdcardMultisigDisplayAddress,
+) -> Result<Vec<u8>, ColdcardError> {
     let mut builder = Builder::new().push_int(i64::from(address.threshold));
     for key in &address.keys {
-        builder = builder.push_slice(key.public_key.serialize());
+        builder = builder.push_key(&key.public_key);
     }
     let signer_count = i64::try_from(address.keys.len()).map_err(|_| {
         ColdcardError::Serialization("too many multisig keys for Coldcard".to_string())
