@@ -16,7 +16,35 @@ commands and devices where parity is claimed.
 - The suite asserts parity for the implemented HWI command set with the
   intended emulator family active.
 - Emulator CI (`.github/workflows/emulators.yml`) runs the matching
-  `hwi-parity-<device>` app inside each device job.
+  `hwi-parity-<device>` app inside each device job, then stops the shared
+  emulator and runs the pinned upstream HWI suite as that job's final test
+  gate.
+
+## Final acceptance gate
+
+Parity is accepted only when the unmodified Bitcoin Core HWI 3.2.0 device
+suite passes against BHWI's CLI adapter. The flake exposes a tailored app for
+each supported emulator:
+
+```sh
+nix run .#hwi-upstream-bitbox
+nix run .#hwi-upstream-coldcard
+nix run .#hwi-upstream-ledger
+nix run .#hwi-upstream-jade
+```
+
+Each app builds `target/debug/hwi`, prepares the pinned simulator in the layout
+expected by upstream HWI, and runs `test/run_tests.py --device-only
+--interface=cli`. The upstream source and tests are copied only to a temporary
+writable directory; BHWI does not patch test cases or add project-owned skips.
+Only skips already authored by upstream HWI are accepted. Coldcard's final
+gate does apply HWI's own `test/data/coldcard-multisig.patch` to a separate
+simulator build; that compatibility patch changes the emulator firmware, not
+the upstream test suite.
+
+The generic dispatcher remains available as `nix run .#hwi-upstream-suite --
+<device>`. CI gives the final gates bounded runtimes of 45 minutes for
+BitBox02, 90 minutes for Coldcard and Ledger, and 120 minutes for Jade.
 
 ### Why the reference side works for the wired devices
 
@@ -39,12 +67,12 @@ mirrors each with its own `--emulators` enumerate.
 
 ## Support matrix
 
-| Device    | HWI parity | Notes |
-|-----------|------------|-------|
-| Ledger    | Wired      | `hwi-parity-ledger`, in Emulator CI. |
-| Coldcard  | Wired      | `hwi-parity-coldcard`, in Emulator CI, including file-producing `backup`. |
-| Jade      | Wired      | `hwi-parity-jade`, in Emulator CI. |
-| BitBox02  | Wired      | `hwi-parity-bitbox`, in Emulator CI. |
+| Device    | Differential parity | Upstream final gate |
+|-----------|---------------------|---------------------|
+| Ledger    | `hwi-parity-ledger` | `hwi-upstream-ledger` |
+| Coldcard  | `hwi-parity-coldcard`, including file-producing `backup` | `hwi-upstream-coldcard` |
+| Jade      | `hwi-parity-jade` | `hwi-upstream-jade` |
+| BitBox02  | `hwi-parity-bitbox` | `hwi-upstream-bitbox` |
 
 ## BitBox02 parity notes
 
