@@ -138,7 +138,12 @@ async fn register(
         include_str!("../automations/register_wallet_accept.json"),
     )
     .await;
-    let hmac = dev.register_wallet(name, policy).await.unwrap();
+    let hmac = dev
+        .register_wallet(name, policy)
+        .await
+        .unwrap()
+        .hmac()
+        .expect("ledger registration must return an HMAC");
     assert_eq!(hmac.len(), 32);
     DeviceContext::Ledger {
         wallet_policy: LedgerWalletPolicy::new(

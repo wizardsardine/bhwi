@@ -814,7 +814,11 @@ impl From<LedgerResponse> for Response {
             LedgerResponse::Xpub(xpub) => Response::Xpub(xpub),
             LedgerResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
             LedgerResponse::Address(address) => Response::Address(address),
-            LedgerResponse::WalletHmac(hmac) => Response::WalletHmac(hmac),
+            LedgerResponse::WalletHmac(hmac) => {
+                Response::WalletRegistration(crate::common::WalletRegistration::Complete {
+                    hmac: Some(hmac),
+                })
+            }
             LedgerResponse::SignedPsbt(psbt) => Response::SignedPsbt(psbt),
         }
     }

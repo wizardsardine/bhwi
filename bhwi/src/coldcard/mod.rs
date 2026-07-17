@@ -7,6 +7,10 @@ use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::Signature;
+use miniscript::{
+    Descriptor, Miniscript, ScriptContext, Terminal,
+    descriptor::{DescriptorPublicKey, ShInner, WalletPolicy, Wildcard},
+};
 
 use crate::Interpreter;
 use crate::coldcard::api::response::ResponseMessage;
@@ -35,6 +39,9 @@ pub enum ColdcardError {
     /// Serialization error
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 
     /// Unexpected response message from device
     #[error("unexpected response message: got {got:?}, expected {expected:?}")]
@@ -78,6 +85,9 @@ pub enum ColdcardCommand {
     SignPsbt {
         psbt: Psbt,
     },
+    RegisterWallet {
+        payload: Vec<u8>,
+    },
 }
 
 pub enum ColdcardResponse {
@@ -98,6 +108,7 @@ pub enum ColdcardResponse {
     Address(String),
     Backup(Vec<u8>),
     SignedPsbt(Psbt),
+    WalletRegistrationPending,
 }
 
 pub struct ColdcardTransmit {
@@ -108,15 +119,18 @@ pub struct ColdcardTransmit {
 enum State {
     New,
     Running(ColdcardCommand),
-    UploadingPsbt {
+    UploadingFile {
         bytes: Vec<u8>,
         offset: usize,
+        action: UploadAction,
     },
-    VerifyingPsbtUpload {
+    VerifyingFileUpload {
         length: usize,
         expected_sha: [u8; 32],
+        action: UploadAction,
     },
     SigningPsbt,
+    EnrollingWallet,
     PollingSignedPsbt,
     PollingBackupFile,
     DownloadingFile {
@@ -128,6 +142,12 @@ enum State {
         total_len: usize,
     },
     Finished(ColdcardResponse),
+}
+
+#[derive(Clone, Copy)]
+enum UploadAction {
+    SignPsbt,
+    RegisterWallet,
 }
 
 enum FileDownloadResponse {
@@ -161,12 +181,12 @@ fn request(
     })
 }
 
-fn psbt_upload_request(bytes: &[u8], offset: usize) -> Result<Vec<u8>, ColdcardError> {
+fn file_upload_request(bytes: &[u8], offset: usize) -> Result<Vec<u8>, ColdcardError> {
     let end = (offset + api::request::MAX_UPLOAD_CHUNK_LEN).min(bytes.len());
     let offset = u32::try_from(offset)
         .map_err(|_| ColdcardError::Serialization("upload offset too large".to_string()))?;
     let total = u32::try_from(bytes.len())
-        .map_err(|_| ColdcardError::Serialization("psbt too large".to_string()))?;
+        .map_err(|_| ColdcardError::Serialization("upload too large".to_string()))?;
     Ok(api::request::upload(
         offset,
         total,
@@ -231,8 +251,22 @@ where
             )?,
             ColdcardCommand::SignPsbt { psbt } => {
                 let bytes = psbt.serialize();
-                let req = request(psbt_upload_request(&bytes, 0)?, self.encryption)?;
-                self.state = State::UploadingPsbt { bytes, offset: 0 };
+                let req = request(file_upload_request(&bytes, 0)?, self.encryption)?;
+                self.state = State::UploadingFile {
+                    bytes,
+                    offset: 0,
+                    action: UploadAction::SignPsbt,
+                };
+                return Ok(req.into());
+            }
+            ColdcardCommand::RegisterWallet { payload } => {
+                let bytes = payload.clone();
+                let req = request(file_upload_request(&bytes, 0)?, self.encryption)?;
+                self.state = State::UploadingFile {
+                    bytes,
+                    offset: 0,
+                    action: UploadAction::RegisterWallet,
+                };
                 return Ok(req.into());
             }
         };
@@ -296,7 +330,14 @@ where
                 Ok(None)
             }
             State::Running(ColdcardCommand::SignPsbt { .. }) => unreachable!("handled in start"),
-            State::UploadingPsbt { bytes, offset } => {
+            State::Running(ColdcardCommand::RegisterWallet { .. }) => {
+                unreachable!("handled in start")
+            }
+            State::UploadingFile {
+                bytes,
+                offset,
+                action,
+            } => {
                 let data = self.encryption.decrypt(data)?;
                 let acknowledged = api::response::upload(&data)? as usize;
                 if acknowledged != *offset {
@@ -308,24 +349,26 @@ where
 
                 let next_offset = (*offset + api::request::MAX_UPLOAD_CHUNK_LEN).min(bytes.len());
                 if next_offset < bytes.len() {
-                    let req = request(psbt_upload_request(bytes, next_offset)?, self.encryption)?;
+                    let req = request(file_upload_request(bytes, next_offset)?, self.encryption)?;
                     *offset = next_offset;
                     return Ok(Some(req.into()));
                 }
 
                 let length = bytes.len();
                 let expected_sha = sha256::Hash::hash(bytes).to_byte_array();
-                self.state = State::VerifyingPsbtUpload {
+                self.state = State::VerifyingFileUpload {
                     length,
                     expected_sha,
+                    action: *action,
                 };
                 Ok(Some(
                     request(api::request::sha256(), self.encryption)?.into(),
                 ))
             }
-            State::VerifyingPsbtUpload {
+            State::VerifyingFileUpload {
                 length,
                 expected_sha,
+                action,
             } => {
                 let data = self.encryption.decrypt(data)?;
                 let length = *length;
@@ -339,15 +382,18 @@ where
                 }
 
                 let length = u32::try_from(length)
-                    .map_err(|_| ColdcardError::Serialization("psbt too large".to_string()))?;
-                self.state = State::SigningPsbt;
-                Ok(Some(
-                    request(
-                        api::request::sign_transaction(length, &expected_sha),
-                        self.encryption,
-                    )?
-                    .into(),
-                ))
+                    .map_err(|_| ColdcardError::Serialization("upload too large".to_string()))?;
+                let request_payload = match action {
+                    UploadAction::SignPsbt => {
+                        self.state = State::SigningPsbt;
+                        api::request::sign_transaction(length, &expected_sha)
+                    }
+                    UploadAction::RegisterWallet => {
+                        self.state = State::EnrollingWallet;
+                        api::request::multisig_enroll(length, &expected_sha)
+                    }
+                };
+                Ok(Some(request(request_payload, self.encryption)?.into()))
             }
             State::SigningPsbt => {
                 let data = self.encryption.decrypt(data)?;
@@ -358,6 +404,12 @@ where
                         request(api::request::get_signed_transaction(), self.encryption)?.into(),
                     ));
                 }
+                Ok(None)
+            }
+            State::EnrollingWallet => {
+                let data = self.encryption.decrypt(data)?;
+                api::response::okay(&data)?;
+                self.state = State::Finished(ColdcardResponse::WalletRegistrationPending);
                 Ok(None)
             }
             State::PollingSignedPsbt => {
@@ -516,9 +568,9 @@ impl TryFrom<Command> for ColdcardCommand {
                 change,
                 index,
             }),
-            Command::RegisterWallet { .. } => Err(ColdcardError::MissingCommandInfo(
-                "RegisterWallet not supported by Coldcard",
-            )),
+            Command::RegisterWallet { name, policy } => Ok(Self::RegisterWallet {
+                payload: coldcard_registration_payload(&name, &policy)?,
+            }),
             Command::SignTx(psbt, context) => {
                 if context.is_some() {
                     return Err(ColdcardError::MissingCommandInfo(
@@ -528,6 +580,114 @@ impl TryFrom<Command> for ColdcardCommand {
                 Ok(Self::SignPsbt { psbt })
             }
         }
+    }
+}
+
+fn coldcard_registration_payload(
+    name: &str,
+    policy: &WalletPolicy,
+) -> Result<Vec<u8>, ColdcardError> {
+    if !(2..=20).contains(&name.len())
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+    {
+        return Err(ColdcardError::InvalidInput(
+            "Coldcard wallet names must be 2 to 20 printable ASCII characters".to_string(),
+        ));
+    }
+
+    let descriptor = policy
+        .clone()
+        .into_descriptor()
+        .map_err(|error| ColdcardError::InvalidInput(error.to_string()))?;
+    let (threshold, signer_count) = coldcard_sortedmulti_size(&descriptor).ok_or_else(|| {
+        ColdcardError::InvalidInput(
+            "Coldcard registration supports only sh(sortedmulti), wsh(sortedmulti), and sh(wsh(sortedmulti)) descriptors"
+                .to_string(),
+        )
+    })?;
+    if threshold == 0 || threshold > signer_count || signer_count > 15 {
+        return Err(ColdcardError::InvalidInput(
+            "Coldcard multisig policies require 1 to 15 signers and a valid threshold".to_string(),
+        ));
+    }
+    for key in descriptor.iter_pk() {
+        validate_coldcard_registration_key(&key)?;
+    }
+
+    let descriptor = format!("{descriptor:#}");
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "name": name,
+        "desc": descriptor,
+    }))
+    .map_err(|error| ColdcardError::Serialization(error.to_string()))?;
+    if !(101..=4000).contains(&payload.len()) {
+        return Err(ColdcardError::InvalidInput(
+            "Coldcard multisig registration payload must be 101 to 4000 bytes".to_string(),
+        ));
+    }
+    Ok(payload)
+}
+
+fn coldcard_sortedmulti_size(
+    descriptor: &Descriptor<DescriptorPublicKey>,
+) -> Option<(usize, usize)> {
+    match descriptor {
+        Descriptor::Sh(sh) => match sh.as_inner() {
+            ShInner::Ms(miniscript) => sortedmulti_size(miniscript),
+            ShInner::Wsh(wsh) => sortedmulti_size(wsh.as_inner()),
+            ShInner::Wpkh(_) => None,
+        },
+        Descriptor::Wsh(wsh) => sortedmulti_size(wsh.as_inner()),
+        _ => None,
+    }
+}
+
+fn sortedmulti_size<Ctx: ScriptContext>(
+    miniscript: &Miniscript<DescriptorPublicKey, Ctx>,
+) -> Option<(usize, usize)> {
+    match &miniscript.node {
+        Terminal::SortedMulti(threshold) => Some((threshold.k(), threshold.n())),
+        _ => None,
+    }
+}
+
+fn validate_coldcard_registration_key(key: &DescriptorPublicKey) -> Result<(), ColdcardError> {
+    let normal = |index| bitcoin::bip32::ChildNumber::from_normal_idx(index).expect("small index");
+    let valid_single_path = |path: &DerivationPath| path.as_ref() == [normal(0)];
+    let valid_multi_paths = |paths: &[DerivationPath]| {
+        if paths.len() != 2 || paths.iter().any(|path| path.as_ref().len() != 1) {
+            return false;
+        }
+        let mut branches = paths
+            .iter()
+            .map(|path| path.as_ref()[0])
+            .collect::<Vec<_>>();
+        branches.sort_unstable();
+        branches == [normal(0), normal(1)]
+    };
+
+    let valid = match key {
+        DescriptorPublicKey::XPub(key) => {
+            key.origin.is_some()
+                && key.wildcard == Wildcard::Unhardened
+                && valid_single_path(&key.derivation_path)
+        }
+        DescriptorPublicKey::MultiXPub(key) => {
+            key.origin.is_some()
+                && key.wildcard == Wildcard::Unhardened
+                && valid_multi_paths(key.derivation_paths.paths())
+        }
+        DescriptorPublicKey::Single(_) => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ColdcardError::InvalidInput(
+            "Coldcard multisig keys require origins, extended public keys, and /0/* or /<0;1>/* derivation"
+                .to_string(),
+        ))
     }
 }
 
@@ -555,6 +715,9 @@ impl From<ColdcardResponse> for Response {
             ColdcardResponse::Address(address) => Response::Address(address),
             ColdcardResponse::Backup(bytes) => Response::Backup(DeviceBackup::File(bytes)),
             ColdcardResponse::SignedPsbt(psbt) => Response::SignedPsbt(psbt),
+            ColdcardResponse::WalletRegistrationPending => Response::WalletRegistration(
+                crate::common::WalletRegistration::PendingUserConfirmation,
+            ),
         }
     }
 }
@@ -576,6 +739,7 @@ impl From<ColdcardError> for Error {
             ColdcardError::MissingCommandInfo(e) => Error::MissingCommandInfo(e),
             ColdcardError::NoErrorOrResult => Error::NoErrorOrResult,
             ColdcardError::Serialization(s) => Error::Serialization(s),
+            ColdcardError::InvalidInput(s) => Error::InvalidInput(s),
             ColdcardError::UnexpectedResponseMessage { got, expected } => Error::unexpected_result(
                 format!("{got:?}").into_bytes(),
                 format!("coldcard unexpected response: expected {expected:?}, got {got:?}"),
@@ -592,9 +756,13 @@ impl From<FromUtf8Error> for ColdcardError {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use bitcoin::hashes::{Hash, sha256};
 
     use super::*;
+
+    const REGISTRATION_POLICY: &str = "wsh(sortedmulti(2,[f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*,[00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<0;1>/*))";
 
     fn paired_engines() -> (encrypt::Engine, encrypt::Engine) {
         let mut host = encrypt::Engine::New(k256::SecretKey::from_slice(&[1u8; 32]).unwrap());
@@ -667,5 +835,95 @@ mod tests {
             Response::Backup(DeviceBackup::File(bytes)) => assert_eq!(bytes, backup),
             _ => panic!("expected backup response"),
         }
+    }
+
+    #[test]
+    fn registration_payload_contains_name_and_full_descriptor() {
+        let policy = WalletPolicy::from_str(REGISTRATION_POLICY).unwrap();
+        let payload = coldcard_registration_payload("cold-wallet", &policy).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["name"], "cold-wallet");
+        assert_eq!(payload["desc"], REGISTRATION_POLICY);
+    }
+
+    #[test]
+    fn registration_rejects_unsupported_policy_and_name() {
+        let singlesig = WalletPolicy::from_str(
+            "wpkh([f5acc2fd/84'/1'/0']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*)",
+        )
+        .unwrap();
+        let error = coldcard_registration_payload("cold-wallet", &singlesig).unwrap_err();
+        assert!(error.to_string().contains("supports only"));
+
+        let policy = WalletPolicy::from_str(REGISTRATION_POLICY).unwrap();
+        let error = coldcard_registration_payload("x", &policy).unwrap_err();
+        assert!(error.to_string().contains("2 to 20"));
+    }
+
+    #[test]
+    fn registration_rejects_keys_without_origins() {
+        let policy = WalletPolicy::from_str(
+            "wsh(sortedmulti(2,tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*,tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<0;1>/*))",
+        )
+        .unwrap();
+        let error = coldcard_registration_payload("cold-wallet", &policy).unwrap_err();
+        assert!(error.to_string().contains("require origins"));
+    }
+
+    #[test]
+    fn register_wallet_uploads_verifies_and_starts_enrollment() {
+        let (mut host, mut device) = paired_engines();
+        let policy = WalletPolicy::from_str(REGISTRATION_POLICY).unwrap();
+        let mut interpreter: ColdcardInterpreter<'_, Command, Transmit, Response, Error> =
+            ColdcardInterpreter::new(&mut host);
+
+        let request = interpreter
+            .start(Command::RegisterWallet {
+                name: "cold-wallet".to_string(),
+                policy,
+            })
+            .unwrap();
+        let upload = decrypt_request(&mut device, request);
+        assert_eq!(&upload[..4], b"upld");
+        assert_eq!(u32::from_le_bytes(upload[4..8].try_into().unwrap()), 0);
+        let total_len = u32::from_le_bytes(upload[8..12].try_into().unwrap()) as usize;
+        let uploaded = &upload[12..];
+        assert_eq!(uploaded.len(), total_len);
+
+        let mut acknowledged = b"int1".to_vec();
+        acknowledged.extend(0u32.to_le_bytes());
+        let request = interpreter
+            .exchange(encrypt_response(&mut device, &acknowledged))
+            .unwrap()
+            .expect("sha request");
+        assert_eq!(decrypt_request(&mut device, request), b"sha2");
+
+        let upload_sha = sha256::Hash::hash(uploaded).to_byte_array();
+        let mut sha_response = b"biny".to_vec();
+        sha_response.extend(upload_sha);
+        let request = interpreter
+            .exchange(encrypt_response(&mut device, &sha_response))
+            .unwrap()
+            .expect("enrollment request");
+        let enroll = decrypt_request(&mut device, request);
+        assert_eq!(&enroll[..4], b"enrl");
+        assert_eq!(
+            u32::from_le_bytes(enroll[4..8].try_into().unwrap()),
+            total_len as u32
+        );
+        assert_eq!(&enroll[8..], &upload_sha);
+
+        assert!(
+            interpreter
+                .exchange(encrypt_response(&mut device, b"okay"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            interpreter.end().unwrap(),
+            Response::WalletRegistration(
+                crate::common::WalletRegistration::PendingUserConfirmation
+            )
+        ));
     }
 }

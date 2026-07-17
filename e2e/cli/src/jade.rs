@@ -1,4 +1,11 @@
 use anyhow::Result;
+use bitcoin::{
+    Address, Network, PublicKey,
+    bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
+    blockdata::{opcodes, script::Builder},
+    secp256k1::Secp256k1,
+};
+use std::str::FromStr;
 
 use crate::support::{Cli, CommandCase, ExpectedOutput, assert_command};
 
@@ -92,6 +99,61 @@ fn jade_keypool_get() -> Result<()> {
             internal: false,
         },
     })
+}
+
+#[test]
+fn jade_register_wallet_and_descriptor_address() -> Result<()> {
+    let cli = Cli::for_device(JADE_FINGERPRINT);
+    let account_path: DerivationPath = "m/48'/1'/0'/2'".parse()?;
+    let device_xpub = Xpub::from_str(cli.run_ok(["xpub", "get", "m/48'/1'/0'/2'"])?.trim())?;
+    let secp = Secp256k1::new();
+    let cosigner_master = Xpriv::new_master(Network::Testnet, &[7u8; 32])?;
+    let cosigner_fingerprint = cosigner_master.fingerprint(&secp);
+    let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path)?;
+    let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
+    let descriptor = format!(
+        "wsh(sortedmulti(2,[{JADE_FINGERPRINT}/{account_path}]{device_xpub}/<0;1>/*,[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/<0;1>/*))"
+    );
+
+    let output = cli.run_ok([
+        "register-wallet",
+        "--name",
+        "jade-cli",
+        "--descriptor",
+        &descriptor,
+    ])?;
+    assert!(output.is_empty());
+
+    let address = cli.run_ok(["address", "get", "--from-descriptor", "jade-cli"])?;
+    assert_eq!(
+        address.trim(),
+        multisig_address(&secp, device_xpub, cosigner_xpub)
+    );
+    Ok(())
+}
+
+fn multisig_address(
+    secp: &Secp256k1<bitcoin::secp256k1::All>,
+    first: Xpub,
+    second: Xpub,
+) -> String {
+    let path = DerivationPath::from(vec![
+        ChildNumber::from_normal_idx(0).unwrap(),
+        ChildNumber::from_normal_idx(0).unwrap(),
+    ]);
+    let mut keys = [
+        first.derive_pub(secp, &path).unwrap().public_key,
+        second.derive_pub(secp, &path).unwrap().public_key,
+    ];
+    keys.sort_by_key(|key| key.serialize());
+    let script = Builder::new()
+        .push_int(2)
+        .push_key(&PublicKey::new(keys[0]))
+        .push_key(&PublicKey::new(keys[1]))
+        .push_int(2)
+        .push_opcode(opcodes::all::OP_CHECKMULTISIG)
+        .into_script();
+    Address::p2wsh(&script, Network::Testnet).to_string()
 }
 
 #[test]

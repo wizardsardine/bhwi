@@ -151,7 +151,7 @@
             name = "bhwi-website";
             src = ./website;
             nodejs = nodejs_20;
-            npmDepsHash = "sha256-N2Uxh6567ry8CSZyBWWIg8yDJEqQXFtToKi4hVBr8Hk=";
+            npmDepsHash = "sha256-B+hl2uXdXBV9N99+RDSRzwO4xvpr8l+l2RU7MO2OyWA=";
             postPatch = ''
               cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} pkg
             '';

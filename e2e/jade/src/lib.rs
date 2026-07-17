@@ -2,14 +2,15 @@
 mod tests {
     use base64ct::{Base64, Encoding};
     use bhwi_async::transport::jade::tcp::TcpTransport;
-    use bhwi_async::{DisplayAddress, HWI};
+    use bhwi_async::{DisplayAddress, HWI, WalletRegistration};
     use bhwi_cli::jade::{JadeQemuDevice, PinServerClient, TcpClient};
     use bitcoin::{
         Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
         Witness,
         absolute::LockTime,
         address::{Address, AddressType},
-        bip32::{ChildNumber, DerivationPath},
+        bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
+        blockdata::{opcodes, script::Builder},
         psbt::{Input, Psbt},
         secp256k1::Secp256k1,
         transaction::Version as TxVersion,
@@ -114,6 +115,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(address, "2MsFo9x4kZMVumePtLZvjh9Hn9A98bS3MF6");
+    }
+
+    #[tokio::test]
+    async fn can_register_and_display_descriptor_address() {
+        let mut dev = device().await;
+        let secp = Secp256k1::new();
+        let account_path: DerivationPath = "m/48'/1'/0'/2'".parse().unwrap();
+        let device_fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let device_xpub = dev
+            .get_extended_pubkey(account_path.clone(), false)
+            .await
+            .unwrap();
+        let cosigner_master = Xpriv::new_master(Network::Testnet, &[7u8; 32]).unwrap();
+        let cosigner_fingerprint = cosigner_master.fingerprint(&secp);
+        let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path).unwrap();
+        let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
+        let policy = format!(
+            "wsh(sortedmulti(2,[{device_fingerprint}/{account_path}]{device_xpub}/<0;1>/*,[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/<0;1>/*))"
+        );
+
+        let registration = dev
+            .register_wallet("jade-e2e", &policy)
+            .await
+            .expect("register Jade descriptor");
+        assert_eq!(registration, WalletRegistration::Complete { hmac: None });
+
+        let address = dev
+            .display_address(
+                DisplayAddress::ByDescriptor {
+                    index: 0,
+                    change: false,
+                    display: true,
+                    descriptor_name: "jade-e2e".to_string(),
+                },
+                None,
+            )
+            .await
+            .expect("display registered Jade descriptor address");
+        assert_eq!(
+            address,
+            multisig_address(&secp, device_xpub, cosigner_xpub, 0, 0)
+        );
+    }
+
+    fn multisig_address(
+        secp: &Secp256k1<bitcoin::secp256k1::All>,
+        first: Xpub,
+        second: Xpub,
+        branch: u32,
+        index: u32,
+    ) -> String {
+        let path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(branch).unwrap(),
+            ChildNumber::from_normal_idx(index).unwrap(),
+        ]);
+        let mut keys = [
+            first.derive_pub(secp, &path).unwrap().public_key,
+            second.derive_pub(secp, &path).unwrap().public_key,
+        ];
+        keys.sort_by_key(|key| key.serialize());
+        let script = Builder::new()
+            .push_int(2)
+            .push_key(&PublicKey::new(keys[0]))
+            .push_key(&PublicKey::new(keys[1]))
+            .push_int(2)
+            .push_opcode(opcodes::all::OP_CHECKMULTISIG)
+            .into_script();
+        Address::p2wsh(&script, Network::Testnet).to_string()
     }
 
     #[tokio::test]
