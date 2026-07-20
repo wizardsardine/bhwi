@@ -512,26 +512,35 @@
         hwiParityColdcard = mkHwiParityRunner "bhwi-hwi-parity-coldcard" "coldcard" (coldcardInputs ++ inputs) coldcardE2eEnv;
         hwiParityLedger = mkHwiParityRunner "bhwi-hwi-parity-ledger" "ledger" (ledgerInputs ++ inputs) commonE2eEnv;
         hwiParityJade = mkHwiParityRunner "bhwi-hwi-parity-jade" "jade" (jadeInputs ++ inputs) commonE2eEnv;
-        linuxPackages = pkgs.lib.optionalAttrs emulatorSystem {
-          inherit speculos bitboxSimulator;
-          bitbox02-simulator = bitboxSimulator;
-          coldcard-simulator = coldcardRunner;
-          ledger-app = ledgerAppBuilder;
-          jade-qemu = jadeRunner;
-        };
-        linuxApps = pkgs.lib.optionalAttrs emulatorSystem {
-          bitbox = mkApp bitboxRunner;
-          coldcard = mkApp coldcardRunner;
-          ledger = mkApp ledgerRunner;
-          ledger-build-app = mkApp ledgerAppBuilder;
-          hwi-upstream-suite = mkApp hwiUpstreamSuite;
-          hwi-parity-coldcard = mkApp hwiParityColdcard;
-          hwi-parity-ledger = mkApp hwiParityLedger;
-          hwi-parity-jade = mkApp hwiParityJade;
-          jade = mkApp jadeRunner;
-          jade-init = mkApp jadeInitRunner;
-          jade-pinserver = mkApp jadePinserverRunner;
-        };
+        linuxPackages = pkgs.lib.optionalAttrs emulatorSystem (
+          {
+            inherit speculos;
+            coldcard-simulator = coldcardRunner;
+            ledger-app = ledgerAppBuilder;
+            jade-qemu = jadeRunner;
+          }
+          // pkgs.lib.optionalAttrs (!isDarwin) {
+            inherit bitboxSimulator;
+            bitbox02-simulator = bitboxSimulator;
+          }
+        );
+        linuxApps = pkgs.lib.optionalAttrs emulatorSystem (
+          {
+            bitbox = mkApp bitboxRunner;
+            coldcard = mkApp coldcardRunner;
+            ledger = mkApp ledgerRunner;
+            ledger-build-app = mkApp ledgerAppBuilder;
+            jade = mkApp jadeRunner;
+            jade-init = mkApp jadeInitRunner;
+            jade-pinserver = mkApp jadePinserverRunner;
+          }
+          // pkgs.lib.optionalAttrs (!isDarwin) {
+            hwi-upstream-suite = mkApp hwiUpstreamSuite;
+            hwi-parity-coldcard = mkApp hwiParityColdcard;
+            hwi-parity-ledger = mkApp hwiParityLedger;
+            hwi-parity-jade = mkApp hwiParityJade;
+          }
+        );
         linuxShells = pkgs.lib.optionalAttrs emulatorSystem {
           bitbox = pkgs.mkShell {
             packages = inputs;
@@ -567,7 +576,6 @@
           {
             hwi-reference = hwiReference;
             hwi-reference-bhwi = hwiReferenceBhwi;
-            hwi-upstream-suite = hwiUpstreamSuite;
             default = pkgs.rustPlatform.buildRustPackage {
               name = "bhwi";
               src = ./.;
@@ -580,6 +588,9 @@
             };
             website = mkWebsite {};
             website-ghpages = mkWebsite {base = "/bhwi/";};
+          }
+          // pkgs.lib.optionalAttrs (!isDarwin) {
+            hwi-upstream-suite = hwiUpstreamSuite;
           }
           // linuxPackages;
 
