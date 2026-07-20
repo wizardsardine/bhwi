@@ -55,7 +55,21 @@
           ];
         };
         coldcardPkgs = import nixpkgs-coldcard {inherit system;};
-        emulatorSystem = system == "x86_64-linux";
+        emulatorSystem = system == "x86_64-linux" || system == "aarch64-linux" || system == "aarch64-darwin";
+        isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
+        coldcardRuntimeLibraryPath = coldcardPkgs.lib.makeLibraryPath (
+          [
+            coldcardPkgs.SDL2
+            coldcardPkgs.libffi
+            coldcardPkgs.openssl.out
+            coldcardPkgs.pcsclite
+          ]
+          ++ coldcardPkgs.lib.optionals (!isDarwin) [
+            coldcardPkgs.gcc13.cc.lib
+            coldcardPkgs.glibc
+            coldcardPkgs.systemd
+          ]
+        );
         espPkgs = import nixpkgs-esp-dev.inputs.nixpkgs {
           inherit system;
           overlays = [nixpkgs-esp-dev.overlays.default];
@@ -176,47 +190,52 @@
           pkgs.corepack_20
           pkgs.nodejs_20
         ];
-        emulatorInputs = [
-          pkgs.bash
-          pkgs.cacert
-          pkgs.coreutils
-          pkgs.curl
-          pkgs.git
-          pkgs.gnumake
-          pkgs.gnused
-          pkgs.netcat-openbsd
-          pkgs.openssl
-          pkgs.pkg-config
-          pkgs.procps
-          pkgs.python3
-          pkgs.which
-        ];
-        coldcardEmulatorInputs = [
-          coldcardPkgs.bash
-          coldcardPkgs.cacert
-          coldcardPkgs.coreutils
-          coldcardPkgs.curl
-          coldcardPkgs.gawk
-          coldcardPkgs.git
-          coldcardPkgs.gnumake
-          coldcardPkgs.gnugrep
-          coldcardPkgs.gnused
-          coldcardPkgs.netcat-openbsd
-          coldcardPkgs.openssl
-          coldcardPkgs.pkg-config
-          coldcardPkgs.procps
-          coldcardPkgs.python312
-          coldcardPkgs.which
-        ];
+        emulatorInputs =
+          [
+            pkgs.bash
+            pkgs.cacert
+            pkgs.coreutils
+            pkgs.curl
+            pkgs.git
+            pkgs.gnumake
+            pkgs.gnused
+            pkgs.openssl
+            pkgs.pkg-config
+            pkgs.python3
+            pkgs.which
+          ]
+          ++ (
+            if isDarwin
+            then [pkgs.netcat-gnu]
+            else [pkgs.netcat-openbsd pkgs.procps]
+          );
+        coldcardEmulatorInputs =
+          [
+            coldcardPkgs.bash
+            coldcardPkgs.cacert
+            coldcardPkgs.coreutils
+            coldcardPkgs.curl
+            coldcardPkgs.gawk
+            coldcardPkgs.git
+            coldcardPkgs.gnumake
+            coldcardPkgs.gnugrep
+            coldcardPkgs.gnused
+            coldcardPkgs.openssl
+            coldcardPkgs.pkg-config
+            coldcardPkgs.python312
+            coldcardPkgs.which
+          ]
+          ++ (
+            if isDarwin
+            then [coldcardPkgs.netcat-gnu]
+            else [coldcardPkgs.netcat-openbsd coldcardPkgs.procps]
+          );
         coldcardInputs =
           coldcardEmulatorInputs
           ++ [
             coldcardPkgs.autoconf
             coldcardPkgs.automake
-            coldcardPkgs.binutils
-            coldcardPkgs.gcc13
             coldcardPkgs.gcc-arm-embedded
-            coldcardPkgs.glibc.bin
             coldcardPkgs.libffi
             coldcardPkgs.libtool
             coldcardPkgs.m4
