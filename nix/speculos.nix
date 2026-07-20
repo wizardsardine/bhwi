@@ -32,11 +32,19 @@ writeShellApplication {
     elf_dir="$(cd "$(dirname "$elf")" && pwd)"
     elf_name="$(basename "$elf")"
 
+    apdu_port="''${LEDGER_APDU_PORT:-9999}"
+    api_port="''${LEDGER_API_PORT:-5000}"
+    if [ "$(uname)" = "Darwin" ]; then
+      net_args=(-p "$apdu_port:$apdu_port" -p "$api_port:$api_port")
+    else
+      net_args=(--network host)
+    fi
+
     if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-      exec docker run --rm --network host -v "$elf_dir:/app:ro" "$image" \
+      exec docker run --rm "''${net_args[@]}" -v "$elf_dir:/app:ro" "$image" \
         speculos "/app/$elf_name" "$@"
     elif command -v podman >/dev/null 2>&1; then
-      exec podman run --rm --network host -v "$elf_dir:/app:ro,Z" "$image" \
+      exec podman run --rm "''${net_args[@]}" -v "$elf_dir:/app:ro,Z" "$image" \
         speculos "/app/$elf_name" "$@"
     else
       echo "Neither docker nor podman is available for Speculos" >&2
