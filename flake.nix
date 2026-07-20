@@ -427,11 +427,41 @@
             install -m755 $src $out/bin/bitbox02-simulator
           '';
         };
+        bitboxBuildInputs = [
+          pkgs.cmake
+          pkgs.protobuf
+          pkgs.python3Packages.mypy-protobuf
+          pkgs.clang
+          pkgs.hidapi
+          pkgs.libusb1
+          pkgs.libiconv
+          pkgs.rust-cbindgen
+          pkgs.rust-bindgen
+          pkgs.rustup
+          pkgs.go
+          pkgs.gnused
+          pkgs.gnumake
+          pkgs.git
+          pkgs.pkg-config
+          pkgs.coreutils
+        ];
         bitboxRunner =
-          mkRunner "bhwi-start-bitbox" [pkgs.coreutils] ''
-            export BITBOX_SIMULATOR_BIN="${bitboxSimulator}/bin/bitbox02-simulator"
-          ''
-          ./nix/scripts/start-bitbox.sh;
+          if isDarwin
+          then
+            mkRunner "bhwi-start-bitbox" bitboxBuildInputs ''
+              export BITBOX_BUILD_SCRIPT="${./nix/scripts/build-bitbox-sim.sh}"
+              export BITBOX_FIRMWARE_URL="https://github.com/BitBoxSwiss/bitbox02-firmware.git"
+              export BITBOX_FIRMWARE_REV="firmware/v${bitboxSimulatorVersion}"
+              export PKG_CONFIG_PATH="${pkgs.hidapi}/lib/pkgconfig:${pkgs.libusb1.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
+              export LIBRARY_PATH="${pkgs.libiconv}/lib:''${LIBRARY_PATH:-}"
+              export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+            ''
+            ./nix/scripts/start-bitbox.sh
+          else
+            mkRunner "bhwi-start-bitbox" [pkgs.coreutils] ''
+              export BITBOX_SIMULATOR_BIN="${bitboxSimulator}/bin/bitbox02-simulator"
+            ''
+            ./nix/scripts/start-bitbox.sh;
         hwiReference = pkgs.writeShellApplication {
           name = "hwi-reference";
           runtimeInputs = [hwiPython];

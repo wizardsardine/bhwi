@@ -6,6 +6,11 @@
 # release binary); when running outside nix, point it at a simulator binary yourself.
 set -euo pipefail
 
+# No prebuilt release binary on darwin/arm64: build the simulator from source.
+if [[ -z "${BITBOX_SIMULATOR_BIN:-}" && -n "${BITBOX_BUILD_SCRIPT:-}" ]]; then
+  BITBOX_SIMULATOR_BIN="$(bash "$BITBOX_BUILD_SCRIPT")"
+fi
+
 : "${BITBOX_SIMULATOR_BIN:?BITBOX_SIMULATOR_BIN must point to a BitBox02 simulator binary}"
 
 # Run in a scratch directory so any simulator state does not litter the working tree.
