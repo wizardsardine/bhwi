@@ -243,9 +243,18 @@
             coldcardPkgs.python312Packages.virtualenv
             coldcardPkgs.SDL2
             coldcardPkgs.swig
-            coldcardPkgs.systemd
-            coldcardPkgs.xterm
-          ];
+          ]
+          ++ (
+            if isDarwin
+            then [coldcardPkgs.clang]
+            else [
+              coldcardPkgs.binutils
+              coldcardPkgs.gcc13
+              coldcardPkgs.glibc.bin
+              coldcardPkgs.systemd
+              coldcardPkgs.xterm
+            ]
+          );
         speculos = pkgs.callPackage ./nix/speculos.nix {};
         ledgerInputs =
           emulatorInputs
@@ -290,15 +299,7 @@
         '';
         coldcardE2eEnv = ''
           export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-          export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
-            coldcardPkgs.SDL2
-            coldcardPkgs.gcc13.cc.lib
-            coldcardPkgs.glibc
-            coldcardPkgs.libffi
-            coldcardPkgs.openssl.out
-            coldcardPkgs.pcsclite
-            coldcardPkgs.systemd
-          ]}"
+          export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardRuntimeLibraryPath}"
           export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
           export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
           export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
@@ -342,15 +343,7 @@
             unset LIBRARY_PATH
             unset OBJC_INCLUDE_PATH
             unset OBJCPLUS_INCLUDE_PATH
-            export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
-              coldcardPkgs.SDL2
-              coldcardPkgs.gcc13.cc.lib
-              coldcardPkgs.glibc
-              coldcardPkgs.libffi
-              coldcardPkgs.openssl.out
-              coldcardPkgs.pcsclite
-              coldcardPkgs.systemd
-            ]}"
+            export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardRuntimeLibraryPath}"
             export COLDCARD_FIRMWARE_SRC="${coldcard-firmware}"
             export COLDCARD_FIRMWARE_REV="${coldcard-firmware.rev or "locked"}"
             export COLDCARD_FIRMWARE_URL="https://github.com/Coldcard/firmware.git"
