@@ -55,7 +55,7 @@
           ];
         };
         coldcardPkgs = import nixpkgs-coldcard {inherit system;};
-        emulatorSystem = system == "x86_64-linux" || system == "aarch64-linux" || system == "aarch64-darwin";
+        emulatorSystem = system == "x86_64-linux" || system == "aarch64-darwin";
         isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
         coldcardRuntimeLibraryPath = coldcardPkgs.lib.makeLibraryPath (
           [
