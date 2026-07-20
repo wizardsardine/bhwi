@@ -3,8 +3,33 @@
 BHWI uses Nix flake outputs to run emulator-backed e2e tests for the currently
 supported devices: Coldcard, Ledger, and Jade.
 
-The emulator outputs are Linux-only and intended for GitHub Actions first, with
-the same commands available locally.
+The emulator outputs build on `x86_64-linux` and `aarch64-darwin` (Apple
+Silicon), and are intended for GitHub Actions first, with the same commands
+available locally.
+
+## Platforms
+
+The `nix run` and `nix develop` commands below are identical on every platform.
+
+On macOS the device simulators have no prebuilt binaries, so they build from
+source on first run under `$XDG_CACHE_HOME/bhwi`:
+
+- Coldcard and Jade build natively.
+- BitBox02 builds from source with `make simulator`. Linux keeps the prebuilt
+  release binary.
+- Ledger runs the `arm64` variant of the multi-arch app-builder container
+  natively and publishes ports, because Docker Desktop and OrbStack on macOS do
+  not support `--network host`.
+
+Linux-only outputs:
+
+- `bitbox02-simulator` (the prebuilt release binary).
+- The HWI parity and upstream suites (`hwi-parity-*`, `hwi-upstream-*`), which
+  need the linux-amd64 prebuilt simulator and a toolchain that does not build on
+  darwin.
+
+The macOS emulator run is not part of PR CI and is intended for a separate
+on-demand workflow.
 
 ## CI
 
@@ -158,8 +183,9 @@ upstream suite, and `HWI_LEDGER_APP_ELF` to use a prebuilt Ledger app.
 
 BitBox02:
 
-- Downloads a pinned `BitBoxSwiss/bitbox02-firmware` multi-edition simulator
-  release binary (autopatched to run on NixOS).
+- On Linux, downloads a pinned `BitBoxSwiss/bitbox02-firmware` multi-edition
+  simulator release binary (autopatched to run on NixOS). On macOS, builds that
+  same pinned firmware from source with `make simulator`.
 - Starts the simulator on TCP `localhost:15423`.
 - The simulator auto-confirms Noise pairing and restores a fixed mnemonic when
   the package e2e seeds it.
@@ -167,7 +193,8 @@ BitBox02:
 Coldcard:
 
 - Uses pinned `Coldcard/firmware`.
-- Builds the Unix simulator in `$XDG_CACHE_HOME/bhwi/coldcard`.
+- Builds the Unix simulator in `$XDG_CACHE_HOME/bhwi/coldcard`. On macOS applies
+  the upstream `macos-mpy.patch` and links against `DYLD_LIBRARY_PATH`.
 - Starts `simulator.py --headless`.
 - Exposes `/tmp/ckcc-simulator.sock`.
 
@@ -177,7 +204,8 @@ Ledger:
 - Builds the Nano X Bitcoin app ELF through Ledger's app-builder container and
   caches it under `$XDG_CACHE_HOME/bhwi/ledger`.
 - Starts Speculos through Ledger's app-builder container on APDU
-  `localhost:9999` and API `localhost:5000`.
+  `localhost:9999` and API `localhost:5000`. On macOS the container runs as its
+  native `arm64` variant with published ports instead of `--network host`.
 - `LEDGER_APP_ELF=/path/to/app.elf` can override the cached build.
 
 Jade:
@@ -195,6 +223,7 @@ Jade:
 
 - Emulator tests must run serially. Pass `-- --test-threads=1`; this is not set
   in `.cargo/config.toml`.
-- Emulator outputs are restricted to `x86_64-linux`.
+- Emulator outputs build on `x86_64-linux` and `aarch64-darwin`. See Platforms
+  for the macOS specifics and the Linux-only outputs.
 - The first CI run for a changed emulator source may be slow. Follow-up runs
   should hit Magic Nix Cache and the `$XDG_CACHE_HOME/bhwi` artifact cache.
