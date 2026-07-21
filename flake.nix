@@ -55,7 +55,21 @@
           ];
         };
         coldcardPkgs = import nixpkgs-coldcard {inherit system;};
-        emulatorSystem = system == "x86_64-linux";
+        emulatorSystem = system == "x86_64-linux" || system == "aarch64-darwin";
+        isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
+        coldcardRuntimeLibraryPath = coldcardPkgs.lib.makeLibraryPath (
+          [
+            coldcardPkgs.SDL2
+            coldcardPkgs.libffi
+            coldcardPkgs.openssl.out
+            coldcardPkgs.pcsclite
+          ]
+          ++ coldcardPkgs.lib.optionals (!isDarwin) [
+            coldcardPkgs.gcc13.cc.lib
+            coldcardPkgs.glibc
+            coldcardPkgs.systemd
+          ]
+        );
         espPkgs = import nixpkgs-esp-dev.inputs.nixpkgs {
           inherit system;
           overlays = [nixpkgs-esp-dev.overlays.default];
@@ -176,47 +190,52 @@
           pkgs.corepack_20
           pkgs.nodejs_20
         ];
-        emulatorInputs = [
-          pkgs.bash
-          pkgs.cacert
-          pkgs.coreutils
-          pkgs.curl
-          pkgs.git
-          pkgs.gnumake
-          pkgs.gnused
-          pkgs.netcat-openbsd
-          pkgs.openssl
-          pkgs.pkg-config
-          pkgs.procps
-          pkgs.python3
-          pkgs.which
-        ];
-        coldcardEmulatorInputs = [
-          coldcardPkgs.bash
-          coldcardPkgs.cacert
-          coldcardPkgs.coreutils
-          coldcardPkgs.curl
-          coldcardPkgs.gawk
-          coldcardPkgs.git
-          coldcardPkgs.gnumake
-          coldcardPkgs.gnugrep
-          coldcardPkgs.gnused
-          coldcardPkgs.netcat-openbsd
-          coldcardPkgs.openssl
-          coldcardPkgs.pkg-config
-          coldcardPkgs.procps
-          coldcardPkgs.python312
-          coldcardPkgs.which
-        ];
+        emulatorInputs =
+          [
+            pkgs.bash
+            pkgs.cacert
+            pkgs.coreutils
+            pkgs.curl
+            pkgs.git
+            pkgs.gnumake
+            pkgs.gnused
+            pkgs.openssl
+            pkgs.pkg-config
+            pkgs.python3
+            pkgs.which
+          ]
+          ++ (
+            if isDarwin
+            then [pkgs.netcat-gnu]
+            else [pkgs.netcat-openbsd pkgs.procps]
+          );
+        coldcardEmulatorInputs =
+          [
+            coldcardPkgs.bash
+            coldcardPkgs.cacert
+            coldcardPkgs.coreutils
+            coldcardPkgs.curl
+            coldcardPkgs.gawk
+            coldcardPkgs.git
+            coldcardPkgs.gnumake
+            coldcardPkgs.gnugrep
+            coldcardPkgs.gnused
+            coldcardPkgs.openssl
+            coldcardPkgs.pkg-config
+            coldcardPkgs.python312
+            coldcardPkgs.which
+          ]
+          ++ (
+            if isDarwin
+            then [coldcardPkgs.netcat-gnu]
+            else [coldcardPkgs.netcat-openbsd coldcardPkgs.procps]
+          );
         coldcardInputs =
           coldcardEmulatorInputs
           ++ [
             coldcardPkgs.autoconf
             coldcardPkgs.automake
-            coldcardPkgs.binutils
-            coldcardPkgs.gcc13
             coldcardPkgs.gcc-arm-embedded
-            coldcardPkgs.glibc.bin
             coldcardPkgs.libffi
             coldcardPkgs.libtool
             coldcardPkgs.m4
@@ -224,9 +243,18 @@
             coldcardPkgs.python312Packages.virtualenv
             coldcardPkgs.SDL2
             coldcardPkgs.swig
-            coldcardPkgs.systemd
-            coldcardPkgs.xterm
-          ];
+          ]
+          ++ (
+            if isDarwin
+            then [coldcardPkgs.clang]
+            else [
+              coldcardPkgs.binutils
+              coldcardPkgs.gcc13
+              coldcardPkgs.glibc.bin
+              coldcardPkgs.systemd
+              coldcardPkgs.xterm
+            ]
+          );
         speculos = pkgs.callPackage ./nix/speculos.nix {};
         ledgerInputs =
           emulatorInputs
@@ -271,15 +299,7 @@
         '';
         coldcardE2eEnv = ''
           export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-          export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
-            coldcardPkgs.SDL2
-            coldcardPkgs.gcc13.cc.lib
-            coldcardPkgs.glibc
-            coldcardPkgs.libffi
-            coldcardPkgs.openssl.out
-            coldcardPkgs.pcsclite
-            coldcardPkgs.systemd
-          ]}"
+          export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardRuntimeLibraryPath}"
           export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
           export ACLOCAL_PATH="${coldcardPkgs.libtool}/share/aclocal:''${ACLOCAL_PATH:-}"
           export PKG_CONFIG_PATH="${coldcardPkgs.libffi.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
@@ -323,15 +343,7 @@
             unset LIBRARY_PATH
             unset OBJC_INCLUDE_PATH
             unset OBJCPLUS_INCLUDE_PATH
-            export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardPkgs.lib.makeLibraryPath [
-              coldcardPkgs.SDL2
-              coldcardPkgs.gcc13.cc.lib
-              coldcardPkgs.glibc
-              coldcardPkgs.libffi
-              coldcardPkgs.openssl.out
-              coldcardPkgs.pcsclite
-              coldcardPkgs.systemd
-            ]}"
+            export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardRuntimeLibraryPath}"
             export COLDCARD_FIRMWARE_SRC="${coldcard-firmware}"
             export COLDCARD_FIRMWARE_REV="${coldcard-firmware.rev or "locked"}"
             export COLDCARD_FIRMWARE_URL="https://github.com/Coldcard/firmware.git"
@@ -415,11 +427,41 @@
             install -m755 $src $out/bin/bitbox02-simulator
           '';
         };
+        bitboxBuildInputs = [
+          pkgs.cmake
+          pkgs.protobuf
+          pkgs.python3Packages.mypy-protobuf
+          pkgs.clang
+          pkgs.hidapi
+          pkgs.libusb1
+          pkgs.libiconv
+          pkgs.rust-cbindgen
+          pkgs.rust-bindgen
+          pkgs.rustup
+          pkgs.go
+          pkgs.gnused
+          pkgs.gnumake
+          pkgs.git
+          pkgs.pkg-config
+          pkgs.coreutils
+        ];
         bitboxRunner =
-          mkRunner "bhwi-start-bitbox" [pkgs.coreutils] ''
-            export BITBOX_SIMULATOR_BIN="${bitboxSimulator}/bin/bitbox02-simulator"
-          ''
-          ./nix/scripts/start-bitbox.sh;
+          if isDarwin
+          then
+            mkRunner "bhwi-start-bitbox" bitboxBuildInputs ''
+              export BITBOX_BUILD_SCRIPT="${./nix/scripts/build-bitbox-sim.sh}"
+              export BITBOX_FIRMWARE_URL="https://github.com/BitBoxSwiss/bitbox02-firmware.git"
+              export BITBOX_FIRMWARE_REV="firmware/v${bitboxSimulatorVersion}"
+              export PKG_CONFIG_PATH="${pkgs.hidapi}/lib/pkgconfig:${pkgs.libusb1.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
+              export LIBRARY_PATH="${pkgs.libiconv}/lib:''${LIBRARY_PATH:-}"
+              export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+            ''
+            ./nix/scripts/start-bitbox.sh
+          else
+            mkRunner "bhwi-start-bitbox" [pkgs.coreutils] ''
+              export BITBOX_SIMULATOR_BIN="${bitboxSimulator}/bin/bitbox02-simulator"
+            ''
+            ./nix/scripts/start-bitbox.sh;
         hwiReference = pkgs.writeShellApplication {
           name = "hwi-reference";
           runtimeInputs = [hwiPython];
@@ -470,26 +512,35 @@
         hwiParityColdcard = mkHwiParityRunner "bhwi-hwi-parity-coldcard" "coldcard" (coldcardInputs ++ inputs) coldcardE2eEnv;
         hwiParityLedger = mkHwiParityRunner "bhwi-hwi-parity-ledger" "ledger" (ledgerInputs ++ inputs) commonE2eEnv;
         hwiParityJade = mkHwiParityRunner "bhwi-hwi-parity-jade" "jade" (jadeInputs ++ inputs) commonE2eEnv;
-        linuxPackages = pkgs.lib.optionalAttrs emulatorSystem {
-          inherit speculos bitboxSimulator;
-          bitbox02-simulator = bitboxSimulator;
-          coldcard-simulator = coldcardRunner;
-          ledger-app = ledgerAppBuilder;
-          jade-qemu = jadeRunner;
-        };
-        linuxApps = pkgs.lib.optionalAttrs emulatorSystem {
-          bitbox = mkApp bitboxRunner;
-          coldcard = mkApp coldcardRunner;
-          ledger = mkApp ledgerRunner;
-          ledger-build-app = mkApp ledgerAppBuilder;
-          hwi-upstream-suite = mkApp hwiUpstreamSuite;
-          hwi-parity-coldcard = mkApp hwiParityColdcard;
-          hwi-parity-ledger = mkApp hwiParityLedger;
-          hwi-parity-jade = mkApp hwiParityJade;
-          jade = mkApp jadeRunner;
-          jade-init = mkApp jadeInitRunner;
-          jade-pinserver = mkApp jadePinserverRunner;
-        };
+        linuxPackages = pkgs.lib.optionalAttrs emulatorSystem (
+          {
+            inherit speculos;
+            coldcard-simulator = coldcardRunner;
+            ledger-app = ledgerAppBuilder;
+            jade-qemu = jadeRunner;
+          }
+          // pkgs.lib.optionalAttrs (!isDarwin) {
+            inherit bitboxSimulator;
+            bitbox02-simulator = bitboxSimulator;
+          }
+        );
+        linuxApps = pkgs.lib.optionalAttrs emulatorSystem (
+          {
+            bitbox = mkApp bitboxRunner;
+            coldcard = mkApp coldcardRunner;
+            ledger = mkApp ledgerRunner;
+            ledger-build-app = mkApp ledgerAppBuilder;
+            jade = mkApp jadeRunner;
+            jade-init = mkApp jadeInitRunner;
+            jade-pinserver = mkApp jadePinserverRunner;
+          }
+          // pkgs.lib.optionalAttrs (!isDarwin) {
+            hwi-upstream-suite = mkApp hwiUpstreamSuite;
+            hwi-parity-coldcard = mkApp hwiParityColdcard;
+            hwi-parity-ledger = mkApp hwiParityLedger;
+            hwi-parity-jade = mkApp hwiParityJade;
+          }
+        );
         linuxShells = pkgs.lib.optionalAttrs emulatorSystem {
           bitbox = pkgs.mkShell {
             packages = inputs;
@@ -525,7 +576,6 @@
           {
             hwi-reference = hwiReference;
             hwi-reference-bhwi = hwiReferenceBhwi;
-            hwi-upstream-suite = hwiUpstreamSuite;
             default = pkgs.rustPlatform.buildRustPackage {
               name = "bhwi";
               src = ./.;
@@ -538,6 +588,9 @@
             };
             website = mkWebsite {};
             website-ghpages = mkWebsite {base = "/bhwi/";};
+          }
+          // pkgs.lib.optionalAttrs (!isDarwin) {
+            hwi-upstream-suite = hwiUpstreamSuite;
           }
           // linuxPackages;
 

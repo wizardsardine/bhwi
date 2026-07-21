@@ -52,7 +52,10 @@ if [[ ! -f "$marker" || ! -f "$build_key_file" || "$(cat "$build_key_file")" != 
   chmod -R u+w "$work"
 
   cd "$work"
-  if [[ -f ubuntu24_mpy.patch ]]; then
+  # Upstream ships OS-specific micropython patches (clang vs gcc warning flags).
+  if [[ "$(uname)" == "Darwin" && -f macos-mpy.patch ]]; then
+    (cd external/micropython && git apply ../../macos-mpy.patch)
+  elif [[ -f ubuntu24_mpy.patch ]]; then
     (cd external/micropython && git apply ../../ubuntu24_mpy.patch)
   fi
   mpy_cflags_extra="${MPY_CFLAGS_EXTRA:--Wno-error}"
@@ -79,6 +82,10 @@ fi
 
 cd "$work/unix"
 if [[ -n "${COLDCARD_RUNTIME_LIBRARY_PATH:-}" ]]; then
-  export LD_LIBRARY_PATH="$COLDCARD_RUNTIME_LIBRARY_PATH"
+  if [[ "$(uname)" == "Darwin" ]]; then
+    export DYLD_LIBRARY_PATH="$COLDCARD_RUNTIME_LIBRARY_PATH"
+  else
+    export LD_LIBRARY_PATH="$COLDCARD_RUNTIME_LIBRARY_PATH"
+  fi
 fi
 exec ../ENV/bin/python3 simulator.py --headless
