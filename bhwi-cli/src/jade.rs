@@ -122,6 +122,13 @@ impl JadeDevice {
     }
 }
 
+// serialport-rs lists each macOS serial port under both its callout
+// (`/dev/cu.*`) and dial-in (`/dev/tty.*`) node & skip the dial-in so the same
+// Jade is not opened twice.
+fn is_macos_dialin(port_name: &str) -> bool {
+    port_name.starts_with("/dev/tty.")
+}
+
 #[async_trait(?Send)]
 impl DeviceEnumerator for JadeDevice {
     async fn enumerate(selector: &DeviceSelector) -> Result<Vec<Device>> {
@@ -130,6 +137,7 @@ impl DeviceEnumerator for JadeDevice {
                 match info.port_type {
                     SerialPortType::UsbPort(usb)
                         if selector.matches(DeviceType::Jade, &info.port_name)
+                            && !is_macos_dialin(&info.port_name)
                             && Self::valid_usb(&usb) =>
                     {
                         Self::serial_device(selector.network, &info.port_name, usb).await
