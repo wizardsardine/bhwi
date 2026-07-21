@@ -212,6 +212,7 @@ pub enum HwiCommand {
         word_count: i32,
         label: String,
     },
+    TogglePassphrase,
     UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
     InstallUdevRules {
         location: PathBuf,
@@ -468,6 +469,7 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
             word_count,
             label,
         } => restore_device(request.selector, interactive, word_count, label).await,
+        HwiCommand::TogglePassphrase => toggle_passphrase_device(request.selector).await,
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
@@ -836,6 +838,56 @@ async fn restore_device(
         .restore_device(RestoreOptions { label, word_count }, Some(context))
         .await
     {
+        Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        Err(err) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            err.to_string(),
+        )),
+    }
+}
+
+async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    if device.device_type() != DeviceType::BitBox02 {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            hwi_unavailable_action_message(
+                device.device_type(),
+                &HwiUnsupportedDeviceAction::TogglePassphrase,
+            ),
+        ));
+    }
+    if device.info().await.ok().and_then(|info| info.initialized) == Some(false) {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceNotInitialized,
+            "The BitBox02 must be initialized first.",
+        ));
+    }
+
+    match device.device().toggle_passphrase().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
         Err(err) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::DeviceConnectionError,
@@ -2435,9 +2487,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         HwiCliCommand::Sendpin { pin } => {
             HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::SendPin { pin })
         }
-        HwiCliCommand::Togglepassphrase => {
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::TogglePassphrase)
-        }
+        HwiCliCommand::Togglepassphrase => HwiCommand::TogglePassphrase,
         HwiCliCommand::Installudevrules { location } => HwiCommand::InstallUdevRules { location },
         HwiCliCommand::External(argv) => {
             let command = argv
@@ -2979,7 +3029,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_pin_and_passphrase_unsupported_actions() {
+    fn parses_pin_actions_and_toggle_passphrase() {
         let promptpin = parse_args(["hwi", "--device-type", "ledger", "promptpin"])
             .expect("unsupported promptpin request");
         assert_eq!(
@@ -2997,11 +3047,8 @@ mod tests {
         );
 
         let togglepassphrase = parse_args(["hwi", "--device-type", "ledger", "togglepassphrase"])
-            .expect("unsupported togglepassphrase request");
-        assert_eq!(
-            togglepassphrase.command,
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::TogglePassphrase)
-        );
+            .expect("togglepassphrase request");
+        assert_eq!(togglepassphrase.command, HwiCommand::TogglePassphrase);
     }
 
     #[test]

@@ -85,6 +85,7 @@ pub enum Command {
     Setup(SetupOptions, Option<DeviceContext>),
     Wipe,
     Restore(RestoreOptions, Option<DeviceContext>),
+    TogglePassphrase,
     GetMasterFingerprint,
     GetVersion,
     GetXpub {

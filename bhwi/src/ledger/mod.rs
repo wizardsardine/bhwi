@@ -809,6 +809,9 @@ impl TryFrom<Command> for LedgerCommand {
             Command::Restore(..) => Err(LedgerError::MissingCommandInfo(
                 "Restore not supported by Ledger",
             )),
+            Command::TogglePassphrase => Err(LedgerError::MissingCommandInfo(
+                "Toggle passphrase not supported by Ledger",
+            )),
             Command::Backup => Err(LedgerError::MissingCommandInfo(
                 "Backup not supported by Ledger",
             )),

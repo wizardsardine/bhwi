@@ -117,6 +117,13 @@ pub fn reset_request() -> pb::request::Request {
     pb::request::Request::Reset(pb::ResetRequest {})
 }
 
+/// Enable or disable use of a mnemonic passphrase on the device.
+pub fn set_mnemonic_passphrase_enabled_request(enabled: bool) -> pb::request::Request {
+    pb::request::Request::SetMnemonicPassphraseEnabled(pb::SetMnemonicPassphraseEnabledRequest {
+        enabled,
+    })
+}
+
 /// Build a nested `BtcRequest::IsScriptConfigRegistered`.
 pub fn is_script_config_registered_request(
     coin: pb::BtcCoin,
@@ -221,6 +228,16 @@ mod tests {
         assert!(matches!(
             reset_request(),
             pb::request::Request::Reset(pb::ResetRequest {})
+        ));
+    }
+
+    #[test]
+    fn toggle_passphrase_request_preserves_enabled_state() {
+        assert!(matches!(
+            set_mnemonic_passphrase_enabled_request(true),
+            pb::request::Request::SetMnemonicPassphraseEnabled(
+                pb::SetMnemonicPassphraseEnabledRequest { enabled: true }
+            )
         ));
     }
 }

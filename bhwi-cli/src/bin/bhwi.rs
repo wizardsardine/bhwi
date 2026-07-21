@@ -165,6 +165,8 @@ enum DeviceCommands {
         #[arg(long, short, default_value = "")]
         label: String,
     },
+    /// Toggle mnemonic-passphrase use on the selected BitBox02
+    TogglePassphrase,
     /// Install udev rules for hardware wallet device access
     InstallUdevRules {
         /// Device rule targets to install
@@ -416,6 +418,21 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Device(DeviceCommands::TogglePassphrase) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::BitBox02 {
+                    anyhow::bail!(
+                        "device toggle-passphrase is currently supported only for BitBox02"
+                    );
+                }
+                if !device.device().toggle_passphrase().await? {
+                    anyhow::bail!("BitBox02 passphrase setting was not changed");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
         Commands::Device(DeviceCommands::InstallUdevRules {
             targets,
             all,
@@ -652,6 +669,16 @@ mod tests {
         assert!(matches!(
             args.command,
             Commands::Device(DeviceCommands::Restore { label }) if label == "Recovered"
+        ));
+    }
+
+    #[test]
+    fn parses_device_toggle_passphrase() {
+        let args = Args::try_parse_from(["bhwi", "device", "toggle-passphrase"])
+            .expect("parse device toggle-passphrase");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::TogglePassphrase)
         ));
     }
 

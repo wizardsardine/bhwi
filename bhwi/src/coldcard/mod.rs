@@ -584,6 +584,9 @@ impl TryFrom<Command> for ColdcardCommand {
             Command::Restore(..) => Err(ColdcardError::MissingCommandInfo(
                 "Restore not supported by Coldcard",
             )),
+            Command::TogglePassphrase => Err(ColdcardError::MissingCommandInfo(
+                "Toggle passphrase not supported by Coldcard",
+            )),
             Command::Backup => Ok(Self::Backup),
             Command::Unlock { .. } => Ok(Self::StartEncryption),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),

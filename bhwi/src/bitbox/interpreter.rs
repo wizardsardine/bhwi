@@ -91,6 +91,8 @@ pub enum BitBoxCommand {
         timestamp: u32,
         timezone_offset: i32,
     },
+    /// Toggle the device's mnemonic-passphrase setting.
+    TogglePassphrase,
     /// Restore the device from its currently-loaded mnemonic (simulator seeding).
     RestoreFromMnemonic {
         timestamp: u32,
@@ -155,6 +157,8 @@ enum State {
     RestoreWaitInfo(RestoreInit),
     RestoreWaitName(RestoreInit),
     RestoreWaitMnemonic,
+    TogglePassphraseWaitInfo,
+    TogglePassphraseWaitSet,
     Finished(BitBoxResponse),
 }
 
@@ -927,6 +931,14 @@ where
                 });
                 Ok(encrypted_transmit(bytes).into())
             }
+            BitBoxCommand::TogglePassphrase => {
+                if !self.noise.is_paired() {
+                    return Err(BitBoxError::Noise("not paired").into());
+                }
+                let bytes = self.build_encrypted(api::device_info_request())?;
+                self.state = State::TogglePassphraseWaitInfo;
+                Ok(encrypted_transmit(bytes).into())
+            }
             BitBoxCommand::RestoreFromMnemonic {
                 timestamp,
                 timezone_offset,
@@ -1278,6 +1290,32 @@ where
                 self.state = State::Finished(BitBoxResponse::DeviceAction(true));
                 Ok(None)
             }
+            State::TogglePassphraseWaitInfo => {
+                let response = self.decode_encrypted_response(data)?;
+                let info = match response {
+                    pb::response::Response::DeviceInfo(info) => info,
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                };
+                if !info.initialized {
+                    return Err(BitBoxError::InvalidInput(
+                        "The BitBox02 must be initialized first.",
+                    )
+                    .into());
+                }
+                let bytes = self.build_encrypted(api::set_mnemonic_passphrase_enabled_request(
+                    !info.mnemonic_passphrase_enabled,
+                ))?;
+                self.state = State::TogglePassphraseWaitSet;
+                Ok(Some(encrypted_transmit(bytes).into()))
+            }
+            State::TogglePassphraseWaitSet => {
+                match self.decode_encrypted_response(data)? {
+                    pb::response::Response::Success(_) => {}
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                }
+                self.state = State::Finished(BitBoxResponse::DeviceAction(true));
+                Ok(None)
+            }
         }
     }
 
@@ -1333,6 +1371,7 @@ impl TryFrom<Command> for BitBoxCommand {
                     timezone_offset,
                 })
             }
+            Command::TogglePassphrase => Ok(BitBoxCommand::TogglePassphrase),
             Command::Unlock { .. } => Ok(BitBoxCommand::UnlockAndPair),
             Command::GetVersion => Ok(BitBoxCommand::GetVersion),
             Command::GetMasterFingerprint => Ok(BitBoxCommand::GetMasterFingerprint),
@@ -1652,6 +1691,14 @@ mod tests {
                 None,
             )),
             Err(BitBoxError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn common_toggle_passphrase_maps_to_bitbox_command() {
+        assert!(matches!(
+            BitBoxCommand::try_from(Command::TogglePassphrase),
+            Ok(BitBoxCommand::TogglePassphrase)
         ));
     }
 
