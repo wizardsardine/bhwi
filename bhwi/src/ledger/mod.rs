@@ -657,6 +657,9 @@ where
                         ref path,
                         display: false,
                     } if res.status_word == StatusWord::NotSupported => {
+                        // Ledger rejects non-standard derivation paths when the xpub is
+                        // requested silently. As in Python HWI's `get_pubkey_at_path`, retry
+                        // with display enabled so the user can approve the unusual path.
                         let retry = LedgerCommand::GetXpub {
                             path: path.clone(),
                             display: true,
