@@ -12,13 +12,13 @@ use crate::common::{
 };
 
 use super::api;
-use super::error::BitBoxError;
+use super::error::{BitBoxDeviceError, BitBoxError};
 use super::noise::{HandshakeState, NoiseState};
 use super::proto as pb;
 use super::sign::{OurKey, Transaction, TxOutput, apply_signatures, is_schnorr};
 use super::{
-    OP_HER_COMEZ_TEH_HANDSHAEK, OP_I_CAN_HAS_HANDSHAEK, OP_I_CAN_HAS_PAIRIN_VERIFICASHUN,
-    OP_NOISE_MSG, OP_UNLOCK, RESPONSE_SUCCESS,
+    ManagementContext, OP_HER_COMEZ_TEH_HANDSHAEK, OP_I_CAN_HAS_HANDSHAEK,
+    OP_I_CAN_HAS_PAIRIN_VERIFICASHUN, OP_NOISE_MSG, OP_UNLOCK, RESPONSE_SUCCESS, SetupMode,
 };
 use super::{antiklepto, policy};
 
@@ -76,6 +76,13 @@ pub enum BitBoxCommand {
         index: u32,
         display: bool,
     },
+    /// Initialize an unseeded BitBox02.
+    Setup {
+        label: String,
+        mode: SetupMode,
+        timestamp: u32,
+        timezone_offset: i32,
+    },
     /// Restore the device from its currently-loaded mnemonic (simulator seeding).
     RestoreFromMnemonic {
         timestamp: u32,
@@ -88,6 +95,7 @@ pub enum BitBoxCommand {
 #[derive(Debug)]
 pub enum BitBoxResponse {
     TaskDone,
+    DeviceAction(bool),
     Info(Info),
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
@@ -125,7 +133,23 @@ enum State {
     },
     // Descriptor address: first fetch our fingerprint to resolve the account keypath.
     ShowAddrWaitFingerprint(ShowAddrInit),
+    // Stateful setup flow.
+    SetupWaitInfo(SetupInit),
+    SetupWaitName(SetupInit),
+    SetupWaitPassword {
+        timestamp: u32,
+        timezone_offset: i32,
+    },
+    SetupWaitBackup,
+    SetupWaitRestore,
     Finished(BitBoxResponse),
+}
+
+struct SetupInit {
+    label: String,
+    mode: SetupMode,
+    timestamp: u32,
+    timezone_offset: i32,
 }
 
 struct SignInit {
@@ -567,20 +591,69 @@ impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
         Ok(bytes)
     }
 
+    fn decode_encrypted_response(
+        &mut self,
+        data: Vec<u8>,
+    ) -> Result<pb::response::Response, BitBoxError> {
+        let body = expect_success(&data)?;
+        let decrypted = self.noise.decrypt(body)?;
+        api::decode_response(&decrypted)
+    }
+
+    fn decode_device_action_response(&mut self, data: Vec<u8>) -> Result<bool, BitBoxError> {
+        let body = expect_success(&data)?;
+        let decrypted = self.noise.decrypt(body)?;
+        let response = pb::Response::decode(decrypted.as_slice())?;
+        match response.response {
+            Some(pb::response::Response::Success(_)) => Ok(true),
+            Some(pb::response::Response::Error(pb::Error { code, .. })) => {
+                let error = BitBoxDeviceError::from_code(code);
+                if error == BitBoxDeviceError::Generic {
+                    Ok(false)
+                } else {
+                    Err(error.into())
+                }
+            }
+            _ => Err(BitBoxError::UnexpectedResponse),
+        }
+    }
+
+    fn start_setup_initialization(&mut self, setup: SetupInit) -> Result<Vec<u8>, BitBoxError> {
+        let SetupInit {
+            mode,
+            timestamp,
+            timezone_offset,
+            ..
+        } = setup;
+        let request = match mode {
+            SetupMode::NewWallet { entropy } => {
+                self.state = State::SetupWaitPassword {
+                    timestamp,
+                    timezone_offset,
+                };
+                api::set_password_request(entropy.as_bytes())
+            }
+            SetupMode::RestoreFromMnemonic => {
+                self.state = State::SetupWaitRestore;
+                api::restore_from_mnemonic_request(timestamp, timezone_offset)
+            }
+        };
+        self.build_encrypted(request)
+    }
+
     fn handle_encrypted_response(
         &mut self,
         ctx: EncryptedContext,
         data: Vec<u8>,
     ) -> Result<BitBoxResponse, BitBoxError> {
-        let body = expect_success(&data)?;
-        let decrypted = self.noise.decrypt(body)?;
-        let response = api::decode_response(&decrypted)?;
+        let response = self.decode_encrypted_response(data)?;
         use pb::response::Response as R;
         match (ctx, response) {
             (EncryptedContext::Version, R::DeviceInfo(info)) => Ok(BitBoxResponse::Info(Info {
                 version: info.version,
                 networks: vec![],
                 firmware: Some(info.name),
+                initialized: Some(info.initialized),
             })),
             (EncryptedContext::MasterFingerprint, R::Fingerprint(f)) => {
                 if f.fingerprint.len() != 4 {
@@ -790,6 +863,24 @@ where
                     change,
                     index,
                     display,
+                });
+                Ok(encrypted_transmit(bytes).into())
+            }
+            BitBoxCommand::Setup {
+                label,
+                mode,
+                timestamp,
+                timezone_offset,
+            } => {
+                if !self.noise.is_paired() {
+                    return Err(BitBoxError::Noise("not paired").into());
+                }
+                let bytes = self.build_encrypted(api::device_info_request())?;
+                self.state = State::SetupWaitInfo(SetupInit {
+                    label,
+                    mode,
+                    timestamp,
+                    timezone_offset,
                 });
                 Ok(encrypted_transmit(bytes).into())
             }
@@ -1022,6 +1113,61 @@ where
                 self.state = State::WaitEncryptedResponse(EncryptedContext::Address);
                 Ok(Some(encrypted_transmit(bytes).into()))
             }
+            State::SetupWaitInfo(setup) => {
+                let response = self.decode_encrypted_response(data)?;
+                let info = match response {
+                    pb::response::Response::DeviceInfo(info) => info,
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                };
+                if info.initialized {
+                    return Err(BitBoxError::InvalidInput(
+                        "The BitBox02 must be wiped before setup.",
+                    )
+                    .into());
+                }
+                if setup.label.is_empty() {
+                    let bytes = self.start_setup_initialization(setup)?;
+                    Ok(Some(encrypted_transmit(bytes).into()))
+                } else {
+                    let bytes = self.build_encrypted(api::set_device_name_request(&setup.label))?;
+                    self.state = State::SetupWaitName(setup);
+                    Ok(Some(encrypted_transmit(bytes).into()))
+                }
+            }
+            State::SetupWaitName(setup) => {
+                match self.decode_encrypted_response(data)? {
+                    pb::response::Response::Success(_) => {}
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                }
+                let bytes = self.start_setup_initialization(setup)?;
+                Ok(Some(encrypted_transmit(bytes).into()))
+            }
+            State::SetupWaitPassword {
+                timestamp,
+                timezone_offset,
+            } => {
+                if !self.decode_device_action_response(data)? {
+                    self.state = State::Finished(BitBoxResponse::DeviceAction(false));
+                    return Ok(None);
+                }
+                let bytes =
+                    self.build_encrypted(api::create_backup_request(timestamp, timezone_offset))?;
+                self.state = State::SetupWaitBackup;
+                Ok(Some(encrypted_transmit(bytes).into()))
+            }
+            State::SetupWaitBackup => {
+                let success = self.decode_device_action_response(data)?;
+                self.state = State::Finished(BitBoxResponse::DeviceAction(success));
+                Ok(None)
+            }
+            State::SetupWaitRestore => {
+                match self.decode_encrypted_response(data)? {
+                    pb::response::Response::Success(_) => {}
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                }
+                self.state = State::Finished(BitBoxResponse::DeviceAction(true));
+                Ok(None)
+            }
         }
     }
 
@@ -1037,6 +1183,29 @@ impl TryFrom<Command> for BitBoxCommand {
     type Error = BitBoxError;
     fn try_from(cmd: Command) -> Result<Self, Self::Error> {
         match cmd {
+            Command::Setup(options, context) => {
+                if !options.backup_passphrase.is_empty() {
+                    return Err(BitBoxError::InvalidInput(
+                        "Passphrase not needed when setting up a BitBox02.",
+                    ));
+                }
+                let Some(DeviceContext::BitBoxManagement(ManagementContext::Setup {
+                    mode,
+                    timestamp,
+                    timezone_offset,
+                })) = context
+                else {
+                    return Err(BitBoxError::InvalidInput(
+                        "BitBox setup requires DeviceContext::BitBoxManagement",
+                    ));
+                };
+                Ok(BitBoxCommand::Setup {
+                    label: options.label,
+                    mode,
+                    timestamp,
+                    timezone_offset,
+                })
+            }
             Command::Unlock { .. } => Ok(BitBoxCommand::UnlockAndPair),
             Command::GetVersion => Ok(BitBoxCommand::GetVersion),
             Command::GetMasterFingerprint => Ok(BitBoxCommand::GetMasterFingerprint),
@@ -1126,6 +1295,7 @@ impl From<BitBoxResponse> for Response {
     fn from(res: BitBoxResponse) -> Response {
         match res {
             BitBoxResponse::TaskDone => Response::TaskDone,
+            BitBoxResponse::DeviceAction(success) => Response::DeviceAction(success),
             BitBoxResponse::Info(info) => Response::Info(info),
             BitBoxResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
             BitBoxResponse::Xpub(xpub) => Response::Xpub(xpub),
@@ -1257,6 +1427,61 @@ mod tests {
     fn common_backup_maps_to_bitbox_backup() {
         let command = BitBoxCommand::try_from(Command::Backup).unwrap();
         assert!(matches!(command, BitBoxCommand::Backup));
+    }
+
+    #[test]
+    fn common_setup_maps_to_bitbox_setup() {
+        let command = BitBoxCommand::try_from(Command::Setup(
+            crate::common::SetupOptions {
+                label: "BHWI".into(),
+                backup_passphrase: String::new(),
+            },
+            Some(DeviceContext::BitBoxManagement(ManagementContext::Setup {
+                mode: SetupMode::NewWallet {
+                    entropy: super::super::SetupEntropy::new([42; 32]),
+                },
+                timestamp: 1_601_450_521,
+                timezone_offset: 3_600,
+            })),
+        ))
+        .unwrap();
+        assert!(matches!(
+            command,
+            BitBoxCommand::Setup {
+                label,
+                mode: SetupMode::NewWallet { .. },
+                timestamp: 1_601_450_521,
+                timezone_offset: 3_600,
+            } if label == "BHWI"
+        ));
+    }
+
+    #[test]
+    fn common_setup_requires_context_and_rejects_passphrase() {
+        let missing_context =
+            BitBoxCommand::try_from(Command::Setup(crate::common::SetupOptions::default(), None));
+        assert!(matches!(missing_context, Err(BitBoxError::InvalidInput(_))));
+
+        let passphrase = BitBoxCommand::try_from(Command::Setup(
+            crate::common::SetupOptions {
+                label: String::new(),
+                backup_passphrase: "secret".into(),
+            },
+            Some(DeviceContext::BitBoxManagement(ManagementContext::Setup {
+                mode: SetupMode::RestoreFromMnemonic,
+                timestamp: 0,
+                timezone_offset: 0,
+            })),
+        ));
+        assert!(matches!(passphrase, Err(BitBoxError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn bitbox_setup_response_maps_to_device_action() {
+        assert!(matches!(
+            Response::from(BitBoxResponse::DeviceAction(false)),
+            Response::DeviceAction(false)
+        ));
     }
 
     #[test]

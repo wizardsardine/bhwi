@@ -12,6 +12,7 @@ pub use bhwi::common::DeviceBackup;
 pub use bhwi::common::DeviceContext;
 pub use bhwi::common::DisplayAddress;
 pub use bhwi::common::Info;
+pub use bhwi::common::SetupOptions;
 pub use bhwi::common::WalletRegistration;
 use bhwi::miniscript::descriptor::WalletPolicy;
 use bhwi::{
@@ -43,6 +44,11 @@ pub trait HttpClient {
 pub trait HWI {
     type Error: Debug;
     async fn backup_device(&mut self) -> Result<DeviceBackup, Self::Error>;
+    async fn setup_device(
+        &mut self,
+        options: SetupOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, Self::Error>;
     async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
     async fn get_info(&mut self) -> Result<Info, Self::Error>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, Self::Error>;
@@ -79,6 +85,11 @@ pub trait HWI {
 #[async_trait(?Send)]
 pub trait HWIDevice {
     async fn backup_device(&mut self) -> Result<DeviceBackup, HWIDeviceError>;
+    async fn setup_device(
+        &mut self,
+        options: SetupOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, HWIDeviceError>;
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError>;
     async fn get_info(&mut self) -> Result<Info, HWIDeviceError>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError>;
@@ -142,6 +153,20 @@ where
         if let common::Response::Backup(backup) = run_command(self, common::Command::Backup).await?
         {
             Ok(backup)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
+
+    async fn setup_device(
+        &mut self,
+        options: SetupOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, Self::Error> {
+        if let common::Response::DeviceAction(success) =
+            run_command(self, common::Command::Setup(options, context)).await?
+        {
+            Ok(success)
         } else {
             Err(common::Error::NoErrorOrResult.into())
         }
@@ -274,6 +299,16 @@ where
 {
     async fn backup_device(&mut self) -> Result<DeviceBackup, HWIDeviceError> {
         HWI::backup_device(self).await.map_err(HWIDeviceError::new)
+    }
+
+    async fn setup_device(
+        &mut self,
+        options: SetupOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, HWIDeviceError> {
+        HWI::setup_device(self, options, context)
+            .await
+            .map_err(HWIDeviceError::new)
     }
 
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError> {

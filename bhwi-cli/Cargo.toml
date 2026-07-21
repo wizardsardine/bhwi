@@ -22,9 +22,9 @@ async-trait.workspace = true
 bitcoin = { workspace = true, features = ["base64", "serde"] }
 bhwi-async = { workspace = true, features = ["bitbox", "emulators"] }
 bhwi.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures.workspace = true
 hex = { workspace = true, features = ["serde"] }
-libc = "0.2"
 miniscript = { workspace = true, features = ["serde"] }
 rand_core.workspace = true
 reqwest = { workspace = true, features = ["json"] }

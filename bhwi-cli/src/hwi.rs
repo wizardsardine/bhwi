@@ -5,7 +5,6 @@ use std::{
     path::PathBuf,
     process::ExitCode,
     str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bhwi::{
@@ -13,7 +12,7 @@ use bhwi::{
     common::{MultisigAddressType, MultisigDisplayAddress},
     ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
 };
-use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress};
+use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, SetupOptions};
 use bitcoin::{
     Network, NetworkKind, PublicKey, ScriptBuf,
     base64::prelude::{BASE64_STANDARD, Engine as _},
@@ -25,6 +24,7 @@ use bitcoin::{
     psbt::Input,
     secp256k1::{PublicKey as SecpPublicKey, XOnlyPublicKey},
 };
+use chrono::{Datelike, Local, Timelike};
 use clap::{ArgAction, ArgGroup, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use miniscript::{
     Descriptor, DescriptorPublicKey,
@@ -36,6 +36,7 @@ use crate::{
     Device, DeviceManager, DeviceType,
     config::DeviceSelector,
     get_descriptors::GetDescriptorOptions,
+    management::bitbox_setup_context,
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -197,6 +198,11 @@ pub enum HwiCommand {
         path: Option<String>,
     },
     Backup {
+        label: String,
+        backup_passphrase: String,
+    },
+    Setup {
+        interactive: bool,
         label: String,
         backup_passphrase: String,
     },
@@ -443,6 +449,11 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
             label,
             backup_passphrase,
         } => backup_device(request.selector, label, backup_passphrase).await,
+        HwiCommand::Setup {
+            interactive,
+            label,
+            backup_passphrase,
+        } => setup_device(request.selector, interactive, label, backup_passphrase).await,
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
@@ -612,6 +623,91 @@ async fn unsupported_device_action(
     HwiResponse::Error(HwiError::new(HwiErrorCode::UnsupportedCommand, error))
 }
 
+async fn setup_device(
+    selector: DeviceSelector,
+    interactive: bool,
+    label: String,
+    backup_passphrase: String,
+) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    if !interactive {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            "setup requires interactive mode",
+        ));
+    }
+    if device.device_type() != DeviceType::BitBox02 {
+        let action = HwiUnsupportedDeviceAction::Setup {
+            interactive,
+            label,
+            backup_passphrase,
+        };
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            hwi_unavailable_action_message(device.device_type(), &action),
+        ));
+    }
+    if !backup_passphrase.is_empty() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            "Passphrase not needed when setting up a BitBox02.",
+        ));
+    }
+    if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            "The BitBox02 must be wiped before setup.",
+        ));
+    }
+
+    let context = match bitbox_setup_context(device.is_emulated()) {
+        Ok(context) => context,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, err.to_string()));
+        }
+    };
+    match device
+        .device()
+        .setup_device(
+            SetupOptions {
+                label,
+                backup_passphrase,
+            },
+            Some(context),
+        )
+        .await
+    {
+        Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        Err(err) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            err.to_string(),
+        )),
+    }
+}
+
 async fn backup_device(
     selector: DeviceSelector,
     label: String,
@@ -687,47 +783,22 @@ async fn backup_device(
 }
 
 fn write_hwi_backup_file(bytes: &[u8]) -> io::Result<()> {
-    fs::write(hwi_backup_filename()?, bytes)
+    fs::write(hwi_backup_filename(), bytes)
 }
 
-fn hwi_backup_filename() -> io::Result<String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?;
-    let timestamp = now.as_secs().try_into().map_err(io::Error::other)?;
-    let tm = local_time(timestamp)?;
+fn hwi_backup_filename() -> String {
+    format_hwi_backup_filename(Local::now())
+}
 
-    Ok(format!(
+fn format_hwi_backup_filename<Tz: chrono::TimeZone>(time: chrono::DateTime<Tz>) -> String {
+    format!(
         "backup-{:04}{:02}{:02}-{:02}{:02}.7z",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min
-    ))
-}
-
-#[cfg(unix)]
-fn local_time(timestamp: libc::time_t) -> io::Result<libc::tm> {
-    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
-    // Python HWI uses `time.strftime`, i.e. the process local timezone.
-    unsafe {
-        if libc::localtime_r(&timestamp, tm.as_mut_ptr()).is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(tm.assume_init())
-    }
-}
-
-#[cfg(windows)]
-fn local_time(timestamp: libc::time_t) -> io::Result<libc::tm> {
-    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
-    // Windows uses the bounds-checked variant with destination first.
-    let code = unsafe { libc::localtime_s(tm.as_mut_ptr(), &timestamp) };
-    if code != 0 {
-        return Err(io::Error::from_raw_os_error(code));
-    }
-    Ok(unsafe { tm.assume_init() })
+        time.year(),
+        time.month(),
+        time.day(),
+        time.hour(),
+        time.minute()
+    )
 }
 
 async fn get_master_xpub(
@@ -2204,11 +2275,11 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         HwiCliCommand::Setup {
             label,
             backup_passphrase,
-        } => HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Setup {
+        } => HwiCommand::Setup {
             interactive: args.interactive,
             label,
             backup_passphrase,
-        }),
+        },
         HwiCliCommand::Wipe => {
             HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Wipe)
         }
@@ -2291,6 +2362,18 @@ mod tests {
         secp256k1::Secp256k1,
         transaction::Version as TxVersion,
     };
+    use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn backup_filename_matches_python_hwi_local_time_format() {
+        let time = FixedOffset::east_opt(3 * 60 * 60)
+            .unwrap()
+            .with_ymd_and_hms(2026, 7, 21, 9, 5, 0)
+            .single()
+            .unwrap();
+
+        assert_eq!(format_hwi_backup_filename(time), "backup-20260721-0905.7z");
+    }
 
     #[test]
     fn parses_enumerate_selector() {
@@ -2678,7 +2761,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_setup_unsupported_action() {
+    fn parses_setup_action() {
         let request = parse_args([
             "hwi",
             "--chain",
@@ -2692,17 +2775,17 @@ mod tests {
             "-b",
             "backup passphrase",
         ])
-        .expect("unsupported setup request");
+        .expect("setup request");
 
         assert_eq!(request.selector.network, Network::Testnet);
         assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
         assert_eq!(
             request.command,
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Setup {
+            HwiCommand::Setup {
                 interactive: true,
                 label: "HWI Ledger".to_owned(),
                 backup_passphrase: "backup passphrase".to_owned(),
-            })
+            }
         );
     }
 

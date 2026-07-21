@@ -1,11 +1,12 @@
 use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
-use bhwi_async::{DeviceBackup, DeviceContext, WalletRegistration};
+use bhwi_async::{DeviceBackup, DeviceContext, SetupOptions, WalletRegistration};
 use bhwi_cli::{
-    DeviceManager, OutputFormat,
+    DeviceManager, DeviceType, OutputFormat,
     address::AddressTarget,
     config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
+    management::bitbox_setup_context,
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -149,6 +150,12 @@ enum DeviceCommands {
         /// Output file for devices that export encrypted backup bytes
         #[arg(long, short)]
         output: Option<PathBuf>,
+    },
+    /// Initialize an unseeded BitBox02
+    Setup {
+        /// User-visible device name
+        #[arg(long, short, default_value = "")]
+        label: String,
     },
     /// Install udev rules for hardware wallet device access
     InstallUdevRules {
@@ -337,6 +344,30 @@ async fn main() -> Result<()> {
                             println!("{}", serde_json::json!({ "success": true }));
                         }
                     }
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::Setup { label }) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::BitBox02 {
+                    anyhow::bail!("device setup is currently supported only for BitBox02");
+                }
+                let context = bitbox_setup_context(device.is_emulated())?;
+                let success = device
+                    .device()
+                    .setup_device(
+                        SetupOptions {
+                            label,
+                            backup_passphrase: String::new(),
+                        },
+                        Some(context),
+                    )
+                    .await?;
+                if !success {
+                    anyhow::bail!("BitBox02 setup was not completed");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
                 }
             }
         }
@@ -548,6 +579,16 @@ mod tests {
             }
             command => panic!("unexpected command: {command:?}"),
         }
+    }
+
+    #[test]
+    fn parses_device_setup() {
+        let args = Args::try_parse_from(["bhwi", "device", "setup", "--label", "BHWI"])
+            .expect("parse device setup");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Setup { label }) if label == "BHWI"
+        ));
     }
 
     #[test]

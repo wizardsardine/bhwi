@@ -575,6 +575,9 @@ impl TryFrom<Command> for ColdcardCommand {
     type Error = ColdcardError;
     fn try_from(cmd: Command) -> Result<Self, Self::Error> {
         match cmd {
+            Command::Setup(..) => Err(ColdcardError::MissingCommandInfo(
+                "Setup not supported by Coldcard",
+            )),
             Command::Backup => Ok(Self::Backup),
             Command::Unlock { .. } => Ok(Self::StartEncryption),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
@@ -836,6 +839,7 @@ impl From<ColdcardResponse> for Response {
                 version: version.as_str().into(),
                 networks: vec![],
                 firmware: Some(device_model),
+                initialized: None,
             }),
             ColdcardResponse::MyPub { encryption_key, .. } => {
                 Response::EncryptionKey(encryption_key)
