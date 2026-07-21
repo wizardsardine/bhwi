@@ -23,15 +23,34 @@ is required.
 ## CLI e2e
 
 The `bhwi` CLI reaches the simulator over TCP through the BitBox02 emulator path
-(`tcp:127.0.0.1:15423`). The CLI has no restore command, so seed the simulator
-by running the package e2e first, then run the CLI e2e against the seeded
-device:
+(`tcp:127.0.0.1:15423`). Use the native global selectors for stateful commands
+that must address an uninitialized device without a fingerprint:
+
+```sh
+bhwi --device-type bitbox02 --device-path tcp:127.0.0.1:15423 device setup
+bhwi --device-type bitbox02 --device-path tcp:127.0.0.1:15423 device wipe
+bhwi --device-type bitbox02 --device-path tcp:127.0.0.1:15423 device restore
+bhwi --device-type bitbox02 --device-path tcp:127.0.0.1:15423 device toggle-passphrase
+```
+
+Successful action commands are quiet by default; add `--format json` for a
+structured success response. `setup` and `restore` accept `--label`. Python-HWI
+compatibility keeps its upstream command names and flags, including
+`togglepassphrase`, `--interactive`, `--word_count`, and
+`--backup_passphrase` validation.
+
+The regular seeded-device CLI suite remains:
 
 ```sh
 cargo build -p bhwi-cli
 BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#bitbox \
   -c cargo test -p bhwi-e2e-cli bitbox -- --test-threads=1
 ```
+
+CI additionally runs the ignored setup/wipe and restore lifecycle tests against
+fresh simulator processes. A successful wipe resets the firmware before it can
+reply and leaves this simulator version in its reset loop, so the test harness
+restarts it before continuing.
 
 ## Upstream references
 

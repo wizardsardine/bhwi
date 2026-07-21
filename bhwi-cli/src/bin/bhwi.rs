@@ -31,6 +31,12 @@ struct Args {
     /// default will be the first connected device with the master fingerprint matching.
     #[arg(long, alias = "fg", value_parser = clap::value_parser!(bitcoin::bip32::Fingerprint))]
     fingerprint: Option<Fingerprint>,
+    /// select a device implementation by type
+    #[arg(long, value_enum)]
+    device_type: Option<DeviceType>,
+    /// select a device by transport path
+    #[arg(long)]
+    device_path: Option<String>,
     /// default will be the Bitcoin mainnet network.
     #[arg(long, short, value_parser = clap::value_parser!(bitcoin::Network), default_value_t = bitcoin::Network::Bitcoin)]
     network: Network,
@@ -44,8 +50,9 @@ impl Args {
         DeviceSelector {
             network: self.network,
             fingerprint: self.fingerprint,
+            device_type: self.device_type,
+            device_path: self.device_path.clone(),
             include_emulators: true,
-            ..DeviceSelector::default()
         }
     }
 }
@@ -300,10 +307,14 @@ async fn main() -> Result<()> {
             for (i, device) in devices.iter_mut().enumerate() {
                 // XXX: Coldcard always needs unlocking
                 device.device().unlock(dev_man.selector.network).await?;
-                let fingerprint = device.fingerprint().await?;
                 let name = device.name().to_string();
                 let is_emulated = device.is_emulated();
                 let info = device.info().await?;
+                let fingerprint = if info.initialized == Some(false) {
+                    None
+                } else {
+                    Some(device.fingerprint().await?)
+                };
                 match format {
                     Some(OutputFormat::Pretty) => {
                         if i == 0 {
@@ -314,6 +325,9 @@ async fn main() -> Result<()> {
                         }
                         println!("{}", "-".repeat(80));
                         let network = info.networks_string();
+                        let fingerprint = fingerprint
+                            .map(|fingerprint| fingerprint.to_string())
+                            .unwrap_or_else(|| "-".to_owned());
                         println!(
                             "{name:<18} | {is_emulated:<8} | {fingerprint:<15} | {network:<12} | {:<8}",
                             info.version
@@ -321,7 +335,10 @@ async fn main() -> Result<()> {
                         println!("{}", "-".repeat(80));
                     }
                     Some(OutputFormat::Json) => {}
-                    None => println!("{fingerprint}"),
+                    None => match fingerprint {
+                        Some(fingerprint) => println!("{fingerprint}"),
+                        None => println!("{}", device.path()),
+                    },
                 }
             }
             if let Some(OutputFormat::Json) = format {
@@ -756,17 +773,20 @@ mod tests {
     }
 
     #[test]
-    fn native_cli_rejects_hwi_only_selector_flags() {
-        let error = Args::try_parse_from([
+    fn native_cli_accepts_device_type_and_path_selectors() {
+        let args = Args::try_parse_from([
             "bhwi",
+            "--device-type",
+            "bitbox02",
             "--device-path",
-            "tcp:localhost:9999",
+            "tcp:127.0.0.1:15423",
             "device",
             "list",
         ])
-        .expect_err("native CLI must not accept HWI compatibility flags");
+        .expect("native selectors parse");
 
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+        assert_eq!(args.device_type, Some(DeviceType::BitBox02));
+        assert_eq!(args.device_path.as_deref(), Some("tcp:127.0.0.1:15423"));
     }
 
     #[test]

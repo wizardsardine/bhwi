@@ -140,6 +140,7 @@ impl Device {
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum DeviceType {
+    #[value(name = "bitbox02", alias = "bit-box02")]
     BitBox02,
     Coldcard,
     Jade,

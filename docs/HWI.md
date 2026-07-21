@@ -32,13 +32,13 @@ Coldcard, BHWI still tests Python HWI-compatible unsupported-action errors.
 |`signtx`          |`[~]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Ledger registered-wallet and non-default policy signing remains open. |
 |`signmessage`     |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for emulator-supported paths.                                 |
 |`displayaddress`  |`[x]` |`[x]`|`[~]`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Coldcard registered multisig display coverage remains open.           |
-|`setup`           |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Python HWI supports software setup for the unchecked devices.         |
-|`wipe`            |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[ ]`   |Python HWI supports software wipe for the unchecked devices.          |
-|`restore`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[ ]`   |Python HWI support excludes Ledger, Jade, Coldcard, and BitBox01.     |
+|`setup`           |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Physical setup uses fresh entropy and backup; simulator setup is covered end to end.|
+|`wipe`            |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |BitBox02 reset-disconnect behavior is covered by a stateful lifecycle.|
+|`restore`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI support excludes Ledger, Jade, Coldcard, and BitBox01.     |
 |`backup`          |`n/a` |`n/a`|`[x]`   |`n/a` |`n/a`  |`[ ]`   |`[x]`   |Coldcard file backup and BitBox02 mnemonic-export backup are covered. BitBox01 remains open.|
 |`promptpin`       |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN prompting for Trezor-class devices.      |
 |`sendpin`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN entry for Trezor-class devices.          |
-|`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[ ]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
+|`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
 |`installudevrules`|`n/a` |`n/a`|`n/a`   |`n/a` |`n/a`  |`n/a`   |`n/a`   |Host-side Python HWI command covered by the shared udev installer.    |
 
 ## Running Parity Tests

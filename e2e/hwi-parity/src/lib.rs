@@ -528,6 +528,47 @@ mod tests {
     }
 
     #[test]
+    fn candidate_bitbox_management_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("bitbox02")
+        {
+            return Ok(());
+        }
+
+        let base = [
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            "bitbox02",
+        ];
+        for command in [
+            vec!["setup"],
+            vec![
+                "--interactive",
+                "setup",
+                "--backup_passphrase",
+                "backup passphrase",
+            ],
+            vec!["--interactive", "setup", "--label", "Already initialized"],
+            vec!["restore"],
+            vec!["--interactive", "restore", "--word_count", "12"],
+        ] {
+            assert_error_json_parity(base.into_iter().chain(command).map(str::to_owned).collect())?;
+        }
+
+        // The reference toggles the setting once and the candidate toggles it back, so the
+        // shared simulator is returned to its original state after the parity assertion.
+        assert_json_parity(
+            base.into_iter()
+                .chain(["togglepassphrase"])
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn candidate_installudevrules_matches_reference_or_avoids_getlogin_failure() -> Result<()> {
         if env::var("HWI_BIN").is_err() {
             return Ok(());

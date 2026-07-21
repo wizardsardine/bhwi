@@ -81,7 +81,14 @@ pinned reference backend probes `127.0.0.1:15423`, so the BitBox emulator must b
 running and initialized before `hwi-parity-bitbox` starts.
 
 The suite covers the same implemented read/sign/display command set as the
-other wired devices, plus BitBox02 mnemonic-export `backup`. The remaining
-stateful BitBox device-management commands (`setup`, `wipe`, `restore`,
-`togglepassphrase`) stay as tracked gaps because BHWI has not claimed that
-compatibility surface yet.
+other wired devices, plus BitBox02 mnemonic-export `backup` and the stateful
+device-management commands `setup`, `wipe`, `restore`, and
+`togglepassphrase`. Differential tests cover management errors and toggle the
+passphrase setting through both implementations, returning it to its original
+state. Dedicated CLI lifecycle tests start fresh uninitialized simulators to
+exercise successful setup, wipe, and restore flows.
+
+The simulator deliberately stops replying after a successful factory reset.
+CI therefore treats only a read-side disconnect after the reset request as
+success, stops that simulator process, waits for its fixed TCP port to become
+reusable, and starts a fresh process for the restore lifecycle.
