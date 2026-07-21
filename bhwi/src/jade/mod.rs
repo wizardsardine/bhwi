@@ -530,6 +530,7 @@ impl TryFrom<Command> for JadeCommand {
         match cmd {
             Command::Setup(..) => Err(Error::MissingCommandInfo("Setup not supported by Jade")),
             Command::Wipe => Err(Error::MissingCommandInfo("Wipe not supported by Jade")),
+            Command::Restore(..) => Err(Error::MissingCommandInfo("Restore not supported by Jade")),
             Command::Backup => Err(Error::MissingCommandInfo("Backup not supported by Jade")),
             Command::Unlock { .. } => Ok(Self::Auth),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),

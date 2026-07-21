@@ -12,7 +12,7 @@ use bhwi::{
     common::{MultisigAddressType, MultisigDisplayAddress},
     ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
 };
-use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, SetupOptions};
+use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions};
 use bitcoin::{
     Network, NetworkKind, PublicKey, ScriptBuf,
     base64::prelude::{BASE64_STANDARD, Engine as _},
@@ -36,7 +36,7 @@ use crate::{
     Device, DeviceManager, DeviceType,
     config::DeviceSelector,
     get_descriptors::GetDescriptorOptions,
-    management::bitbox_setup_context,
+    management::{bitbox_restore_context, bitbox_setup_context},
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -207,6 +207,11 @@ pub enum HwiCommand {
         backup_passphrase: String,
     },
     Wipe,
+    Restore {
+        interactive: bool,
+        word_count: i32,
+        label: String,
+    },
     UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
     InstallUdevRules {
         location: PathBuf,
@@ -458,6 +463,11 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
             backup_passphrase,
         } => setup_device(request.selector, interactive, label, backup_passphrase).await,
         HwiCommand::Wipe => wipe_device(request.selector).await,
+        HwiCommand::Restore {
+            interactive,
+            word_count,
+            label,
+        } => restore_device(request.selector, interactive, word_count, label).await,
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
@@ -751,6 +761,81 @@ async fn wipe_device(selector: DeviceSelector) -> HwiResponse {
     }
 
     match device.device().wipe_device().await {
+        Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        Err(err) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            err.to_string(),
+        )),
+    }
+}
+
+async fn restore_device(
+    selector: DeviceSelector,
+    interactive: bool,
+    word_count: i32,
+    label: String,
+) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    if !interactive {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            "restore requires interactive mode",
+        ));
+    }
+    if device.device_type() != DeviceType::BitBox02 {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            hwi_unavailable_action_message(
+                device.device_type(),
+                &HwiUnsupportedDeviceAction::Restore {
+                    interactive,
+                    word_count,
+                    label,
+                },
+            ),
+        ));
+    }
+    if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            "The BitBox02 must be wiped before setup.",
+        ));
+    }
+
+    let context = match bitbox_restore_context() {
+        Ok(context) => context,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, err.to_string()));
+        }
+    };
+    match device
+        .device()
+        .restore_device(RestoreOptions { label, word_count }, Some(context))
+        .await
+    {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
         Err(err) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::DeviceConnectionError,
@@ -2332,13 +2417,11 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             backup_passphrase,
         },
         HwiCliCommand::Wipe => HwiCommand::Wipe,
-        HwiCliCommand::Restore { word_count, label } => {
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Restore {
-                interactive: args.interactive,
-                word_count,
-                label,
-            })
-        }
+        HwiCliCommand::Restore { word_count, label } => HwiCommand::Restore {
+            interactive: args.interactive,
+            word_count,
+            label,
+        },
         HwiCliCommand::Backup {
             label,
             backup_passphrase,
@@ -2848,7 +2931,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_restore_unsupported_action() {
+    fn parses_restore_action() {
         let request = parse_args([
             "hwi",
             "--device-type",
@@ -2860,15 +2943,15 @@ mod tests {
             "--label",
             "HWI Jade",
         ])
-        .expect("unsupported restore request");
+        .expect("restore request");
 
         assert_eq!(
             request.command,
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Restore {
+            HwiCommand::Restore {
                 interactive: true,
                 word_count: 12,
                 label: "HWI Jade".to_owned(),
-            })
+            }
         );
     }
 

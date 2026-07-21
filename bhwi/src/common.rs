@@ -20,6 +20,21 @@ pub struct SetupOptions {
 }
 
 #[derive(Clone, Debug)]
+pub struct RestoreOptions {
+    pub label: String,
+    pub word_count: i32,
+}
+
+impl Default for RestoreOptions {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            word_count: 24,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum DisplayAddress {
     ByPath {
         path: DerivationPath,
@@ -69,6 +84,7 @@ pub enum Command {
     Backup,
     Setup(SetupOptions, Option<DeviceContext>),
     Wipe,
+    Restore(RestoreOptions, Option<DeviceContext>),
     GetMasterFingerprint,
     GetVersion,
     GetXpub {

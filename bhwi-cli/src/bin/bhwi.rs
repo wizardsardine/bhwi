@@ -1,12 +1,12 @@
 use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
-use bhwi_async::{DeviceBackup, DeviceContext, SetupOptions, WalletRegistration};
+use bhwi_async::{DeviceBackup, DeviceContext, RestoreOptions, SetupOptions, WalletRegistration};
 use bhwi_cli::{
     DeviceManager, DeviceType, OutputFormat,
     address::AddressTarget,
     config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
-    management::bitbox_setup_context,
+    management::{bitbox_restore_context, bitbox_setup_context},
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -159,6 +159,12 @@ enum DeviceCommands {
     },
     /// Erase wallet material from the selected BitBox02
     Wipe,
+    /// Restore an unseeded BitBox02 using its on-device mnemonic flow
+    Restore {
+        /// User-visible device name
+        #[arg(long, short, default_value = "")]
+        label: String,
+    },
     /// Install udev rules for hardware wallet device access
     InstallUdevRules {
         /// Device rule targets to install
@@ -380,6 +386,30 @@ async fn main() -> Result<()> {
                 }
                 if !device.device().wipe_device().await? {
                     anyhow::bail!("BitBox02 wipe was not completed");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::Restore { label }) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::BitBox02 {
+                    anyhow::bail!("device restore is currently supported only for BitBox02");
+                }
+                let context = bitbox_restore_context()?;
+                if !device
+                    .device()
+                    .restore_device(
+                        RestoreOptions {
+                            label,
+                            word_count: 24,
+                        },
+                        Some(context),
+                    )
+                    .await?
+                {
+                    anyhow::bail!("BitBox02 restore was not completed");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
@@ -612,6 +642,16 @@ mod tests {
         assert!(matches!(
             args.command,
             Commands::Device(DeviceCommands::Wipe)
+        ));
+    }
+
+    #[test]
+    fn parses_device_restore() {
+        let args = Args::try_parse_from(["bhwi", "device", "restore", "--label", "Recovered"])
+            .expect("parse device restore");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Restore { label }) if label == "Recovered"
         ));
     }
 

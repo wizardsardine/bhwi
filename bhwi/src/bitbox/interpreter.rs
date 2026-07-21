@@ -85,6 +85,12 @@ pub enum BitBoxCommand {
     },
     /// Erase wallet material from the device.
     Wipe,
+    /// Restore wallet material using the device's on-screen mnemonic flow.
+    Restore {
+        label: String,
+        timestamp: u32,
+        timezone_offset: i32,
+    },
     /// Restore the device from its currently-loaded mnemonic (simulator seeding).
     RestoreFromMnemonic {
         timestamp: u32,
@@ -146,12 +152,21 @@ enum State {
     SetupWaitRestore,
     WipeWaitInfo,
     WipeWaitReset,
+    RestoreWaitInfo(RestoreInit),
+    RestoreWaitName(RestoreInit),
+    RestoreWaitMnemonic,
     Finished(BitBoxResponse),
 }
 
 struct SetupInit {
     label: String,
     mode: SetupMode,
+    timestamp: u32,
+    timezone_offset: i32,
+}
+
+struct RestoreInit {
+    label: String,
     timestamp: u32,
     timezone_offset: i32,
 }
@@ -896,6 +911,22 @@ where
                 self.state = State::WipeWaitInfo;
                 Ok(encrypted_transmit(bytes).into())
             }
+            BitBoxCommand::Restore {
+                label,
+                timestamp,
+                timezone_offset,
+            } => {
+                if !self.noise.is_paired() {
+                    return Err(BitBoxError::Noise("not paired").into());
+                }
+                let bytes = self.build_encrypted(api::device_info_request())?;
+                self.state = State::RestoreWaitInfo(RestoreInit {
+                    label,
+                    timestamp,
+                    timezone_offset,
+                });
+                Ok(encrypted_transmit(bytes).into())
+            }
             BitBoxCommand::RestoreFromMnemonic {
                 timestamp,
                 timezone_offset,
@@ -1201,6 +1232,52 @@ where
                 self.state = State::Finished(BitBoxResponse::DeviceAction(success));
                 Ok(None)
             }
+            State::RestoreWaitInfo(restore) => {
+                let response = self.decode_encrypted_response(data)?;
+                let info = match response {
+                    pb::response::Response::DeviceInfo(info) => info,
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                };
+                if info.initialized {
+                    return Err(BitBoxError::InvalidInput(
+                        "The BitBox02 must be wiped before setup.",
+                    )
+                    .into());
+                }
+                if restore.label.is_empty() {
+                    let bytes = self.build_encrypted(api::restore_from_mnemonic_request(
+                        restore.timestamp,
+                        restore.timezone_offset,
+                    ))?;
+                    self.state = State::RestoreWaitMnemonic;
+                    Ok(Some(encrypted_transmit(bytes).into()))
+                } else {
+                    let bytes =
+                        self.build_encrypted(api::set_device_name_request(&restore.label))?;
+                    self.state = State::RestoreWaitName(restore);
+                    Ok(Some(encrypted_transmit(bytes).into()))
+                }
+            }
+            State::RestoreWaitName(restore) => {
+                match self.decode_encrypted_response(data)? {
+                    pb::response::Response::Success(_) => {}
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                }
+                let bytes = self.build_encrypted(api::restore_from_mnemonic_request(
+                    restore.timestamp,
+                    restore.timezone_offset,
+                ))?;
+                self.state = State::RestoreWaitMnemonic;
+                Ok(Some(encrypted_transmit(bytes).into()))
+            }
+            State::RestoreWaitMnemonic => {
+                match self.decode_encrypted_response(data)? {
+                    pb::response::Response::Success(_) => {}
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                }
+                self.state = State::Finished(BitBoxResponse::DeviceAction(true));
+                Ok(None)
+            }
         }
     }
 
@@ -1240,6 +1317,22 @@ impl TryFrom<Command> for BitBoxCommand {
                 })
             }
             Command::Wipe => Ok(BitBoxCommand::Wipe),
+            Command::Restore(options, context) => {
+                let Some(DeviceContext::BitBoxManagement(ManagementContext::Restore {
+                    timestamp,
+                    timezone_offset,
+                })) = context
+                else {
+                    return Err(BitBoxError::InvalidInput(
+                        "BitBox restore requires DeviceContext::BitBoxManagement",
+                    ));
+                };
+                Ok(BitBoxCommand::Restore {
+                    label: options.label,
+                    timestamp,
+                    timezone_offset,
+                })
+            }
             Command::Unlock { .. } => Ok(BitBoxCommand::UnlockAndPair),
             Command::GetVersion => Ok(BitBoxCommand::GetVersion),
             Command::GetMasterFingerprint => Ok(BitBoxCommand::GetMasterFingerprint),
@@ -1523,6 +1616,42 @@ mod tests {
         assert!(matches!(
             BitBoxCommand::try_from(Command::Wipe),
             Ok(BitBoxCommand::Wipe)
+        ));
+    }
+
+    #[test]
+    fn common_restore_maps_to_bitbox_restore_and_ignores_word_count() {
+        let command = BitBoxCommand::try_from(Command::Restore(
+            crate::common::RestoreOptions {
+                label: "Recovered".into(),
+                word_count: 12,
+            },
+            Some(DeviceContext::BitBoxManagement(
+                ManagementContext::Restore {
+                    timestamp: 1_601_450_521,
+                    timezone_offset: -3_600,
+                },
+            )),
+        ))
+        .unwrap();
+        assert!(matches!(
+            command,
+            BitBoxCommand::Restore {
+                label,
+                timestamp: 1_601_450_521,
+                timezone_offset: -3_600,
+            } if label == "Recovered"
+        ));
+    }
+
+    #[test]
+    fn common_restore_requires_context() {
+        assert!(matches!(
+            BitBoxCommand::try_from(Command::Restore(
+                crate::common::RestoreOptions::default(),
+                None,
+            )),
+            Err(BitBoxError::InvalidInput(_))
         ));
     }
 

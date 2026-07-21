@@ -581,6 +581,9 @@ impl TryFrom<Command> for ColdcardCommand {
             Command::Wipe => Err(ColdcardError::MissingCommandInfo(
                 "Wipe not supported by Coldcard",
             )),
+            Command::Restore(..) => Err(ColdcardError::MissingCommandInfo(
+                "Restore not supported by Coldcard",
+            )),
             Command::Backup => Ok(Self::Backup),
             Command::Unlock { .. } => Ok(Self::StartEncryption),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),

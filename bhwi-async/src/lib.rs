@@ -12,6 +12,7 @@ pub use bhwi::common::DeviceBackup;
 pub use bhwi::common::DeviceContext;
 pub use bhwi::common::DisplayAddress;
 pub use bhwi::common::Info;
+pub use bhwi::common::RestoreOptions;
 pub use bhwi::common::SetupOptions;
 pub use bhwi::common::WalletRegistration;
 use bhwi::miniscript::descriptor::WalletPolicy;
@@ -58,6 +59,11 @@ pub trait HWI {
         context: Option<DeviceContext>,
     ) -> Result<bool, Self::Error>;
     async fn wipe_device(&mut self) -> Result<bool, Self::Error>;
+    async fn restore_device(
+        &mut self,
+        options: RestoreOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, Self::Error>;
     async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
     async fn get_info(&mut self) -> Result<Info, Self::Error>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, Self::Error>;
@@ -100,6 +106,11 @@ pub trait HWIDevice {
         context: Option<DeviceContext>,
     ) -> Result<bool, HWIDeviceError>;
     async fn wipe_device(&mut self) -> Result<bool, HWIDeviceError>;
+    async fn restore_device(
+        &mut self,
+        options: RestoreOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, HWIDeviceError>;
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError>;
     async fn get_info(&mut self) -> Result<Info, HWIDeviceError>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError>;
@@ -185,6 +196,20 @@ where
     async fn wipe_device(&mut self) -> Result<bool, Self::Error> {
         if let common::Response::DeviceAction(success) =
             run_command_allowing_final_disconnect(self, common::Command::Wipe).await?
+        {
+            Ok(success)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
+
+    async fn restore_device(
+        &mut self,
+        options: RestoreOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, Self::Error> {
+        if let common::Response::DeviceAction(success) =
+            run_command(self, common::Command::Restore(options, context)).await?
         {
             Ok(success)
         } else {
@@ -333,6 +358,16 @@ where
 
     async fn wipe_device(&mut self) -> Result<bool, HWIDeviceError> {
         HWI::wipe_device(self).await.map_err(HWIDeviceError::new)
+    }
+
+    async fn restore_device(
+        &mut self,
+        options: RestoreOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, HWIDeviceError> {
+        HWI::restore_device(self, options, context)
+            .await
+            .map_err(HWIDeviceError::new)
     }
 
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError> {

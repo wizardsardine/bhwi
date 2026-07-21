@@ -54,6 +54,10 @@ pub enum ManagementContext {
         timestamp: u32,
         timezone_offset: i32,
     },
+    Restore {
+        timestamp: u32,
+        timezone_offset: i32,
+    },
 }
 
 /// USB VID/PID of the BitBox02.

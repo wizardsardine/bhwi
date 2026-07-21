@@ -24,6 +24,16 @@ pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     }))
 }
 
+pub fn bitbox_restore_context() -> Result<DeviceContext> {
+    let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
+    Ok(DeviceContext::BitBoxManagement(
+        ManagementContext::Restore {
+            timestamp,
+            timezone_offset,
+        },
+    ))
+}
+
 fn timestamp_and_timezone_offset() -> Result<(u32, i32)> {
     let now = Local::now();
     timestamp_and_timezone_offset_from(now.timestamp(), now.offset().local_minus_utc())
@@ -59,5 +69,14 @@ mod tests {
             timestamp_and_timezone_offset_from(1_750_000_000, -7 * 60 * 60).unwrap(),
             (1_750_000_000, -7 * 60 * 60)
         );
+    }
+
+    #[test]
+    fn restore_context_contains_host_time() {
+        assert!(matches!(
+            bitbox_restore_context().unwrap(),
+            DeviceContext::BitBoxManagement(ManagementContext::Restore { timestamp, .. })
+                if timestamp > 0
+        ));
     }
 }
