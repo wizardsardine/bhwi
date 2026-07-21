@@ -157,6 +157,8 @@ enum DeviceCommands {
         #[arg(long, short, default_value = "")]
         label: String,
     },
+    /// Erase wallet material from the selected BitBox02
+    Wipe,
     /// Install udev rules for hardware wallet device access
     InstallUdevRules {
         /// Device rule targets to install
@@ -365,6 +367,19 @@ async fn main() -> Result<()> {
                     .await?;
                 if !success {
                     anyhow::bail!("BitBox02 setup was not completed");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::Wipe) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::BitBox02 {
+                    anyhow::bail!("device wipe is currently supported only for BitBox02");
+                }
+                if !device.device().wipe_device().await? {
+                    anyhow::bail!("BitBox02 wipe was not completed");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
@@ -588,6 +603,15 @@ mod tests {
         assert!(matches!(
             args.command,
             Commands::Device(DeviceCommands::Setup { label }) if label == "BHWI"
+        ));
+    }
+
+    #[test]
+    fn parses_device_wipe() {
+        let args = Args::try_parse_from(["bhwi", "device", "wipe"]).expect("parse device wipe");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Wipe)
         ));
     }
 

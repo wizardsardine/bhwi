@@ -68,6 +68,7 @@ pub enum MultisigAddressType {
 pub enum Command {
     Backup,
     Setup(SetupOptions, Option<DeviceContext>),
+    Wipe,
     GetMasterFingerprint,
     GetVersion,
     GetXpub {

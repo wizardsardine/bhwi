@@ -206,6 +206,7 @@ pub enum HwiCommand {
         label: String,
         backup_passphrase: String,
     },
+    Wipe,
     UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
     InstallUdevRules {
         location: PathBuf,
@@ -275,6 +276,7 @@ pub enum HwiErrorCode {
     DeviceFailure,
     DeviceConnectionError,
     NeedToBeRoot,
+    DeviceNotInitialized,
 }
 
 impl HwiErrorCode {
@@ -287,6 +289,7 @@ impl HwiErrorCode {
             HwiErrorCode::DeviceFailure => -13,
             HwiErrorCode::DeviceConnectionError => -3,
             HwiErrorCode::NeedToBeRoot => -16,
+            HwiErrorCode::DeviceNotInitialized => -18,
         }
     }
 }
@@ -454,6 +457,7 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
             label,
             backup_passphrase,
         } => setup_device(request.selector, interactive, label, backup_passphrase).await,
+        HwiCommand::Wipe => wipe_device(request.selector).await,
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
@@ -700,6 +704,53 @@ async fn setup_device(
         )
         .await
     {
+        Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        Err(err) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            err.to_string(),
+        )),
+    }
+}
+
+async fn wipe_device(selector: DeviceSelector) -> HwiResponse {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let mut device = match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    if device.device_type() != DeviceType::BitBox02 {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            hwi_unavailable_action_message(device.device_type(), &HwiUnsupportedDeviceAction::Wipe),
+        ));
+    }
+    if device.info().await.ok().and_then(|info| info.initialized) == Some(false) {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceNotInitialized,
+            "The BitBox02 must be initialized first.",
+        ));
+    }
+
+    match device.device().wipe_device().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
         Err(err) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::DeviceConnectionError,
@@ -2280,9 +2331,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             label,
             backup_passphrase,
         },
-        HwiCliCommand::Wipe => {
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Wipe)
-        }
+        HwiCliCommand::Wipe => HwiCommand::Wipe,
         HwiCliCommand::Restore { word_count, label } => {
             HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::Restore {
                 interactive: args.interactive,
@@ -2787,6 +2836,15 @@ mod tests {
                 backup_passphrase: "backup passphrase".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn parses_wipe_action() {
+        let request =
+            parse_args(["hwi", "--device-type", "bitbox02", "wipe"]).expect("wipe request");
+
+        assert_eq!(request.selector.device_type, Some(DeviceType::BitBox02));
+        assert_eq!(request.command, HwiCommand::Wipe);
     }
 
     #[test]

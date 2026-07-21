@@ -112,6 +112,11 @@ pub fn restore_from_mnemonic_request(timestamp: u32, timezone_offset: i32) -> pb
     })
 }
 
+/// Erase wallet material and return the device to its uninitialized state.
+pub fn reset_request() -> pb::request::Request {
+    pb::request::Request::Reset(pb::ResetRequest {})
+}
+
 /// Build a nested `BtcRequest::IsScriptConfigRegistered`.
 pub fn is_script_config_registered_request(
     coin: pb::BtcCoin,
@@ -208,6 +213,14 @@ mod tests {
                 timestamp: 1_601_450_521,
                 timezone_offset: -3_600,
             })
+        ));
+    }
+
+    #[test]
+    fn wipe_request_uses_reset() {
+        assert!(matches!(
+            reset_request(),
+            pb::request::Request::Reset(pb::ResetRequest {})
         ));
     }
 }

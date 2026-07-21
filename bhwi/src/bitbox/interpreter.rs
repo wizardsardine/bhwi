@@ -83,6 +83,8 @@ pub enum BitBoxCommand {
         timestamp: u32,
         timezone_offset: i32,
     },
+    /// Erase wallet material from the device.
+    Wipe,
     /// Restore the device from its currently-loaded mnemonic (simulator seeding).
     RestoreFromMnemonic {
         timestamp: u32,
@@ -142,6 +144,8 @@ enum State {
     },
     SetupWaitBackup,
     SetupWaitRestore,
+    WipeWaitInfo,
+    WipeWaitReset,
     Finished(BitBoxResponse),
 }
 
@@ -884,6 +888,14 @@ where
                 });
                 Ok(encrypted_transmit(bytes).into())
             }
+            BitBoxCommand::Wipe => {
+                if !self.noise.is_paired() {
+                    return Err(BitBoxError::Noise("not paired").into());
+                }
+                let bytes = self.build_encrypted(api::device_info_request())?;
+                self.state = State::WipeWaitInfo;
+                Ok(encrypted_transmit(bytes).into())
+            }
             BitBoxCommand::RestoreFromMnemonic {
                 timestamp,
                 timezone_offset,
@@ -1168,6 +1180,27 @@ where
                 self.state = State::Finished(BitBoxResponse::DeviceAction(true));
                 Ok(None)
             }
+            State::WipeWaitInfo => {
+                let response = self.decode_encrypted_response(data)?;
+                let info = match response {
+                    pb::response::Response::DeviceInfo(info) => info,
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                };
+                if !info.initialized {
+                    return Err(BitBoxError::InvalidInput(
+                        "The BitBox02 must be initialized first.",
+                    )
+                    .into());
+                }
+                let bytes = self.build_encrypted(api::reset_request())?;
+                self.state = State::WipeWaitReset;
+                Ok(Some(encrypted_transmit(bytes).into()))
+            }
+            State::WipeWaitReset => {
+                let success = self.decode_device_action_response(data)?;
+                self.state = State::Finished(BitBoxResponse::DeviceAction(success));
+                Ok(None)
+            }
         }
     }
 
@@ -1206,6 +1239,7 @@ impl TryFrom<Command> for BitBoxCommand {
                     timezone_offset,
                 })
             }
+            Command::Wipe => Ok(BitBoxCommand::Wipe),
             Command::Unlock { .. } => Ok(BitBoxCommand::UnlockAndPair),
             Command::GetVersion => Ok(BitBoxCommand::GetVersion),
             Command::GetMasterFingerprint => Ok(BitBoxCommand::GetMasterFingerprint),
@@ -1481,6 +1515,14 @@ mod tests {
         assert!(matches!(
             Response::from(BitBoxResponse::DeviceAction(false)),
             Response::DeviceAction(false)
+        ));
+    }
+
+    #[test]
+    fn common_wipe_maps_to_bitbox_wipe() {
+        assert!(matches!(
+            BitBoxCommand::try_from(Command::Wipe),
+            Ok(BitBoxCommand::Wipe)
         ));
     }
 

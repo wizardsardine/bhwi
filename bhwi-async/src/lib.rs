@@ -32,6 +32,14 @@ pub use ledger::Ledger;
 pub trait Transport {
     type Error: Debug;
     async fn exchange(&mut self, command: &[u8], encrypted: bool) -> Result<Vec<u8>, Self::Error>;
+
+    /// Whether an exchange failed while reading after the request was successfully written.
+    ///
+    /// Stateful commands that reboot a device can use this to distinguish an expected
+    /// post-write disconnect from a failure to deliver the command.
+    fn is_post_write_disconnect(&self, _error: &Self::Error) -> bool {
+        false
+    }
 }
 
 #[async_trait(?Send)]
@@ -49,6 +57,7 @@ pub trait HWI {
         options: SetupOptions,
         context: Option<DeviceContext>,
     ) -> Result<bool, Self::Error>;
+    async fn wipe_device(&mut self) -> Result<bool, Self::Error>;
     async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
     async fn get_info(&mut self) -> Result<Info, Self::Error>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, Self::Error>;
@@ -90,6 +99,7 @@ pub trait HWIDevice {
         options: SetupOptions,
         context: Option<DeviceContext>,
     ) -> Result<bool, HWIDeviceError>;
+    async fn wipe_device(&mut self) -> Result<bool, HWIDeviceError>;
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError>;
     async fn get_info(&mut self) -> Result<Info, HWIDeviceError>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError>;
@@ -165,6 +175,16 @@ where
     ) -> Result<bool, Self::Error> {
         if let common::Response::DeviceAction(success) =
             run_command(self, common::Command::Setup(options, context)).await?
+        {
+            Ok(success)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
+
+    async fn wipe_device(&mut self) -> Result<bool, Self::Error> {
+        if let common::Response::DeviceAction(success) =
+            run_command_allowing_final_disconnect(self, common::Command::Wipe).await?
         {
             Ok(success)
         } else {
@@ -311,6 +331,10 @@ where
             .map_err(HWIDeviceError::new)
     }
 
+    async fn wipe_device(&mut self) -> Result<bool, HWIDeviceError> {
+        HWI::wipe_device(self).await.map_err(HWIDeviceError::new)
+    }
+
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError> {
         HWI::unlock(self, network)
             .await
@@ -413,6 +437,47 @@ where
         >,
     C: Into<common::Command>,
 {
+    run_command_inner(device, command, false).await
+}
+
+async fn run_command_allowing_final_disconnect<D, C, E, F>(
+    device: &mut D,
+    command: C,
+) -> Result<common::Response, Error<E, F>>
+where
+    E: Debug,
+    F: Debug,
+    D: CommonInterface<
+            common::Command,
+            common::Transmit,
+            common::Response,
+            common::Error,
+            TransportError = E,
+            HttpClientError = F,
+        >,
+    C: Into<common::Command>,
+{
+    run_command_inner(device, command, true).await
+}
+
+async fn run_command_inner<D, C, E, F>(
+    device: &mut D,
+    command: C,
+    allow_final_disconnect: bool,
+) -> Result<common::Response, Error<E, F>>
+where
+    E: Debug,
+    F: Debug,
+    D: CommonInterface<
+            common::Command,
+            common::Transmit,
+            common::Response,
+            common::Error,
+            TransportError = E,
+            HttpClientError = F,
+        >,
+    C: Into<common::Command>,
+{
     let (transport, http_client, mut intpr) = device.components();
     let transmit = intpr.start(command.into())?;
     let exchange = transport
@@ -430,10 +495,15 @@ where
                 transmit = intpr.exchange(res)?;
             }
             common::Recipient::Device => {
-                let exchange = transport
-                    .exchange(&t.payload, t.encrypted)
-                    .await
-                    .map_err(Error::Transport)?;
+                let exchange = match transport.exchange(&t.payload, t.encrypted).await {
+                    Ok(exchange) => exchange,
+                    Err(error)
+                        if allow_final_disconnect && transport.is_post_write_disconnect(&error) =>
+                    {
+                        return Ok(common::Response::DeviceAction(true));
+                    }
+                    Err(error) => return Err(Error::Transport(error)),
+                };
                 transmit = intpr.exchange(exchange)?;
             }
         }

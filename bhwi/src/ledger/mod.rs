@@ -803,6 +803,9 @@ impl TryFrom<Command> for LedgerCommand {
             Command::Setup(..) => Err(LedgerError::MissingCommandInfo(
                 "Setup not supported by Ledger",
             )),
+            Command::Wipe => Err(LedgerError::MissingCommandInfo(
+                "Wipe not supported by Ledger",
+            )),
             Command::Backup => Err(LedgerError::MissingCommandInfo(
                 "Backup not supported by Ledger",
             )),

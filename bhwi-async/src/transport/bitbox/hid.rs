@@ -33,8 +33,10 @@ pub enum BitBoxHIDError {
     Busy,
     #[error("U2F framing error")]
     U2f,
-    #[error("HID IO error: {0}")]
-    Hid(#[from] std::io::Error),
+    #[error("HID write error: {0}")]
+    Write(std::io::Error),
+    #[error("HID read error: {0}")]
+    Read(std::io::Error),
 }
 
 pub struct BitBoxTransportHID<C> {
@@ -63,7 +65,7 @@ impl<C: Channel> BitBoxTransportHID<C> {
                 .channel
                 .send(chunk)
                 .await
-                .map_err(BitBoxHIDError::Hid)?;
+                .map_err(BitBoxHIDError::Write)?;
             if sent < chunk.len() {
                 return Err(BitBoxHIDError::Comm("short write"));
             }
@@ -77,9 +79,12 @@ impl<C: Channel> BitBoxTransportHID<C> {
             .channel
             .receive(&mut buf)
             .await
-            .map_err(BitBoxHIDError::Hid)?;
+            .map_err(BitBoxHIDError::Read)?;
         if read != HID_PACKET_LEN {
-            return Err(BitBoxHIDError::Comm("short read"));
+            return Err(BitBoxHIDError::Read(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "short read",
+            )));
         }
         loop {
             match self.u2f.decode(&buf).map_err(|_| BitBoxHIDError::U2f)? {
@@ -90,9 +95,12 @@ impl<C: Channel> BitBoxTransportHID<C> {
                         .channel
                         .receive(&mut more)
                         .await
-                        .map_err(BitBoxHIDError::Hid)?;
+                        .map_err(BitBoxHIDError::Read)?;
                     if read != HID_PACKET_LEN {
-                        return Err(BitBoxHIDError::Comm("short read"));
+                        return Err(BitBoxHIDError::Read(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "short read",
+                        )));
                     }
                     buf.extend_from_slice(&more);
                 }
@@ -128,5 +136,43 @@ impl<C: Channel> Transport for BitBoxTransportHID<C> {
                 _ => return Err(BitBoxHIDError::Comm("unexpected HWW response")),
             }
         }
+    }
+
+    fn is_post_write_disconnect(&self, error: &Self::Error) -> bool {
+        matches!(error, BitBoxHIDError::Read(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnusedChannel;
+
+    #[async_trait(?Send)]
+    impl Channel for UnusedChannel {
+        async fn send(&self, _data: &[u8]) -> Result<usize, std::io::Error> {
+            unreachable!()
+        }
+
+        async fn receive(&mut self, _data: &mut [u8]) -> Result<usize, std::io::Error> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn only_read_errors_are_post_write_disconnects() {
+        let transport = BitBoxTransportHID::new(UnusedChannel);
+        assert!(
+            transport.is_post_write_disconnect(&BitBoxHIDError::Read(std::io::Error::from(
+                std::io::ErrorKind::TimedOut
+            )))
+        );
+        assert!(
+            !transport.is_post_write_disconnect(&BitBoxHIDError::Write(std::io::Error::from(
+                std::io::ErrorKind::BrokenPipe
+            )))
+        );
+        assert!(!transport.is_post_write_disconnect(&BitBoxHIDError::Nack));
     }
 }
