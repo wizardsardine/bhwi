@@ -2,8 +2,11 @@ use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi_async::{DeviceBackup, DeviceContext, WalletRegistration};
 use bhwi_cli::{
-    DeviceManager, OutputFormat, address::AddressTarget, config::DeviceSelector,
+    DeviceManager, OutputFormat,
+    address::AddressTarget,
+    config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
+    udev::{UdevRuleSelection, install_udev_rules},
 };
 
 use std::path::PathBuf;
@@ -146,6 +149,18 @@ enum DeviceCommands {
         /// Output file for devices that export encrypted backup bytes
         #[arg(long, short)]
         output: Option<PathBuf>,
+    },
+    /// Install udev rules for hardware wallet device access
+    InstallUdevRules {
+        /// Device rule targets to install
+        #[arg(value_enum)]
+        targets: Vec<bhwi_cli::DeviceType>,
+        /// Install rules for all BHWI-supported devices
+        #[arg(long)]
+        all: bool,
+        /// Directory where udev rule files are copied
+        #[arg(long, default_value = "/etc/udev/rules.d/")]
+        location: PathBuf,
     },
 }
 
@@ -325,6 +340,32 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Device(DeviceCommands::InstallUdevRules {
+            targets,
+            all,
+            location,
+        }) => {
+            if all && !targets.is_empty() {
+                anyhow::bail!("--all cannot be combined with explicit device targets");
+            }
+            if !all && targets.is_empty() {
+                anyhow::bail!("specify at least one device target or --all");
+            }
+
+            let selection = if all {
+                UdevRuleSelection::Devices(vec![
+                    bhwi_cli::DeviceType::Coldcard,
+                    bhwi_cli::DeviceType::Jade,
+                    bhwi_cli::DeviceType::Ledger,
+                ])
+            } else {
+                UdevRuleSelection::Devices(targets)
+            };
+            install_udev_rules(&location, selection)?;
+            if let Some(OutputFormat::Json) = format {
+                println!("{}", serde_json::json!({ "success": true }));
+            }
+        }
         Commands::Xpub(XpubCommands::Get { path }) => {
             if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
                 println!("{}", d.device().get_extended_pubkey(path, false).await?);
@@ -477,6 +518,55 @@ mod tests {
         .expect_err("path and descriptor are mutually exclusive");
 
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parses_device_install_udev_rules_targets() {
+        let args = Args::try_parse_from([
+            "bhwi",
+            "device",
+            "install-udev-rules",
+            "--location",
+            "/tmp/rules.d",
+            "ledger",
+            "jade",
+        ])
+        .expect("parse install udev rules");
+
+        match args.command {
+            Commands::Device(DeviceCommands::InstallUdevRules {
+                targets,
+                all,
+                location,
+            }) => {
+                assert_eq!(
+                    targets,
+                    vec![bhwi_cli::DeviceType::Ledger, bhwi_cli::DeviceType::Jade]
+                );
+                assert!(!all);
+                assert_eq!(location, PathBuf::from("/tmp/rules.d"));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_device_install_udev_rules_all() {
+        let args = Args::try_parse_from(["bhwi", "device", "install-udev-rules", "--all"])
+            .expect("parse install all udev rules");
+
+        match args.command {
+            Commands::Device(DeviceCommands::InstallUdevRules {
+                targets,
+                all,
+                location,
+            }) => {
+                assert!(targets.is_empty());
+                assert!(all);
+                assert_eq!(location, PathBuf::from("/etc/udev/rules.d/"));
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
     }
 
     #[test]

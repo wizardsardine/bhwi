@@ -8,6 +8,15 @@ src_key="${rev//[^A-Za-z0-9_.-]/_}"
 work="$cache_root/source-$src_key"
 flash="$cache_root/flash-image-$src_key.bin"
 marker="$cache_root/.flash-built-$src_key"
+prepare_hwi_dir=""
+if [[ "${1:-}" == "--prepare-hwi" ]]; then
+  prepare_hwi_dir="${2:?--prepare-hwi requires an output directory}"
+  shift 2
+fi
+if [[ $# -ne 0 ]]; then
+  echo "usage: start-jade.sh [--prepare-hwi OUTPUT_DIR]" >&2
+  exit 2
+fi
 
 mkdir -p "$cache_root"
 
@@ -48,6 +57,23 @@ if [[ ! -f "$flash" || ! -f "$marker" ]]; then
   touch "$marker"
 elif [[ ! -d "$work" ]]; then
   prepare_source
+fi
+
+if [[ -n "$prepare_hwi_dir" ]]; then
+  mkdir -p "$prepare_hwi_dir"
+  cp "$flash" "$prepare_hwi_dir/flash_image.bin"
+  cp "$work/main/qemu/qemu_efuse.bin" "$prepare_hwi_dir/qemu_efuse.bin"
+  ln -s "$(command -v qemu-system-xtensa)" "$prepare_hwi_dir/qemu-system-xtensa"
+  qemu_dir="$(dirname "$(command -v qemu-system-xtensa)")"
+  if [[ -d "$qemu_dir/../share/qemu" ]]; then
+    ln -s "$qemu_dir/../share/qemu" "$prepare_hwi_dir/pc-bios"
+  elif [[ -d "${QEMU_PC_BIOS_DIR:-}" ]]; then
+    ln -s "$QEMU_PC_BIOS_DIR" "$prepare_hwi_dir/pc-bios"
+  else
+    echo "unable to locate QEMU pc-bios directory" >&2
+    exit 1
+  fi
+  exit 0
 fi
 
 exec qemu-system-xtensa \

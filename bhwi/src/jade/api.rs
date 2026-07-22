@@ -207,6 +207,38 @@ pub struct PathAddressParams<'a> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct MultisigAddressParams<'a> {
+    pub network: &'a str,
+    pub paths: Vec<Vec<u32>>,
+    pub multisig_name: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultisigSigner {
+    #[serde(with = "serde_bytes")]
+    pub fingerprint: Vec<u8>,
+    pub derivation: Vec<u32>,
+    pub xpub: String,
+    pub path: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultisigDescriptor {
+    pub variant: String,
+    pub sorted: bool,
+    pub threshold: u8,
+    pub signers: Vec<MultisigSigner>,
+    pub master_blinding_key: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterMultisigParams<'a> {
+    pub network: &'a str,
+    pub multisig_name: &'a str,
+    pub descriptor: MultisigDescriptor,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SignPsbtParams<'a> {
     pub network: &'a str,
     #[serde(with = "serde_bytes")]

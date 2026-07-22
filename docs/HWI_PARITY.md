@@ -13,10 +13,38 @@ commands and devices where parity is claimed.
   `nix run .#hwi-parity-<device>`. Each builds `bhwi-cli --bins`, then runs
   `bhwi-e2e-hwi-parity`, comparing `REFERENCE_HWI_BIN` against the candidate
   `hwi` for the emulated device.
-- The suite currently asserts `enumerate` parity (device type, model, and JSON
-  shape) with the intended emulator family active.
+- The suite asserts parity for the implemented HWI command set with the
+  intended emulator family active.
 - Emulator CI (`.github/workflows/emulators.yml`) runs the matching
-  `hwi-parity-<device>` app inside each device job.
+  `hwi-parity-<device>` app inside each device job, then stops the shared
+  emulator and runs the pinned upstream HWI suite as that job's final test
+  gate.
+
+## Final acceptance gate
+
+Parity is accepted only when the unmodified Bitcoin Core HWI 3.2.0 device
+suite passes against BHWI's CLI adapter. The flake exposes a tailored app for
+each supported emulator:
+
+```sh
+nix run .#hwi-upstream-bitbox
+nix run .#hwi-upstream-coldcard
+nix run .#hwi-upstream-ledger
+nix run .#hwi-upstream-jade
+```
+
+Each app builds `target/debug/hwi`, prepares the pinned simulator in the layout
+expected by upstream HWI, and runs `test/run_tests.py --device-only
+--interface=cli`. The upstream source and tests are copied only to a temporary
+writable directory; BHWI does not patch test cases or add project-owned skips.
+Only skips already authored by upstream HWI are accepted. Coldcard's final
+gate does apply HWI's own `test/data/coldcard-multisig.patch` to a separate
+simulator build; that compatibility patch changes the emulator firmware, not
+the upstream test suite.
+
+The generic dispatcher remains available as `nix run .#hwi-upstream-suite --
+<device>`. CI gives the final gates bounded runtimes of 45 minutes for
+BitBox02, 90 minutes for Coldcard and Ledger, and 120 minutes for Jade.
 
 ### Why the reference side works for the wired devices
 
@@ -31,6 +59,7 @@ starts the emulator on the exact transport that backend already probes:
 | Coldcard | Unix socket `/tmp/ckcc-simulator.sock`             | `nix run .#coldcard` |
 | Ledger   | Speculos APDU server over TCP `localhost:9999`     | `nix run .#ledger` |
 | Jade     | QEMU serial over TCP `localhost:30121`             | `nix run .#jade` + `jade-init` |
+| BitBox02 | Firmware simulator TCP `localhost:15423`           | `nix run .#bitbox` |
 
 The flake env blocks only supply build/runtime libraries; they do not tell HWI
 where the emulator is — the backend already knows. Our candidate `bhwi hwi`
@@ -38,45 +67,21 @@ mirrors each with its own `--emulators` enumerate.
 
 ## Support matrix
 
-| Device    | HWI parity | Notes |
-|-----------|------------|-------|
-| Ledger    | Wired      | `hwi-parity-ledger`, in Emulator CI. |
-| Coldcard  | Wired      | `hwi-parity-coldcard`, in Emulator CI. |
-| Jade      | Wired      | `hwi-parity-jade`, in Emulator CI. |
-| BitBox02  | **Gap**    | Not wired — see below. |
+| Device    | Differential parity | Upstream final gate |
+|-----------|---------------------|---------------------|
+| Ledger    | `hwi-parity-ledger` | `hwi-upstream-ledger` |
+| Coldcard  | `hwi-parity-coldcard`, including file-producing `backup` | `hwi-upstream-coldcard` |
+| Jade      | `hwi-parity-jade` | `hwi-upstream-jade` |
+| BitBox02  | `hwi-parity-bitbox` | `hwi-upstream-bitbox` |
 
-## BitBox02 parity gap (intentional)
+## BitBox02 parity notes
 
-BitBox02 is intentionally excluded from HWI parity today. Unlike the wired
-devices, the blocker is on the **reference** side, not ours:
+BitBox02 parity is wired against Python HWI's built-in simulator transport. The
+pinned reference backend probes `127.0.0.1:15423`, so the BitBox emulator must be
+running and initialized before `hwi-parity-bitbox` starts.
 
-- Upstream Python HWI's BitBox02 backend talks to the device over **USB HID
-  only** (via the `bitbox02` Python library). It has no `--emulators` /
-  TCP-simulator enumerate path, so the reference `hwi enumerate` cannot see the
-  firmware TCP simulator on `:15423` the way it sees the Coldcard socket, Ledger
-  Speculos, or Jade QEMU. There is no upstream simulator enumerate to lean on.
-- On top of that, the reference HWI restricts recognized devices to
-  `commands.all_devs = ["ledger", "coldcard", "jade"]` in
-  [`flake.nix`](../flake.nix), deliberately excluding BitBox02.
-- The parity harness (`e2e/hwi-parity`) has no BitBox normalization case, and
-  there is no `hwi-parity-bitbox` flake app or CI job.
-
-The candidate side is already ready: `bhwi hwi --emulators --device-type
-bitbox02 enumerate` works against the firmware TCP simulator (the CLI gained a
-simulator transport, and `parse_device_type` accepts `bitbox02`). Enabling
-parity requires:
-
-1. Add `"bitbox02"` to `commands.all_devs` in the reference HWI.
-2. **Verify the upstream `hwilib` BitBox02 backend can reach the pinned firmware
-   TCP simulator** (`tcp:127.0.0.1:15423`). Upstream HWI drives BitBox02 through
-   the `bitbox02` Python library over USB; whether it can enumerate this
-   firmware simulator over TCP is unverified and is the main open question. If it
-   cannot, parity against this simulator is not achievable without a different
-   reference transport, and this row should stay a documented gap.
-3. Add a BitBox02 normalization/device case to `e2e/hwi-parity`.
-4. Add a `hwi-parity-bitbox` flake app (`mkHwiParityRunner … "bitbox02" …`) and
-   expose it under `apps`.
-5. Add the parity step to the `bitbox-e2e` job in
-   `.github/workflows/emulators.yml`.
-
-Until step 2 is confirmed, BitBox02 HWI parity remains an explicit, tracked gap.
+The suite covers the same implemented read/sign/display command set as the
+other wired devices, plus BitBox02 mnemonic-export `backup`. The remaining
+stateful BitBox device-management commands (`setup`, `wipe`, `restore`,
+`togglepassphrase`) stay as tracked gaps because BHWI has not claimed that
+compatibility surface yet.

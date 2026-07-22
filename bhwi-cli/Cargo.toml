@@ -24,6 +24,7 @@ bhwi-async = { workspace = true, features = ["bitbox", "emulators"] }
 bhwi.workspace = true
 futures.workspace = true
 hex = { workspace = true, features = ["serde"] }
+libc = "0.2"
 miniscript = { workspace = true, features = ["serde"] }
 rand_core.workspace = true
 reqwest = { workspace = true, features = ["json"] }

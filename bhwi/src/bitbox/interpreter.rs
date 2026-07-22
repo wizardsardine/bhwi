@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 
+use bitcoin::address::AddressType;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub};
 use bitcoin::psbt::Psbt;
 use prost::Message;
@@ -264,6 +265,25 @@ fn simple_type_from_path(path: &DerivationPath) -> pb::btc_script_config::Simple
         Some(ChildNumber::Hardened { index: 49 }) => SimpleType::P2wpkhP2sh,
         Some(ChildNumber::Hardened { index: 86 }) => SimpleType::P2tr,
         _ => SimpleType::P2wpkh,
+    }
+}
+
+fn simple_type_from_address_format(
+    path: &DerivationPath,
+    address_format: Option<AddressType>,
+) -> Result<pb::btc_script_config::SimpleType, BitBoxError> {
+    use pb::btc_script_config::SimpleType;
+    match address_format {
+        None => Ok(simple_type_from_path(path)),
+        Some(AddressType::P2sh) => Ok(SimpleType::P2wpkhP2sh),
+        Some(AddressType::P2wpkh) => Ok(SimpleType::P2wpkh),
+        Some(AddressType::P2tr) => Ok(SimpleType::P2tr),
+        Some(AddressType::P2pkh | AddressType::P2wsh) => Err(BitBoxError::InvalidInput(
+            "BitBox does not support this address format",
+        )),
+        _ => Err(BitBoxError::InvalidInput(
+            "BitBox does not support this address format",
+        )),
     }
 }
 
@@ -1024,10 +1044,18 @@ impl TryFrom<Command> for BitBoxCommand {
                 keypath: path,
                 display,
             }),
-            Command::DisplayAddress(DisplayAddress::ByPath { path, display, .. }, _) => {
+            Command::DisplayAddress(
+                DisplayAddress::ByPath {
+                    path,
+                    display,
+                    address_format,
+                },
+                _,
+            ) => {
+                let simple_type = simple_type_from_address_format(&path, address_format)?;
                 Ok(BitBoxCommand::ShowSimpleAddress {
                     keypath: path,
-                    simple_type: pb::btc_script_config::SimpleType::P2wpkh,
+                    simple_type,
                     display,
                 })
             }
@@ -1057,6 +1085,9 @@ impl TryFrom<Command> for BitBoxCommand {
                     display,
                 })
             }
+            Command::DisplayAddress(DisplayAddress::ByMultisig(_), _) => Err(
+                BitBoxError::InvalidInput("BitBox raw multisig display is not implemented"),
+            ),
             Command::RegisterWallet { name, policy } => Ok(BitBoxCommand::RegisterScriptConfig {
                 policy: policy::Policy::from_wallet_policy(&policy)?,
                 name,
@@ -1150,6 +1181,23 @@ mod tests {
         assert_eq!(simple("m/86'/0'/0'/0/0"), SimpleType::P2tr);
         // Unknown/legacy purposes fall back to native segwit.
         assert_eq!(simple("m/44'/0'/0'/0/0"), SimpleType::P2wpkh);
+    }
+
+    #[test]
+    fn display_path_address_format_selects_simple_type() {
+        use pb::btc_script_config::SimpleType;
+        let path = DerivationPath::from_str("m/49'/0'/0'/0/0").unwrap();
+
+        let nested = simple_type_from_address_format(&path, Some(AddressType::P2sh)).unwrap();
+        let native = simple_type_from_address_format(&path, Some(AddressType::P2wpkh)).unwrap();
+        let taproot = simple_type_from_address_format(&path, Some(AddressType::P2tr)).unwrap();
+        let default = simple_type_from_address_format(&path, None).unwrap();
+
+        assert_eq!(nested, SimpleType::P2wpkhP2sh);
+        assert_eq!(native, SimpleType::P2wpkh);
+        assert_eq!(taproot, SimpleType::P2tr);
+        assert_eq!(default, SimpleType::P2wpkhP2sh);
+        assert!(simple_type_from_address_format(&path, Some(AddressType::P2pkh)).is_err());
     }
 
     #[test]

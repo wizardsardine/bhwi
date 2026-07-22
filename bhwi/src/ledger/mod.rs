@@ -518,6 +518,12 @@ where
                             Some(cmd),
                         )
                     }
+                    DisplayAddress::ByMultisig(_) => {
+                        return Err(LedgerError::UnsupportedDisplayAddress(
+                            "Ledger raw multisig display is not implemented".into(),
+                        )
+                        .into());
+                    }
                 }
             }
             State::GetWalletAddress(GetWalletAddressStep::Xpub {
@@ -558,6 +564,12 @@ where
                                 "Ledger requires DeviceContext::Ledger for descriptor-based address display",
                             ))?;
                         (wallet_policy, wallet_hmac, change, index)
+                    }
+                    DisplayAddress::ByMultisig(_) => {
+                        return Err(LedgerError::UnsupportedDisplayAddress(
+                            "Ledger raw multisig display is not implemented".into(),
+                        )
+                        .into());
                     }
                 };
                 let store = Some(ledger_policy.to_store().map_err(LedgerError::from)?);
@@ -641,7 +653,33 @@ where
                             )
                         }
                     }
+                    LedgerCommand::GetXpub {
+                        ref path,
+                        display: false,
+                    } if res.status_word == StatusWord::NotSupported => {
+                        // Ledger rejects non-standard derivation paths when the xpub is
+                        // requested silently. As in Python HWI's `get_pubkey_at_path`, retry
+                        // with display enabled so the user can approve the unusual path.
+                        let retry = LedgerCommand::GetXpub {
+                            path: path.clone(),
+                            display: true,
+                        };
+                        let transmit =
+                            Self::Transmit::from(command::get_extended_pubkey(path, true));
+                        self.state = State::Running {
+                            store: None,
+                            command: retry,
+                        };
+                        return Ok(Some(transmit));
+                    }
                     LedgerCommand::GetXpub { .. } => {
+                        if res.status_word != StatusWord::OK {
+                            return Err(LedgerError::unexpected_result(
+                                res.data,
+                                "get extended pubkey status",
+                            )
+                            .into());
+                        }
                         let xpub = Xpub::from_str(&String::from_utf8_lossy(&res.data))
                             .map_err(|_| LedgerError::unexpected_result(res.data, "xpub string"))?;
                         (State::Finished(LedgerResponse::Xpub(xpub)), None)
@@ -772,7 +810,14 @@ impl TryFrom<Command> for LedgerCommand {
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
             Command::GetXpub { path, display } => Ok(Self::GetXpub { path, display }),
             Command::DisplayAddress(addr, ctx) => Ok(Self::GetWalletAddress {
-                address: addr,
+                address: match addr {
+                    DisplayAddress::ByMultisig(_) => {
+                        return Err(LedgerError::UnsupportedDisplayAddress(
+                            "Ledger raw multisig display is not implemented".into(),
+                        ));
+                    }
+                    address => address,
+                },
                 context: ctx,
             }),
             Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
@@ -844,6 +889,8 @@ impl From<LedgerError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Interpreter;
+    use std::str::FromStr;
 
     const XONLY: [u8; 32] = [
         0x4f, 0x35, 0x5b, 0xdc, 0xb7, 0xcc, 0x0a, 0xf7, 0x28, 0xef, 0x3c, 0xce, 0xb9, 0x61, 0x5d,
@@ -919,5 +966,24 @@ mod tests {
         payload.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
         assert_ignored(&payload, 11);
+    }
+
+    #[test]
+    fn nonstandard_xpub_path_retries_with_display() {
+        let path = DerivationPath::from_str("m/0h/0h/4h").unwrap();
+        let command = crate::common::Command::GetXpub {
+            path,
+            display: false,
+        };
+        let mut interpreter = crate::common::LedgerInterpreter::default();
+
+        let initial = interpreter.start(command).unwrap();
+        assert_eq!(initial.payload[5], 0);
+
+        let retry = interpreter
+            .exchange(vec![0x6a, 0x82])
+            .unwrap()
+            .expect("non-standard path should be retried");
+        assert_eq!(retry.payload[5], 1);
     }
 }

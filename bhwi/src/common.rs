@@ -1,6 +1,6 @@
 #[cfg(feature = "bitbox")]
 use crate::bitbox;
-use crate::miniscript::descriptor::WalletPolicy;
+use crate::miniscript::descriptor::{DescriptorPublicKey, WalletPolicy};
 use crate::{coldcard, jade, ledger};
 use bitcoin::Network;
 use bitcoin::address::AddressType;
@@ -26,6 +26,36 @@ pub enum DisplayAddress {
         display: bool,
         descriptor_name: String,
     },
+    /// Display a multisig address from the same inputs as Python HWI's
+    /// `display_multisig_address(addr_type, multisig)` API.
+    ByMultisig(MultisigDisplayAddress),
+}
+
+/// Sans-I/O representation of Python HWI's `AddressType` and
+/// `MultisigDescriptor` arguments to `display_multisig_address`.
+///
+/// `threshold`, `sorted`, and `keys` correspond to HWI's
+/// `MultisigDescriptor.thresh`, `is_sorted`, and `pubkeys`, respectively.
+#[derive(Clone, Debug)]
+pub struct MultisigDisplayAddress {
+    /// Number of keys required to authorize a spend.
+    pub threshold: u8,
+    /// Script wrapper used to derive the address.
+    pub address_type: MultisigAddressType,
+    /// Whether keys use BIP67 sorting (`sortedmulti` rather than `multi`).
+    pub sorted: bool,
+    /// Descriptor keys, including origins and concrete address derivations.
+    pub keys: Vec<DescriptorPublicKey>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum MultisigAddressType {
+    /// Legacy P2SH multisig.
+    Legacy,
+    /// P2SH-wrapped P2WSH multisig.
+    ShWit,
+    /// Native P2WSH multisig.
+    Wit,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -131,6 +161,9 @@ pub enum Error {
 
     #[error("missing command info: {0}")]
     MissingCommandInfo(&'static str),
+
+    #[error("{0}")]
+    Device(String),
 
     #[error("unexpected result for {1}: {0:x?}")]
     UnexpectedResult(Vec<u8>, String),

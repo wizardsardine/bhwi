@@ -41,14 +41,44 @@ writeShellApplication {
     fi
 
     if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-      exec docker run --rm "''${net_args[@]}" -v "$elf_dir:/app:ro" "$image" \
-        speculos "/app/$elf_name" "$@"
+      container_runtime="docker"
+      elf_mount="$elf_dir:/app:ro"
     elif command -v podman >/dev/null 2>&1; then
-      exec podman run --rm "''${net_args[@]}" -v "$elf_dir:/app:ro,Z" "$image" \
-        speculos "/app/$elf_name" "$@"
+      container_runtime="podman"
+      elf_mount="$elf_dir:/app:ro,Z"
     else
       echo "Neither docker nor podman is available for Speculos" >&2
       exit 1
     fi
+
+    container_state_dir="$(mktemp -d)"
+    container_cidfile="$container_state_dir/container.cid"
+
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2329
+    cleanup_container() {
+      if [ -s "$container_cidfile" ]; then
+        "$container_runtime" rm --force "$(cat "$container_cidfile")" >/dev/null 2>&1 || true
+      fi
+      rm -f "$container_cidfile"
+      rmdir "$container_state_dir" 2>/dev/null || true
+    }
+
+    # Stopping the container client alone can leave the container and its host
+    # network listeners running. Keep this wrapper alive to own that lifecycle.
+    trap cleanup_container EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    "$container_runtime" run --rm --cidfile "$container_cidfile" "''${net_args[@]}" \
+      -v "$elf_mount" "$image" speculos "/app/$elf_name" "$@" &
+    container_client_pid=$!
+
+    set +e
+    wait "$container_client_pid"
+    status=$?
+    set -e
+    exit "$status"
   '';
 }
