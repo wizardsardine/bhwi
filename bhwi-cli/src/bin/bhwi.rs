@@ -1,11 +1,12 @@
 use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
-use bhwi_async::{DeviceBackup, DeviceContext, WalletRegistration};
+use bhwi_async::{DeviceBackup, DeviceContext, RestoreOptions, SetupOptions, WalletRegistration};
 use bhwi_cli::{
-    DeviceManager, OutputFormat,
+    DeviceManager, DeviceType, OutputFormat,
     address::AddressTarget,
     config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
+    management::{bitbox_restore_context, bitbox_setup_context},
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -30,6 +31,12 @@ struct Args {
     /// default will be the first connected device with the master fingerprint matching.
     #[arg(long, alias = "fg", value_parser = clap::value_parser!(bitcoin::bip32::Fingerprint))]
     fingerprint: Option<Fingerprint>,
+    /// select a device implementation by type
+    #[arg(long, value_enum)]
+    device_type: Option<DeviceType>,
+    /// select a device by transport path
+    #[arg(long)]
+    device_path: Option<String>,
     /// default will be the Bitcoin mainnet network.
     #[arg(long, short, value_parser = clap::value_parser!(bitcoin::Network), default_value_t = bitcoin::Network::Bitcoin)]
     network: Network,
@@ -43,8 +50,9 @@ impl Args {
         DeviceSelector {
             network: self.network,
             fingerprint: self.fingerprint,
+            device_type: self.device_type,
+            device_path: self.device_path.clone(),
             include_emulators: true,
-            ..DeviceSelector::default()
         }
     }
 }
@@ -150,6 +158,22 @@ enum DeviceCommands {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+    /// Initialize an unseeded BitBox02
+    Setup {
+        /// User-visible device name
+        #[arg(long, short, default_value = "")]
+        label: String,
+    },
+    /// Erase wallet material from the selected BitBox02
+    Wipe,
+    /// Restore an unseeded BitBox02 using its on-device mnemonic flow
+    Restore {
+        /// User-visible device name
+        #[arg(long, short, default_value = "")]
+        label: String,
+    },
+    /// Toggle mnemonic-passphrase use on the selected BitBox02
+    TogglePassphrase,
     /// Install udev rules for hardware wallet device access
     InstallUdevRules {
         /// Device rule targets to install
@@ -283,10 +307,14 @@ async fn main() -> Result<()> {
             for (i, device) in devices.iter_mut().enumerate() {
                 // XXX: Coldcard always needs unlocking
                 device.device().unlock(dev_man.selector.network).await?;
-                let fingerprint = device.fingerprint().await?;
                 let name = device.name().to_string();
                 let is_emulated = device.is_emulated();
                 let info = device.info().await?;
+                let fingerprint = if info.initialized == Some(false) {
+                    None
+                } else {
+                    Some(device.fingerprint().await?)
+                };
                 match format {
                     Some(OutputFormat::Pretty) => {
                         if i == 0 {
@@ -297,6 +325,9 @@ async fn main() -> Result<()> {
                         }
                         println!("{}", "-".repeat(80));
                         let network = info.networks_string();
+                        let fingerprint = fingerprint
+                            .map(|fingerprint| fingerprint.to_string())
+                            .unwrap_or_else(|| "-".to_owned());
                         println!(
                             "{name:<18} | {is_emulated:<8} | {fingerprint:<15} | {network:<12} | {:<8}",
                             info.version
@@ -304,7 +335,10 @@ async fn main() -> Result<()> {
                         println!("{}", "-".repeat(80));
                     }
                     Some(OutputFormat::Json) => {}
-                    None => println!("{fingerprint}"),
+                    None => match fingerprint {
+                        Some(fingerprint) => println!("{fingerprint}"),
+                        None => println!("{}", device.path()),
+                    },
                 }
             }
             if let Some(OutputFormat::Json) = format {
@@ -337,6 +371,82 @@ async fn main() -> Result<()> {
                             println!("{}", serde_json::json!({ "success": true }));
                         }
                     }
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::Setup { label }) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::BitBox02 {
+                    anyhow::bail!("device setup is currently supported only for BitBox02");
+                }
+                let context = bitbox_setup_context(device.is_emulated())?;
+                let success = device
+                    .device()
+                    .setup_device(
+                        SetupOptions {
+                            label,
+                            backup_passphrase: String::new(),
+                        },
+                        Some(context),
+                    )
+                    .await?;
+                if !success {
+                    anyhow::bail!("BitBox02 setup was not completed");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::Wipe) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::BitBox02 {
+                    anyhow::bail!("device wipe is currently supported only for BitBox02");
+                }
+                if !device.device().wipe_device().await? {
+                    anyhow::bail!("BitBox02 wipe was not completed");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::Restore { label }) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::BitBox02 {
+                    anyhow::bail!("device restore is currently supported only for BitBox02");
+                }
+                let context = bitbox_restore_context()?;
+                if !device
+                    .device()
+                    .restore_device(
+                        RestoreOptions {
+                            label,
+                            word_count: 24,
+                        },
+                        Some(context),
+                    )
+                    .await?
+                {
+                    anyhow::bail!("BitBox02 restore was not completed");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::TogglePassphrase) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::BitBox02 {
+                    anyhow::bail!(
+                        "device toggle-passphrase is currently supported only for BitBox02"
+                    );
+                }
+                if !device.device().toggle_passphrase().await? {
+                    anyhow::bail!("BitBox02 passphrase setting was not changed");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
                 }
             }
         }
@@ -551,6 +661,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_device_setup() {
+        let args = Args::try_parse_from(["bhwi", "device", "setup", "--label", "BHWI"])
+            .expect("parse device setup");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Setup { label }) if label == "BHWI"
+        ));
+    }
+
+    #[test]
+    fn parses_device_wipe() {
+        let args = Args::try_parse_from(["bhwi", "device", "wipe"]).expect("parse device wipe");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Wipe)
+        ));
+    }
+
+    #[test]
+    fn parses_device_restore() {
+        let args = Args::try_parse_from(["bhwi", "device", "restore", "--label", "Recovered"])
+            .expect("parse device restore");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Restore { label }) if label == "Recovered"
+        ));
+    }
+
+    #[test]
+    fn parses_device_toggle_passphrase() {
+        let args = Args::try_parse_from(["bhwi", "device", "toggle-passphrase"])
+            .expect("parse device toggle-passphrase");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::TogglePassphrase)
+        ));
+    }
+
+    #[test]
     fn parses_device_install_udev_rules_all() {
         let args = Args::try_parse_from(["bhwi", "device", "install-udev-rules", "--all"])
             .expect("parse install all udev rules");
@@ -624,17 +773,20 @@ mod tests {
     }
 
     #[test]
-    fn native_cli_rejects_hwi_only_selector_flags() {
-        let error = Args::try_parse_from([
+    fn native_cli_accepts_device_type_and_path_selectors() {
+        let args = Args::try_parse_from([
             "bhwi",
+            "--device-type",
+            "bitbox02",
             "--device-path",
-            "tcp:localhost:9999",
+            "tcp:127.0.0.1:15423",
             "device",
             "list",
         ])
-        .expect_err("native CLI must not accept HWI compatibility flags");
+        .expect("native selectors parse");
 
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+        assert_eq!(args.device_type, Some(DeviceType::BitBox02));
+        assert_eq!(args.device_path.as_deref(), Some("tcp:127.0.0.1:15423"));
     }
 
     #[test]

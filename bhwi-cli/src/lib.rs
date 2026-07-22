@@ -21,6 +21,7 @@ pub mod hid;
 pub mod hwi;
 pub mod jade;
 pub mod ledger;
+pub mod management;
 pub mod udev;
 
 #[derive(Serialize)]
@@ -44,6 +45,8 @@ pub struct Info {
     pub version: String,
     pub networks: Vec<Network>,
     pub firmware: Option<String>,
+    #[serde(skip)]
+    pub initialized: Option<bool>,
 }
 
 impl Info {
@@ -62,6 +65,7 @@ impl From<bhwi_async::Info> for Info {
             version: info.version,
             networks: info.networks,
             firmware: info.firmware,
+            initialized: info.initialized,
         }
     }
 }
@@ -136,6 +140,7 @@ impl Device {
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum DeviceType {
+    #[value(name = "bitbox02", alias = "bit-box02")]
     BitBox02,
     Coldcard,
     Jade,

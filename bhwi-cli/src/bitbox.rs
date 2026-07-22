@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{io, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -159,7 +159,11 @@ impl Channel for BitBoxTcpChannel {
 
     async fn receive(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error> {
         let mut stream = self.stream.lock().await;
-        stream.read_exact(data).await?;
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(data))
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "BitBox02 response timed out")
+            })??;
         Ok(data.len())
     }
 }

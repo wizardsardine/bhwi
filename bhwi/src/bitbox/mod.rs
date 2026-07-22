@@ -10,6 +10,56 @@ pub mod u2f;
 
 pub use interpreter::{BitBoxCommand, BitBoxInterpreter, BitBoxResponse};
 
+use std::fmt;
+
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Host entropy used when initializing a new BitBox02 wallet.
+///
+/// The custom `Debug` implementation prevents seed material from being exposed by callers
+/// logging a command or device context.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct SetupEntropy([u8; 32]);
+
+impl SetupEntropy {
+    pub fn new(entropy: [u8; 32]) -> Self {
+        Self(entropy)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SetupEntropy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SetupEntropy([REDACTED])")
+    }
+}
+
+/// Device-specific setup behavior selected by the transport-facing caller.
+#[derive(Clone, Debug)]
+pub enum SetupMode {
+    /// Initialize a physical device with fresh host entropy, then create its backup.
+    NewWallet { entropy: SetupEntropy },
+    /// Run the device's mnemonic restore flow. The simulator uses its fixed test mnemonic.
+    RestoreFromMnemonic,
+}
+
+/// External data needed by BitBox02 management commands while keeping the interpreter sans-I/O.
+#[derive(Clone, Debug)]
+pub enum ManagementContext {
+    Setup {
+        mode: SetupMode,
+        timestamp: u32,
+        timezone_offset: i32,
+    },
+    Restore {
+        timestamp: u32,
+        timezone_offset: i32,
+    },
+}
+
 /// USB VID/PID of the BitBox02.
 pub const BITBOX02_VID: u16 = 0x03eb;
 pub const BITBOX02_PID: u16 = 0x2403;
@@ -33,3 +83,16 @@ pub const OP_HER_COMEZ_TEH_HANDSHAEK: u8 = b'H';
 pub const OP_I_CAN_HAS_PAIRIN_VERIFICASHUN: u8 = b'v';
 pub const OP_NOISE_MSG: u8 = b'n';
 pub const RESPONSE_SUCCESS: u8 = 0x00;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_entropy_debug_is_redacted() {
+        let entropy = SetupEntropy::new([42; 32]);
+        let debug = format!("{entropy:?}");
+        assert_eq!(debug, "SetupEntropy([REDACTED])");
+        assert!(!debug.contains("42"));
+    }
+}

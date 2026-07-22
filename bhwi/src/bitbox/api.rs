@@ -84,6 +84,46 @@ pub fn show_mnemonic_request() -> pb::request::Request {
     pb::request::Request::ShowMnemonic(pb::ShowMnemonicRequest {})
 }
 
+/// Set the user-visible device name.
+pub fn set_device_name_request(name: impl Into<String>) -> pb::request::Request {
+    pb::request::Request::DeviceName(pb::SetDeviceNameRequest { name: name.into() })
+}
+
+/// Initialize a new wallet using host-provided entropy.
+pub fn set_password_request(entropy: &[u8; 32]) -> pb::request::Request {
+    pb::request::Request::SetPassword(pb::SetPasswordRequest {
+        entropy: entropy.to_vec(),
+    })
+}
+
+/// Create the initial SD-card backup after a new wallet has been initialized.
+pub fn create_backup_request(timestamp: u32, timezone_offset: i32) -> pb::request::Request {
+    pb::request::Request::CreateBackup(pb::CreateBackupRequest {
+        timestamp,
+        timezone_offset,
+    })
+}
+
+/// Start the on-device mnemonic restore flow.
+pub fn restore_from_mnemonic_request(timestamp: u32, timezone_offset: i32) -> pb::request::Request {
+    pb::request::Request::RestoreFromMnemonic(pb::RestoreFromMnemonicRequest {
+        timestamp,
+        timezone_offset,
+    })
+}
+
+/// Erase wallet material and return the device to its uninitialized state.
+pub fn reset_request() -> pb::request::Request {
+    pb::request::Request::Reset(pb::ResetRequest {})
+}
+
+/// Enable or disable use of a mnemonic passphrase on the device.
+pub fn set_mnemonic_passphrase_enabled_request(enabled: bool) -> pb::request::Request {
+    pb::request::Request::SetMnemonicPassphraseEnabled(pb::SetMnemonicPassphraseEnabledRequest {
+        enabled,
+    })
+}
+
 /// Build a nested `BtcRequest::IsScriptConfigRegistered`.
 pub fn is_script_config_registered_request(
     coin: pb::BtcCoin,
@@ -148,6 +188,56 @@ mod tests {
         assert!(matches!(
             show_mnemonic_request(),
             pb::request::Request::ShowMnemonic(pb::ShowMnemonicRequest {})
+        ));
+    }
+
+    #[test]
+    fn setup_requests_preserve_external_inputs() {
+        assert!(matches!(
+            set_device_name_request("HWI Test"),
+            pb::request::Request::DeviceName(pb::SetDeviceNameRequest { name })
+                if name == "HWI Test"
+        ));
+
+        let entropy = [42; 32];
+        assert!(matches!(
+            set_password_request(&entropy),
+            pb::request::Request::SetPassword(pb::SetPasswordRequest { entropy: encoded })
+                if encoded == entropy
+        ));
+
+        assert!(matches!(
+            create_backup_request(1_601_450_521, 3_600),
+            pb::request::Request::CreateBackup(pb::CreateBackupRequest {
+                timestamp: 1_601_450_521,
+                timezone_offset: 3_600,
+            })
+        ));
+
+        assert!(matches!(
+            restore_from_mnemonic_request(1_601_450_521, -3_600),
+            pb::request::Request::RestoreFromMnemonic(pb::RestoreFromMnemonicRequest {
+                timestamp: 1_601_450_521,
+                timezone_offset: -3_600,
+            })
+        ));
+    }
+
+    #[test]
+    fn wipe_request_uses_reset() {
+        assert!(matches!(
+            reset_request(),
+            pb::request::Request::Reset(pb::ResetRequest {})
+        ));
+    }
+
+    #[test]
+    fn toggle_passphrase_request_preserves_enabled_state() {
+        assert!(matches!(
+            set_mnemonic_passphrase_enabled_request(true),
+            pb::request::Request::SetMnemonicPassphraseEnabled(
+                pb::SetMnemonicPassphraseEnabledRequest { enabled: true }
+            )
         ));
     }
 }

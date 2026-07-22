@@ -13,6 +13,27 @@ pub struct UnlockOptions {
     pub network: Option<Network>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SetupOptions {
+    pub label: String,
+    pub backup_passphrase: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RestoreOptions {
+    pub label: String,
+    pub word_count: i32,
+}
+
+impl Default for RestoreOptions {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            word_count: 24,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum DisplayAddress {
     ByPath {
@@ -61,6 +82,10 @@ pub enum MultisigAddressType {
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
     Backup,
+    Setup(SetupOptions, Option<DeviceContext>),
+    Wipe,
+    Restore(RestoreOptions, Option<DeviceContext>),
+    TogglePassphrase,
     GetMasterFingerprint,
     GetVersion,
     GetXpub {
@@ -95,10 +120,14 @@ pub enum DeviceContext {
     /// (with key origins) of the registered descriptor.
     #[cfg(feature = "bitbox")]
     BitBox { policy: WalletPolicy },
+    /// Required context for BitBox02 setup and restore operations.
+    #[cfg(feature = "bitbox")]
+    BitBoxManagement(bitbox::ManagementContext),
 }
 
 pub enum Response {
     Backup(DeviceBackup),
+    DeviceAction(bool),
     TaskDone,
     TaskBusy,
     Info(Info),
@@ -138,6 +167,8 @@ pub struct Info {
     pub version: String,
     pub networks: Vec<Network>,
     pub firmware: Option<String>,
+    /// Whether the device has initialized wallet material, when reported by the firmware.
+    pub initialized: Option<bool>,
 }
 
 pub enum Recipient {

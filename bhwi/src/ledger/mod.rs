@@ -800,6 +800,18 @@ impl TryFrom<Command> for LedgerCommand {
     type Error = LedgerError;
     fn try_from(cmd: Command) -> Result<Self, Self::Error> {
         match cmd {
+            Command::Setup(..) => Err(LedgerError::MissingCommandInfo(
+                "Setup not supported by Ledger",
+            )),
+            Command::Wipe => Err(LedgerError::MissingCommandInfo(
+                "Wipe not supported by Ledger",
+            )),
+            Command::Restore(..) => Err(LedgerError::MissingCommandInfo(
+                "Restore not supported by Ledger",
+            )),
+            Command::TogglePassphrase => Err(LedgerError::MissingCommandInfo(
+                "Toggle passphrase not supported by Ledger",
+            )),
             Command::Backup => Err(LedgerError::MissingCommandInfo(
                 "Backup not supported by Ledger",
             )),
@@ -853,6 +865,7 @@ impl From<LedgerResponse> for Response {
                 version: res.version.to_string(),
                 networks: vec![res.network()],
                 firmware: Some(res.app_name),
+                initialized: None,
             }),
             LedgerResponse::Signature(header, signature) => Response::Signature(header, signature),
             LedgerResponse::TaskDone => Response::TaskDone,

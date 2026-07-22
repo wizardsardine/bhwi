@@ -36,7 +36,7 @@ jobs:
   bitbox-e2e:
     needs: nix-flake
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
@@ -80,8 +80,48 @@ jobs:
             cat bitbox-hwi-parity.log || true
             exit 1
           }
-      - name: Stop BitBox simulator before upstream gate
+      - name: Stop shared BitBox simulator before management lifecycle
         run: bash nix/scripts/stop-emulator.sh bitbox.pid tcp localhost 15423 60
+      - name: Start fresh BitBox02 simulator for setup lifecycle
+        run: |
+          nix run .#bitbox > bitbox-setup.log 2>&1 &
+          echo $! > bitbox.pid
+          bash nix/scripts/wait-for-port.sh localhost 15423 600 "$(cat bitbox.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox setup lifecycle startup log" bitbox-setup.log
+            cat bitbox-setup.log || true
+            exit 1
+          }
+      - name: Run BitBox setup, toggle-passphrase, and wipe lifecycle
+        run: |
+          set -o pipefail
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#bitbox -c cargo test -p bhwi-e2e-cli bitbox::bitbox_setup_management_lifecycle -- --ignored --exact --test-threads=1 2>&1 | tee bitbox-management-setup.log || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox setup lifecycle log" bitbox-management-setup.log
+            cat bitbox-management-setup.log || true
+            exit 1
+          }
+      - name: Restart BitBox02 simulator after reset
+        run: |
+          bash nix/scripts/stop-emulator.sh bitbox.pid tcp localhost 15423 5
+          # The pinned simulator does not set SO_REUSEADDR; let the reset connection leave
+          # TIME_WAIT before binding its fixed port again.
+          sleep 65
+          nix run .#bitbox > bitbox-restore.log 2>&1 &
+          echo $! > bitbox.pid
+          bash nix/scripts/wait-for-port.sh localhost 15423 600 "$(cat bitbox.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox restore lifecycle startup log" bitbox-restore.log
+            cat bitbox-restore.log || true
+            exit 1
+          }
+      - name: Run BitBox restore lifecycle
+        run: |
+          set -o pipefail
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#bitbox -c cargo test -p bhwi-e2e-cli bitbox::bitbox_restore_management_lifecycle -- --ignored --exact --test-threads=1 2>&1 | tee bitbox-management-restore.log || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox restore lifecycle log" bitbox-management-restore.log
+            cat bitbox-management-restore.log || true
+            exit 1
+          }
+      - name: Stop BitBox simulator before upstream gate
+        run: bash nix/scripts/stop-emulator.sh bitbox.pid tcp localhost 15423 5
       - name: Run upstream HWI BitBox02 suite
         run: timeout 45m nix run .#hwi-upstream-bitbox
       - name: Stop BitBox simulator
