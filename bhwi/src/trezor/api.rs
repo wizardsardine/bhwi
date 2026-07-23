@@ -2,7 +2,7 @@ use crate::trezor::error::TrezorError;
 use crate::trezor::proto::{bitcoin as btc, common as pb, management as mgmt};
 use prost::Message;
 
-const HEADER: [u8; 2] = [b'#', b'#'];
+const HEADER: [u8; 2] = *b"##";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
