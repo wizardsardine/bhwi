@@ -1,6 +1,8 @@
 #[cfg(feature = "bitbox")]
 use crate::bitbox;
 use crate::miniscript::descriptor::{DescriptorPublicKey, WalletPolicy};
+#[cfg(feature = "trezor")]
+use crate::trezor;
 use crate::{coldcard, jade, ledger};
 use bitcoin::Network;
 use bitcoin::address::AddressType;
@@ -230,6 +232,8 @@ pub type ColdcardInterpreter<'a> =
     coldcard::ColdcardInterpreter<'a, Command, Transmit, Response, Error>;
 pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Error>;
 pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
+#[cfg(feature = "trezor")]
+pub type TrezorInterpreter = trezor::TrezorInterpreter<Command, Transmit, Response, Error>;
 
 impl From<Vec<u8>> for Transmit {
     fn from(payload: Vec<u8>) -> Transmit {
