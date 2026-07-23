@@ -26,6 +26,7 @@ bitbox = [
     "dep:zeroize",
     "dep:zeroize_derive",
 ]
+trezor = ["dep:prost"]
 
 [dependencies]
 base64ct = { workspace = true, features = ["alloc"] }
