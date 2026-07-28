@@ -197,7 +197,8 @@
         "nixpkgs-coldcard": "nixpkgs-coldcard",
         "nixpkgs-esp-dev": "nixpkgs-esp-dev",
         "python-hwi": "python-hwi",
-        "rust-overlay": "rust-overlay"
+        "rust-overlay": "rust-overlay",
+        "trezor-firmware": "trezor-firmware"
       }
     },
     "rust-overlay": {
@@ -247,6 +248,23 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "trezor-firmware": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1739366775,
+        "narHash": "sha256-fNe8M8AnLnhF6MfkR9Ojt3mS34o1h6n1PWyk+fXdaWo=",
+        "owner": "trezor",
+        "repo": "trezor-firmware",
+        "rev": "b2098ff03fef439a1a5b49bd0ef48d1f73d11a39",
+        "type": "github"
+      },
+      "original": {
+        "owner": "trezor",
+        "repo": "trezor-firmware",
+        "rev": "b2098ff03fef439a1a5b49bd0ef48d1f73d11a39",
         "type": "github"
       }
     }

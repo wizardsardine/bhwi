@@ -23,6 +23,10 @@
       url = "github:bitcoin-core/HWI/3.2.0";
       flake = false;
     };
+    trezor-firmware = {
+      url = "github:trezor/trezor-firmware/b2098ff03fef439a1a5b49bd0ef48d1f73d11a39";
+      flake = false;
+    };
     nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
     nixpkgs-coldcard.url = "github:NixOS/nixpkgs/nixos-24.05";
     rust-overlay = {
@@ -39,6 +43,7 @@
     jade-firmware,
     jade-pinserver,
     python-hwi,
+    trezor-firmware,
     nixpkgs,
     nixpkgs-coldcard,
     nixpkgs-esp-dev,
@@ -462,6 +467,73 @@
               export BITBOX_SIMULATOR_BIN="${bitboxSimulator}/bin/bitbox02-simulator"
             ''
             ./nix/scripts/start-bitbox.sh;
+        # The Trezor emulators ship as prebuilt linux release binaries, one per firmware.
+        # `legacy` drives the Trezor One and `core` the Model T. Versions are the ones
+        # built at the pinned trezor-firmware revision. Darwin has no prebuilt and builds
+        # from source through trezor-firmware's own shell.nix.
+        trezorLegacyVersion = "1.13.1";
+        trezorCoreVersion = "2.8.9";
+        mkTrezorEmulator = {
+          binary,
+          model,
+          version,
+          hash,
+        }:
+          pkgs.stdenv.mkDerivation {
+            name = "${binary}-${version}";
+            src = pkgs.fetchurl {
+              url = "https://data.trezor.io/dev/firmware/releases/emulators-new/${model}/${binary}-${model}-v${version}";
+              inherit hash;
+            };
+            dontUnpack = true;
+            nativeBuildInputs = [pkgs.autoPatchelfHook];
+            buildInputs = [pkgs.stdenv.cc.cc.lib pkgs.SDL2 pkgs.SDL2_image];
+            installPhase = ''
+              mkdir -p $out/bin
+              install -m755 $src $out/bin/${binary}
+            '';
+          };
+        trezorLegacyEmulator = mkTrezorEmulator {
+          binary = "trezor-emu-legacy";
+          model = "T1B1";
+          version = trezorLegacyVersion;
+          hash = "sha256-GCOPpb8mgdWuFbLeBQPEiLKZqJxkWfKUn8RNu6d+xMI=";
+        };
+        trezorCoreEmulator = mkTrezorEmulator {
+          binary = "trezor-emu-core";
+          model = "T2T1";
+          version = trezorCoreVersion;
+          hash = "sha256-FOns8PiWCNZTN9jwMrMMyPqwiF80MNnDC4zy5XCer44=";
+        };
+        mkTrezorRunner = name: variant: emulatorBin:
+          if isDarwin
+          then
+            mkRunner "bhwi-start-${name}" [pkgs.coreutils pkgs.git pkgs.nix] ''
+              export TREZOR_VARIANT="${variant}"
+              export TREZOR_FIRMWARE_SRC="${trezor-firmware}"
+              export TREZOR_FIRMWARE_REV="${trezor-firmware.rev or "locked"}"
+              export TREZOR_FIRMWARE_URL="https://github.com/trezor/trezor-firmware.git"
+            ''
+            ./nix/scripts/start-trezor.sh
+          else
+            mkRunner "bhwi-start-${name}" [pkgs.coreutils] ''
+              export TREZOR_VARIANT="${variant}"
+              export TREZOR_EMULATOR_BIN="${emulatorBin}"
+            ''
+            ./nix/scripts/start-trezor.sh;
+        trezorInitRunner =
+          mkRunner "bhwi-init-trezor" [
+            (pkgs.python3.withPackages (ps: [ps.trezor]))
+          ] ''
+            export TREZOR_PYTHON_SRC="${trezor-firmware}/python/src"
+          ''
+          ./nix/scripts/init-trezor.sh;
+        trezorOneRunner =
+          mkTrezorRunner "trezor-one" "legacy"
+          "${trezorLegacyEmulator}/bin/trezor-emu-legacy";
+        trezorTRunner =
+          mkTrezorRunner "trezor-t" "core"
+          "${trezorCoreEmulator}/bin/trezor-emu-core";
         hwiReference = pkgs.writeShellApplication {
           name = "hwi-reference";
           runtimeInputs = [hwiPython];
@@ -658,6 +730,9 @@
             jade = mkApp jadeRunner;
             jade-init = mkApp jadeInitRunner;
             jade-pinserver = mkApp jadePinserverRunner;
+            trezor-one = mkApp trezorOneRunner;
+            trezor-t = mkApp trezorTRunner;
+            trezor-init = mkApp trezorInitRunner;
           }
           // pkgs.lib.optionalAttrs (!isDarwin) {
             hwi-upstream-suite = mkApp hwiUpstreamSuite;
@@ -688,6 +763,10 @@
             packages = inputs ++ jadeInputs;
             shellHook = commonE2eEnv;
           };
+          trezor = pkgs.mkShell {
+            packages = inputs;
+            shellHook = commonE2eEnv;
+          };
         };
         linuxChecks = pkgs.lib.optionalAttrs emulatorSystem {
           emulator-scripts = pkgs.runCommand "bhwi-emulator-scripts" {} ''
@@ -697,6 +776,9 @@
             test -f ${./nix/scripts/start-jade.sh}
             test -f ${./nix/scripts/start-jade-pinserver.sh}
             test -f ${./nix/scripts/init-jade.sh}
+            test -f ${./nix/scripts/start-trezor.sh}
+            test -f ${./nix/scripts/init-trezor.sh}
+            test -f ${./nix/scripts/wait-for-trezor.sh}
             test -f ${./nix/scripts/emit-gh-error-log.sh}
             test -f ${./nix/scripts/run-hwi-upstream-suite.sh}
             test -f ${./nix/scripts/stop-emulator.sh}
