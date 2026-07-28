@@ -22,6 +22,7 @@ pub mod hwi;
 pub mod jade;
 pub mod ledger;
 pub mod management;
+pub mod trezor;
 pub mod udev;
 
 #[derive(Serialize)]
