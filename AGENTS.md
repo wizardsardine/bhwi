@@ -127,6 +127,7 @@
   - Coldcard: `nix run .#coldcard`, then `nix develop .#coldcard -c cargo test -p bhwi-e2e-coldcard -- --test-threads=1`
   - Ledger: `nix run .#ledger`, then `nix develop .#ledger -c cargo test -p bhwi-e2e-ledger -- --test-threads=1`
   - Jade: `nix run .#jade-pinserver`, `nix run .#jade`, `nix run .#jade-init`, then `nix develop .#jade -c cargo test -p bhwi-e2e-jade -- --test-threads=1`
+  - Trezor: `nix run .#trezor-one` or `nix run .#trezor-t`, `nix run .#trezor-init`, then `nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1`
 - For user-facing emulator-supported CLI commands, build the CLI binary and run the matching CLI e2e test with `BHWI_BIN` set:
   - Build: `cargo build -p bhwi-cli`
   - Coldcard: `BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#coldcard -c cargo test -p bhwi-e2e-cli coldcard -- --test-threads=1`

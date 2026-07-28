@@ -139,6 +139,36 @@ nix run .#jade-init
 nix develop .#jade -c cargo test -p bhwi-e2e-jade -- --test-threads=1
 ```
 
+## Trezor
+
+- Local code:
+  - [Interpreter](../bhwi/src/trezor/interpreter.rs)
+  - [Protocol messages](../bhwi/src/trezor/api.rs)
+  - [Generated protobuf bindings](../bhwi/src/trezor/proto.rs)
+  - [Protocol v1 transport](../bhwi-async/src/transport/trezor/mod.rs)
+- Upstream references:
+  - [Trezor firmware](https://github.com/trezor/trezor-firmware)
+  - [Protobuf definitions](https://github.com/trezor/trezor-firmware/tree/main/common/protob)
+  - [trezorlib Python client](https://github.com/trezor/trezor-firmware/tree/main/python)
+- Onboarding notes:
+  - Messages are protobuf framed as `##`, a big-endian message type and length,
+    then chunked into 64 byte reports prefixed with `0x3f`. The framing is the
+    same over HID, WebUSB and the UDP emulator, so one transport serves all
+    three.
+  - The generated bindings are vendored and regenerated from the pinned
+    firmware revision, matching the revision the emulators are built from.
+  - `GetPublicKey` sets `ignore_xpub_magic` so the device returns standard
+    xpub/tpub rather than SLIP-132 prefixes.
+  - The Trezor One and the Model T run different firmware codebases, so each
+    model has its own emulator.
+  - Use these commands for emulator-backed tests:
+
+```sh
+nix run .#trezor-one   # or nix run .#trezor-t
+nix run .#trezor-init
+nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1
+```
+
 ## Adding a Device
 
 - Start from `bhwi/src/common.rs` and map each supported common command to the
