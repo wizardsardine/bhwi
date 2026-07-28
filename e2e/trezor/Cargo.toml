@@ -1,0 +1,13 @@
+[package]
+name = "bhwi-e2e-trezor"
+version = "0.1.0"
+edition = "2024"
+authors.workspace = true
+license-file.workspace = true
+
+[dependencies]
+bhwi = { workspace = true, features = ["trezor"] }
+bhwi-async = { workspace = true, features = ["trezor"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+bhwi-cli = { path = "../../bhwi-cli" }

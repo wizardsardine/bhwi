@@ -398,6 +398,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bhwi-e2e-trezor"
+version = "0.1.0"
+dependencies = [
+ "bhwi",
+ "bhwi-async",
+ "bhwi-cli",
+ "tokio",
+]
+
+[[package]]
 name = "bhwi-wasm"
 version = "0.0.1"
 dependencies = [
