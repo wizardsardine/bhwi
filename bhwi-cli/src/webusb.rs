@@ -1,4 +1,5 @@
 use std::io;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bhwi_async::transport::Channel;
@@ -10,6 +11,7 @@ const INTERFACE: u8 = 0;
 const ENDPOINT_OUT: u8 = 0x01;
 const ENDPOINT_IN: u8 = 0x81;
 const PACKET_SIZE: usize = 64;
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
 pub struct WebUsbChannel {
     out: Mutex<Endpoint<Interrupt, Out>>,
@@ -29,10 +31,25 @@ impl WebUsbChannel {
         let ep_in = interface
             .endpoint::<Interrupt, In>(ENDPOINT_IN)
             .map_err(io::Error::other)?;
-        Ok(Self {
+        let mut channel = Self {
             out: Mutex::new(out),
             ep_in,
-        })
+        };
+        channel.drain();
+        Ok(channel)
+    }
+
+    fn drain(&mut self) {
+        loop {
+            self.ep_in.submit(Buffer::new(PACKET_SIZE));
+            if self.ep_in.wait_next_complete(DRAIN_TIMEOUT).is_none() {
+                self.ep_in.cancel_all();
+                while self.ep_in.pending() > 0 {
+                    self.ep_in.wait_next_complete(DRAIN_TIMEOUT);
+                }
+                return;
+            }
+        }
     }
 }
 
