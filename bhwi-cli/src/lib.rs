@@ -9,7 +9,7 @@ use strum::{EnumIter, IntoEnumIterator};
 
 use crate::{
     bitbox::BitBoxDevice, coldcard::ColdcardDevice, config::DeviceSelector, jade::JadeDevice,
-    ledger::LedgerDevice,
+    ledger::LedgerDevice, trezor::TrezorDevice,
 };
 
 pub mod address;
@@ -24,6 +24,7 @@ pub mod ledger;
 pub mod management;
 pub mod trezor;
 pub mod udev;
+pub mod webusb;
 
 #[derive(Serialize)]
 pub struct Device {
@@ -149,6 +150,7 @@ pub enum DeviceType {
     Coldcard,
     Jade,
     Ledger,
+    Trezor,
 }
 
 impl DeviceType {
@@ -158,6 +160,7 @@ impl DeviceType {
             DeviceType::Ledger => LedgerDevice::enumerate(selector).await?,
             DeviceType::Coldcard => ColdcardDevice::enumerate(selector).await?,
             DeviceType::Jade => JadeDevice::enumerate(selector).await?,
+            DeviceType::Trezor => TrezorDevice::enumerate(selector).await?,
         })
     }
 }

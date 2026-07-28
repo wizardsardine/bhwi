@@ -1,20 +1,176 @@
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use async_hid::Device as HidDevice;
+use async_hid::HidBackend;
+use async_trait::async_trait;
+use bhwi::trezor::{
+    TREZOR_DEVICE_ID, TREZOR_ONE_DEVICE_ID, TREZOR_ONE_PID, TREZOR_ONE_VID, TREZOR_PID, TREZOR_VID,
+};
+use bhwi_async::{Trezor, transport::trezor::TrezorTransport};
+use bitcoin::Network;
+use futures::stream::{StreamExt, TryStreamExt};
+
+use crate::{
+    Device, DeviceEnumerator, DeviceType, config::DeviceSelector, hid::HidChannel,
+    trezor::emulator::EmulatorClient, webusb::WebUsbChannel,
+};
+
+pub type TrezorOneDevice = Trezor<TrezorTransport<HidChannel>>;
+pub type TrezorWebUsbDevice = Trezor<TrezorTransport<WebUsbChannel>>;
+pub type TrezorEmulatorDevice = Trezor<TrezorTransport<EmulatorClient>>;
+
+const EMULATOR_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+pub struct TrezorDevice;
+
+impl TrezorDevice {
+    async fn hid_device(network: Network, dev: HidDevice) -> Result<Option<Device>> {
+        let path = hid_path(&dev);
+        let name = dev.name.clone();
+        let model = trezor_model(dev.product_id, false);
+        let opened = match dev.open().await {
+            Ok(opened) => opened,
+            Err(err) => {
+                eprintln!("Warning: skipping Trezor at {path}: {err}");
+                return Ok(None);
+            }
+        };
+        Ok(Some(
+            Device::new(
+                &name,
+                DeviceType::Trezor,
+                path,
+                model,
+                Box::new(
+                    TrezorOneDevice::new(TrezorTransport::new(HidChannel::new(opened)))
+                        .with_network(network),
+                ),
+                false,
+            )
+            .await?,
+        ))
+    }
+
+    async fn webusb_device(network: Network, info: &nusb::DeviceInfo) -> Result<Device> {
+        let channel = WebUsbChannel::open(info).await?;
+        Device::new(
+            "Trezor",
+            DeviceType::Trezor,
+            webusb_path(info),
+            trezor_model(info.product_id(), false),
+            Box::new(TrezorWebUsbDevice::new(TrezorTransport::new(channel)).with_network(network)),
+            false,
+        )
+        .await
+    }
+
+    async fn emulator_device(
+        network: Network,
+        addr: &str,
+        client: EmulatorClient,
+    ) -> Result<Device> {
+        Device::new(
+            "Trezor Emulator",
+            DeviceType::Trezor,
+            addr,
+            trezor_model(0, true),
+            Box::new(TrezorEmulatorDevice::new(TrezorTransport::new(client)).with_network(network)),
+            true,
+        )
+        .await
+    }
+}
+
+#[async_trait(?Send)]
+impl DeviceEnumerator for TrezorDevice {
+    async fn enumerate(selector: &DeviceSelector) -> Result<Vec<Device>> {
+        let mut devices: Vec<Device> = HidBackend::default()
+            .enumerate()
+            .await?
+            .map(Ok)
+            .try_filter_map(|dev| async move {
+                let path = hid_path(&dev);
+                if selector.matches(DeviceType::Trezor, &path)
+                    && dev.vendor_id == TREZOR_ONE_VID
+                    && dev.product_id == TREZOR_ONE_PID
+                    && dev.usage_page
+                        == TREZOR_ONE_DEVICE_ID
+                            .usage_page
+                            .context("trezor one usage page constant not set")?
+                {
+                    Self::hid_device(selector.network, dev).await
+                } else {
+                    Ok(None)
+                }
+            })
+            .try_collect()
+            .await?;
+
+        for info in nusb::list_devices()
+            .await?
+            .filter(|info| info.vendor_id() == TREZOR_VID && info.product_id() == TREZOR_PID)
+        {
+            let path = webusb_path(&info);
+            if !selector.matches(DeviceType::Trezor, &path) {
+                continue;
+            }
+            match Self::webusb_device(selector.network, &info).await {
+                Ok(device) => devices.push(device),
+                Err(err) => eprintln!("Warning: skipping Trezor at {path}: {err}"),
+            }
+        }
+
+        if selector.include_emulators
+            && let Some(addr) = TREZOR_DEVICE_ID.emulator_path
+            && selector.matches(DeviceType::Trezor, addr)
+            && let Ok(client) = EmulatorClient::new(addr).await
+            && client.ping(EMULATOR_PROBE_TIMEOUT).await
+        {
+            devices.push(Self::emulator_device(selector.network, addr, client).await?);
+        }
+
+        Ok(devices)
+    }
+}
+
+fn webusb_path(info: &nusb::DeviceInfo) -> String {
+    match info.serial_number() {
+        Some(serial) => format!(
+            "webusb:{:04x}:{:04x}:{serial}",
+            info.vendor_id(),
+            info.product_id()
+        ),
+        None => format!("webusb:{:04x}:{:04x}", info.vendor_id(), info.product_id()),
+    }
+}
+
+fn hid_path(dev: &HidDevice) -> String {
+    let suffix = dev.serial_number.as_deref().unwrap_or(&dev.name);
+    format!("hid:{:04x}:{:04x}:{suffix}", dev.vendor_id, dev.product_id)
+}
+
+fn trezor_model(product_id: u16, is_emulated: bool) -> &'static str {
+    match (product_id, is_emulated) {
+        (_, true) => "trezor_emulator",
+        (TREZOR_ONE_PID, false) => "trezor_one",
+        (TREZOR_PID, false) => "trezor_t",
+        _ => "trezor",
+    }
+}
+
 pub mod emulator {
     use std::time::Duration;
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use bhwi_async::{
-        transport::{Channel, trezor::TrezorTransport},
-        trezor::Trezor,
-    };
+    use bhwi_async::transport::Channel;
     use tokio::net::UdpSocket;
 
-    pub const DEFAULT_EMULATOR_ADDR: &str = "127.0.0.1:21324";
+    pub use bhwi::trezor::DEFAULT_TREZOR_EMULATOR as DEFAULT_EMULATOR_ADDR;
 
     const PING: &[u8; 8] = b"PINGPING";
     const PONG: &[u8; 8] = b"PONGPONG";
-
-    pub type TrezorEmulatorDevice = Trezor<TrezorTransport<EmulatorClient>>;
 
     pub struct EmulatorClient {
         socket: UdpSocket,
@@ -27,8 +183,7 @@ pub mod emulator {
             Ok(Self { socket })
         }
 
-        // UDP has no connect to probe, so a running emulator can only be found
-        // by asking it to answer.
+        // UDP has no connect to probe, so absence shows up only as no answer.
         pub async fn ping(&self, timeout: Duration) -> bool {
             if self.socket.send(PING).await.is_err() {
                 return false;
@@ -56,6 +211,7 @@ pub mod emulator {
     mod tests {
         use super::*;
         use bhwi_async::Transport;
+        use bhwi_async::transport::trezor::TrezorTransport;
 
         const REPORT_SIZE: usize = 64;
 

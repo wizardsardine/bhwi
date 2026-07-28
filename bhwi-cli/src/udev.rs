@@ -215,7 +215,7 @@ const UDEV_RULES: &[UdevRule] = &[
     UdevRule {
         name: "51-trezor.rules",
         contents: include_str!("udev/51-trezor.rules"),
-        device_type: None,
+        device_type: Some(DeviceType::Trezor),
     },
     UdevRule {
         name: "51-usb-keepkey.rules",

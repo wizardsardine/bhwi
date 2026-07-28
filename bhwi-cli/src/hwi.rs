@@ -706,7 +706,11 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
                 None
             }
         };
-        let label = device.info().await.ok().and_then(|info| info.label);
+        let label = if label_reported(device.device_type()) {
+            device.info().await.ok().and_then(|info| info.label)
+        } else {
+            None
+        };
         response.push(HwiEnumeratedDevice {
             device_type: device.device_type().to_string(),
             model: hwi_enumerate_model(device.device_type(), device.model(), device.is_emulated()),
@@ -1074,7 +1078,7 @@ async fn backup_device(
             }
         }
         DeviceType::Coldcard => {}
-        DeviceType::Ledger | DeviceType::Jade => {
+        DeviceType::Ledger | DeviceType::Jade | DeviceType::Trezor => {
             let unsupported = HwiUnsupportedDeviceAction::Backup {
                 label,
                 backup_passphrase,
@@ -2706,6 +2710,7 @@ fn hwi_can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
         DeviceType::Ledger => true,
         DeviceType::Jade => false,
         DeviceType::Coldcard => model.contains("edge"),
+        DeviceType::Trezor => model != "trezor_one",
     }
 }
 
@@ -2774,9 +2779,13 @@ fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
     }
 }
 
+fn label_reported(device_type: DeviceType) -> bool {
+    matches!(device_type, DeviceType::Trezor)
+}
+
 fn label_for(device_type: DeviceType, label: Option<String>) -> Option<Option<String>> {
     match device_type {
-        DeviceType::Coldcard | DeviceType::Ledger => Some(label),
+        DeviceType::Coldcard | DeviceType::Ledger | DeviceType::Trezor => Some(label),
         DeviceType::BitBox02 | DeviceType::Jade => None,
     }
 }
@@ -2820,6 +2829,27 @@ fn hwi_unavailable_action_message(
         }
         (DeviceType::Ledger, HwiUnsupportedDeviceAction::TogglePassphrase) => {
             "The Ledger Nano S and X do not support toggling passphrase from the host"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::Setup { .. }) => {
+            "Trezor setup is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::Wipe) => {
+            "Trezor wipe is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::Restore { .. }) => {
+            "Trezor restore is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::Backup { .. }) => {
+            "Trezor does not support creating a backup via software"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::PromptPin) => {
+            "Trezor PIN entry is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::SendPin { .. }) => {
+            "Trezor PIN entry is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::TogglePassphrase) => {
+            "Trezor passphrase toggling is not yet supported"
         }
         (DeviceType::Jade, HwiUnsupportedDeviceAction::Setup { .. }) => {
             "Blockstream Jade does not support software setup"
@@ -2903,6 +2933,7 @@ fn parse_device_type(value: &str) -> HwiResult<DeviceType> {
         "coldcard" => Ok(DeviceType::Coldcard),
         "jade" => Ok(DeviceType::Jade),
         "ledger" => Ok(DeviceType::Ledger),
+        "trezor" => Ok(DeviceType::Trezor),
         _ => Err(HwiError::new(
             HwiErrorCode::UnknownDevice,
             "Unknown device type specified",
@@ -3460,7 +3491,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_device_type_as_hwi_error() {
-        let error = parse_args(["hwi", "--device-type", "trezor", "enumerate"])
+        let error = parse_args(["hwi", "--device-type", "nonexistent", "enumerate"])
             .expect_err("unsupported device type");
 
         assert_eq!(error.code, HwiErrorCode::UnknownDevice.code());
@@ -3473,6 +3504,14 @@ mod tests {
             parse_args(["hwi", "--device-type", "bitbox02", "enumerate"]).expect("bitbox02 parses");
 
         assert_eq!(request.selector.device_type, Some(DeviceType::BitBox02));
+    }
+
+    #[test]
+    fn accepts_trezor_device_type() {
+        let request =
+            parse_args(["hwi", "--device-type", "trezor", "enumerate"]).expect("trezor parses");
+
+        assert_eq!(request.selector.device_type, Some(DeviceType::Trezor));
     }
 
     #[test]
@@ -3708,7 +3747,7 @@ mod tests {
         );
         assert_eq!(exit_status(&outcome_of(&bad_path)), 0);
 
-        let bad_device = ["hwi", "--device-type", "trezor", "enumerate"];
+        let bad_device = ["hwi", "--device-type", "keepkey", "enumerate"];
         assert_eq!(
             runtime_error_of(&bad_device).code,
             HwiErrorCode::UnknownDevice.code()

@@ -465,6 +465,7 @@ async fn main() -> Result<()> {
             let selection = if all {
                 UdevRuleSelection::Devices(vec![
                     bhwi_cli::DeviceType::Coldcard,
+                    bhwi_cli::DeviceType::Trezor,
                     bhwi_cli::DeviceType::Jade,
                     bhwi_cli::DeviceType::Ledger,
                 ])
