@@ -105,6 +105,7 @@ impl From<LedgerResponse> for Response {
                     networks: vec![network],
                     firmware: Some(response.app_name),
                     initialized: None,
+                    label: None,
                 })
             }
             LedgerResponse::Signature(header, signature) => Self::Signature(header, signature),

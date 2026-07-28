@@ -48,6 +48,8 @@ pub struct Info {
     pub firmware: Option<String>,
     #[serde(skip)]
     pub initialized: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl Info {
@@ -67,6 +69,7 @@ impl From<bhwi_async::Info> for Info {
             networks: info.networks,
             firmware: info.firmware,
             initialized: info.initialized,
+            label: info.label,
         }
     }
 }

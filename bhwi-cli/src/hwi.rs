@@ -706,11 +706,12 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
                 None
             }
         };
+        let label = device.info().await.ok().and_then(|info| info.label);
         response.push(HwiEnumeratedDevice {
             device_type: device.device_type().to_string(),
             model: hwi_enumerate_model(device.device_type(), device.model(), device.is_emulated()),
             path: hwi_enumerate_path(device.device_type(), device.path(), device.is_emulated()),
-            label: label_for(device.device_type()),
+            label: label_for(device.device_type(), label),
             fingerprint,
             needs_pin_sent: false,
             needs_passphrase_sent: false,
@@ -2773,9 +2774,9 @@ fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
     }
 }
 
-fn label_for(device_type: DeviceType) -> Option<Option<String>> {
+fn label_for(device_type: DeviceType, label: Option<String>) -> Option<Option<String>> {
     match device_type {
-        DeviceType::Coldcard | DeviceType::Ledger => Some(None),
+        DeviceType::Coldcard | DeviceType::Ledger => Some(label),
         DeviceType::BitBox02 | DeviceType::Jade => None,
     }
 }
@@ -3780,7 +3781,7 @@ mod tests {
                 device_type: "ledger".to_owned(),
                 model: "ledger_nano_s".to_owned(),
                 path: "tcp:localhost:9999".to_owned(),
-                label: label_for(DeviceType::Ledger),
+                label: label_for(DeviceType::Ledger, None),
                 fingerprint: None,
                 needs_pin_sent: false,
                 needs_passphrase_sent: false,
@@ -3795,7 +3796,7 @@ mod tests {
                 device_type: "coldcard".to_owned(),
                 model: "coldcard".to_owned(),
                 path: "/tmp/ckcc-simulator.sock".to_owned(),
-                label: label_for(DeviceType::Coldcard),
+                label: label_for(DeviceType::Coldcard, None),
                 fingerprint: None,
                 needs_pin_sent: false,
                 needs_passphrase_sent: false,
@@ -3813,7 +3814,7 @@ mod tests {
             device_type: "jade".to_owned(),
             model: "jade".to_owned(),
             path: "localhost:30121".to_owned(),
-            label: label_for(DeviceType::Jade),
+            label: label_for(DeviceType::Jade, None),
             fingerprint: None,
             needs_pin_sent: false,
             needs_passphrase_sent: false,
@@ -3832,7 +3833,7 @@ mod tests {
             device_type: "bitbox02".to_owned(),
             model: hwi_enumerate_model(DeviceType::BitBox02, "bitbox02_simulator", true),
             path: hwi_enumerate_path(DeviceType::BitBox02, "tcp:127.0.0.1:15423", true),
-            label: label_for(DeviceType::BitBox02),
+            label: label_for(DeviceType::BitBox02, None),
             fingerprint: None,
             needs_pin_sent: false,
             needs_passphrase_sent: false,

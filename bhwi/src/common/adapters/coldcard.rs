@@ -280,6 +280,7 @@ impl From<ColdcardResponse> for Response {
                 networks: vec![],
                 firmware: Some(device_model),
                 initialized: None,
+                label: None,
             }),
             ColdcardResponse::MyPub { encryption_key, .. } => Self::EncryptionKey(encryption_key),
             ColdcardResponse::Signature(header, signature) => Self::Signature(header, signature),

@@ -173,6 +173,8 @@ pub struct Info {
     pub firmware: Option<String>,
     /// Whether the device has initialized wallet material, when reported by the firmware.
     pub initialized: Option<bool>,
+    /// User-set device name, when the device protocol reports one.
+    pub label: Option<String>,
 }
 
 pub enum Recipient {

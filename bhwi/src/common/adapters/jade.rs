@@ -162,6 +162,7 @@ impl From<JadeResponse> for Response {
                 networks: info.jade_networks.into(),
                 firmware: None,
                 initialized: None,
+                label: None,
             }),
             JadeResponse::Address(address) => Self::Address(address),
             JadeResponse::RegisteredDescriptor => {

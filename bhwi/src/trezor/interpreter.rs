@@ -324,6 +324,7 @@ fn features_info(features: mgmt::Features, network: Network) -> common::Info {
         networks: vec![network],
         firmware: features.model,
         initialized: features.initialized,
+        label: features.label,
     }
 }
 
