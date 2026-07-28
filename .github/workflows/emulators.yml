@@ -447,3 +447,51 @@ jobs:
         run: |
           bash nix/scripts/stop-emulator.sh jade.pid tcp localhost 30121 60
           bash nix/scripts/stop-emulator.sh jade-pinserver.pid tcp localhost 8096 60
+
+  trezor-e2e:
+    needs: nix-flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [trezor-one, trezor-t]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.XDG_CACHE_HOME }}/bhwi/trezor
+          key: trezor-${{ runner.os }}-${{ matrix.model }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/scripts/start-trezor.sh', 'nix/scripts/init-trezor.sh') }}
+          restore-keys: |
+            trezor-${{ runner.os }}-${{ matrix.model }}-
+      - name: Start Trezor emulator
+        run: |
+          nix run .#${{ matrix.model }} > trezor.log 2>&1 &
+          echo $! > trezor.pid
+          tail -n +1 -F trezor.log &
+          echo $! > trezor-tail.pid
+          bash nix/scripts/wait-for-trezor.sh 127.0.0.1 21324 1800 "$(cat trezor.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Trezor startup log" trezor.log
+            cat trezor.log || true
+            exit 1
+          }
+          kill "$(cat trezor-tail.pid)" || true
+      - name: Initialize Trezor
+        run: |
+          nix run .#trezor-init > trezor-init.log 2>&1 || {
+            bash nix/scripts/emit-gh-error-log.sh "Trezor init log" trezor-init.log
+            cat trezor-init.log || true
+            exit 1
+          }
+      - name: Run Trezor e2e
+        run: |
+          set -o pipefail
+          TREZOR_MODEL=${{ matrix.model }} nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1 2>&1 | tee trezor-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Trezor e2e log" trezor-e2e.log
+            cat trezor-e2e.log || true
+            exit 1
+          }
+      - name: Stop Trezor emulator
+        if: always()
+        run: bash nix/scripts/stop-emulator.sh trezor.pid
