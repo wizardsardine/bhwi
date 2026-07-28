@@ -2222,6 +2222,7 @@ mod tests {
             "bitbox02" => "m/49'/1'/0'/0/10",
             "ledger" => "m/44'/1'/0'/0",
             "jade" | "coldcard" => "m/44'/1'/0'",
+            _ if skipped_for_trezor(device_type) => return Ok(Vec::new()),
             _ => bail!("unsupported signmessage device type {device_type:?}"),
         };
         let pubkey = PublicKey::new(reference_xpub(device_type, path)?.public_key);
@@ -2236,6 +2237,9 @@ mod tests {
     }
 
     fn displayaddress_arg_cases(device_type: &str) -> Result<Vec<DisplayAddressCase>> {
+        if skipped_for_trezor(device_type) {
+            return Ok(Vec::new());
+        }
         let fingerprint = reference_fingerprint(device_type)?;
         let wit_xpub = reference_xpub(device_type, "m/84'/1'/0'")?;
         let sh_wit_xpub = reference_xpub(device_type, "m/49'/1'/0'")?;
@@ -3426,10 +3430,14 @@ mod tests {
             .collect()
     }
 
+    fn skipped_for_trezor(device_type: &str) -> bool {
+        device_type == "trezor"
+    }
+
     fn normalize_device_type(device_type: &str) -> Result<String> {
         let device_type = device_type.to_ascii_lowercase();
         match device_type.as_str() {
-            "bitbox02" | "coldcard" | "jade" | "ledger" => Ok(device_type),
+            "bitbox02" | "coldcard" | "jade" | "ledger" | "trezor" => Ok(device_type),
             _ => bail!("unsupported HWI_PARITY_DEVICE_TYPE {device_type:?}"),
         }
     }
