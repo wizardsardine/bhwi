@@ -123,7 +123,8 @@ impl DeviceEnumerator for TrezorDevice {
 
         if selector.include_emulators
             && let Some(addr) = TREZOR_DEVICE_ID.emulator_path
-            && selector.matches(DeviceType::Trezor, addr)
+            && (selector.matches(DeviceType::Trezor, addr)
+                || selector.matches(DeviceType::Trezor, emulator_socket(addr)))
             && let Ok(client) = EmulatorClient::new(addr).await
             && client.ping(EMULATOR_PROBE_TIMEOUT).await
         {
@@ -134,14 +135,27 @@ impl DeviceEnumerator for TrezorDevice {
     }
 }
 
+fn emulator_socket(path: &str) -> &str {
+    path.strip_prefix("udp:").unwrap_or(path)
+}
+
 fn webusb_path(info: &nusb::DeviceInfo) -> String {
-    match info.serial_number() {
-        Some(serial) => format!(
-            "webusb:{:04x}:{:04x}:{serial}",
-            info.vendor_id(),
-            info.product_id()
-        ),
-        None => format!("webusb:{:04x}:{:04x}", info.vendor_id(), info.product_id()),
+    let mut path = format!("webusb:{}", bus_number(info.bus_id()));
+    for port in info.port_chain() {
+        path.push_str(&format!(":{port}"));
+    }
+    path
+}
+
+fn bus_number(bus_id: &str) -> String {
+    let parsed = if cfg!(target_os = "macos") {
+        u32::from_str_radix(bus_id, 16).ok()
+    } else {
+        bus_id.parse::<u32>().ok()
+    };
+    match parsed {
+        Some(bus) => format!("{bus:03}"),
+        None => bus_id.to_owned(),
     }
 }
 
@@ -156,6 +170,33 @@ fn trezor_model(product_id: u16, is_emulated: bool) -> &'static str {
         (TREZOR_ONE_PID, false) => "trezor_one",
         (TREZOR_PID, false) => "trezor_t",
         _ => "trezor",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bus_number_is_three_digit_decimal() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(bus_number("14"), "020");
+            assert_eq!(bus_number("01"), "001");
+        } else {
+            assert_eq!(bus_number("001"), "001");
+            assert_eq!(bus_number("20"), "020");
+        }
+    }
+
+    #[test]
+    fn bus_number_falls_back_to_the_raw_id() {
+        assert_eq!(bus_number("PCIROOT(0)#PCI(0201)"), "PCIROOT(0)#PCI(0201)");
+    }
+
+    #[test]
+    fn emulator_socket_accepts_both_forms() {
+        assert_eq!(emulator_socket("udp:127.0.0.1:21324"), "127.0.0.1:21324");
+        assert_eq!(emulator_socket("127.0.0.1:21324"), "127.0.0.1:21324");
     }
 }
 
@@ -179,7 +220,7 @@ pub mod emulator {
     impl EmulatorClient {
         pub async fn new(addr: &str) -> Result<Self> {
             let socket = UdpSocket::bind("127.0.0.1:0").await?;
-            socket.connect(addr).await?;
+            socket.connect(super::emulator_socket(addr)).await?;
             Ok(Self { socket })
         }
 

@@ -677,7 +677,11 @@ where
 }
 
 async fn enumerate(selector: DeviceSelector) -> HwiResponse {
-    let manager = DeviceManager::new(selector);
+    let manager = DeviceManager::new(DeviceSelector {
+        device_type: None,
+        device_path: None,
+        ..selector
+    });
     let devices = match manager.enumerate().await {
         Ok(devices) => devices,
         Err(err) => {
@@ -706,14 +710,26 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
                 None
             }
         };
-        let label = if label_reported(device.device_type()) {
-            device.info().await.ok().and_then(|info| info.label)
-        } else {
-            None
-        };
+        let mut info = None;
+        if error.is_none() && reports_device_info(device.device_type()) {
+            match device.info().await {
+                Ok(device_info) => info = Some(device_info),
+                Err(err) => {
+                    error = Some(err.to_string());
+                    code = Some(HwiErrorCode::DeviceConnectionError.code());
+                }
+            }
+        }
+        let label = info.as_ref().and_then(|info| info.label.clone());
+        let firmware = info.as_ref().and_then(|info| info.firmware.clone());
         response.push(HwiEnumeratedDevice {
             device_type: device.device_type().to_string(),
-            model: hwi_enumerate_model(device.device_type(), device.model(), device.is_emulated()),
+            model: hwi_enumerate_model(
+                device.device_type(),
+                device.model(),
+                device.is_emulated(),
+                firmware.as_deref(),
+            ),
             path: hwi_enumerate_path(device.device_type(), device.path(), device.is_emulated()),
             label: label_for(device.device_type(), label),
             fingerprint,
@@ -2779,7 +2795,7 @@ fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
     }
 }
 
-fn label_reported(device_type: DeviceType) -> bool {
+fn reports_device_info(device_type: DeviceType) -> bool {
     matches!(device_type, DeviceType::Trezor)
 }
 
@@ -2790,9 +2806,21 @@ fn label_for(device_type: DeviceType, label: Option<String>) -> Option<Option<St
     }
 }
 
-fn hwi_enumerate_model(device_type: DeviceType, model: &str, is_emulated: bool) -> String {
+fn hwi_enumerate_model(
+    device_type: DeviceType,
+    model: &str,
+    is_emulated: bool,
+    firmware: Option<&str>,
+) -> String {
     match (device_type, is_emulated) {
         (DeviceType::BitBox02, true) => "bitbox02_nova_multi".to_owned(),
+        (DeviceType::Trezor, emulated) => match firmware {
+            Some(reported) => {
+                let suffix = if emulated { "_simulator" } else { "" };
+                format!("trezor_{}{suffix}", reported.to_lowercase())
+            }
+            None => model.to_owned(),
+        },
         _ => model.to_owned(),
     }
 }
@@ -2955,6 +2983,10 @@ fn is_known_emulator_path(device_type: Option<DeviceType>, path: Option<&str>) -
             | (
                 Some(DeviceType::Ledger),
                 Some("127.0.0.1:9999" | "tcp:127.0.0.1:9999")
+            )
+            | (
+                Some(DeviceType::Trezor),
+                Some("127.0.0.1:21324" | "udp:127.0.0.1:21324")
             )
     )
 }
@@ -3507,6 +3539,19 @@ mod tests {
     }
 
     #[test]
+    fn trezor_enumerate_model_follows_python_hwi() {
+        let model = |firmware, emulated| {
+            hwi_enumerate_model(DeviceType::Trezor, "trezor_t", emulated, firmware)
+        };
+        assert_eq!(model(Some("T"), false), "trezor_t");
+        assert_eq!(model(Some("1"), false), "trezor_1");
+        assert_eq!(model(Some("Safe 3"), false), "trezor_safe 3");
+        assert_eq!(model(Some("1"), true), "trezor_1_simulator");
+        assert_eq!(model(Some("T"), true), "trezor_t_simulator");
+        assert_eq!(model(None, false), "trezor_t");
+    }
+
+    #[test]
     fn accepts_trezor_device_type() {
         let request =
             parse_args(["hwi", "--device-type", "trezor", "enumerate"]).expect("trezor parses");
@@ -3870,7 +3915,7 @@ mod tests {
     fn bitbox_emulator_enumerate_shape_matches_python_hwi() {
         let json = serde_json::to_value(HwiEnumeratedDevice {
             device_type: "bitbox02".to_owned(),
-            model: hwi_enumerate_model(DeviceType::BitBox02, "bitbox02_simulator", true),
+            model: hwi_enumerate_model(DeviceType::BitBox02, "bitbox02_simulator", true, None),
             path: hwi_enumerate_path(DeviceType::BitBox02, "tcp:127.0.0.1:15423", true),
             label: label_for(DeviceType::BitBox02, None),
             fingerprint: None,
