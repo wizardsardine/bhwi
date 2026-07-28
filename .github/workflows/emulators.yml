@@ -492,6 +492,16 @@ jobs:
             cat trezor-e2e.log || true
             exit 1
           }
+      - name: Build bhwi CLI
+        run: nix develop .#trezor -c cargo build -p bhwi-cli --bins
+      - name: Run Trezor CLI e2e
+        run: |
+          set -o pipefail
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#trezor -c cargo test -p bhwi-e2e-cli trezor -- --test-threads=1 2>&1 | tee trezor-cli-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Trezor CLI e2e log" trezor-cli-e2e.log
+            cat trezor-cli-e2e.log || true
+            exit 1
+          }
       - name: Stop Trezor emulator
         if: always()
         run: bash nix/scripts/stop-emulator.sh trezor.pid
