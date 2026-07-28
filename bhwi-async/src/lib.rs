@@ -4,6 +4,8 @@ pub mod coldcard;
 pub mod jade;
 pub mod ledger;
 pub mod transport;
+#[cfg(feature = "trezor")]
+pub mod trezor;
 
 use std::{error::Error as StdError, fmt::Debug, str::FromStr};
 
@@ -28,6 +30,8 @@ use bhwi::{
 };
 pub use jade::Jade;
 pub use ledger::Ledger;
+#[cfg(feature = "trezor")]
+pub use trezor::Trezor;
 
 #[async_trait(?Send)]
 pub trait Transport {
