@@ -520,7 +520,7 @@ mod tests {
             message: Some("boom".to_string()),
         };
         let frame = framed(MessageType::Failure, &failure);
-        assert!(matches!(interp.exchange(frame), Err(Error::Device(_))));
+        assert!(matches!(interp.exchange(frame), Err(Error::Rpc(_, _))));
     }
 
     #[test]
@@ -539,7 +539,7 @@ mod tests {
         let mut interp = Interp::default();
         assert!(matches!(
             interp.start(Command::Wipe),
-            Err(Error::InvalidInput(_))
+            Err(Error::MissingCommandInfo(_))
         ));
 
         let mut interp = Interp::default();

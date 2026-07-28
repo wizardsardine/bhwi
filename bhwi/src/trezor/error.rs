@@ -34,13 +34,13 @@ impl From<TrezorError> for common::Error {
             TrezorError::UnexpectedMessage(t, ctx) => {
                 common::Error::unexpected_result(t.to_be_bytes().to_vec(), format!("trezor: {ctx}"))
             }
-            TrezorError::Failure(_, msg) => common::Error::Device(msg),
+            TrezorError::Failure(code, msg) => common::Error::Rpc(code, Some(msg)),
             TrezorError::Locked(ctx) => common::Error::Device(format!("device is locked: {ctx}")),
             TrezorError::NetworkMismatch => {
                 common::Error::InvalidInput("device returned a key for the wrong network".into())
             }
             TrezorError::ActionCancelled => common::Error::AuthenticationRefused,
-            TrezorError::Unsupported(s) => common::Error::InvalidInput(s.into()),
+            TrezorError::Unsupported(s) => common::Error::MissingCommandInfo(s),
             TrezorError::UnsupportedDisplayAddress(s) => {
                 common::Error::UnsupportedDisplayAddress(s.into())
             }
