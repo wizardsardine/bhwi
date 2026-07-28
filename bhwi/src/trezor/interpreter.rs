@@ -322,7 +322,7 @@ fn features_info(features: mgmt::Features, network: Network) -> common::Info {
             features.major_version, features.minor_version, features.patch_version
         ),
         networks: vec![network],
-        firmware: None,
+        firmware: features.model,
         initialized: features.initialized,
     }
 }
