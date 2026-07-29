@@ -62,6 +62,7 @@ impl DeviceControl {
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64, Encoding};
+    use bhwi::common::{MultisigAddressType, MultisigDisplayAddress};
     use bhwi_async::{
         DeviceBackup, DisplayAddress, HWI, WalletRegistration,
         transport::coldcard::DEFAULT_CKCC_SOCKET,
@@ -72,6 +73,7 @@ mod tests {
         absolute::LockTime,
         address::Address,
         bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
+        blockdata::{opcodes::all::OP_CHECKMULTISIG, script::Builder},
         psbt::{Input, Output, Psbt},
         secp256k1::Secp256k1,
         transaction::Version as TxVersion,
@@ -182,26 +184,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn can_enroll_multisig_descriptor() {
+    async fn can_register_and_display_multisig_addresses() {
         let (mut dev, mut control) = device().await;
-        control.reset_multisig().await.unwrap();
         let secp = Secp256k1::new();
-        let account_path: DerivationPath = "48'/1'/0'/2'".parse().unwrap();
         let device_fingerprint = dev.get_master_fingerprint().await.unwrap();
-        let device_xpub = dev
-            .get_extended_pubkey(account_path.clone(), false)
-            .await
-            .unwrap();
         let cosigner_master = Xpriv::new_master(Network::Testnet, &[9u8; 32]).unwrap();
         let cosigner_fingerprint = cosigner_master.fingerprint(&secp);
-        let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path).unwrap();
-        let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
-        let policy = format!(
-            "wsh(sortedmulti(2,[{device_fingerprint}/{account_path}]{device_xpub}/<0;1>/*,[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/<0;1>/*))"
-        );
+        let child_path: DerivationPath = "0/0".parse().unwrap();
 
+        for (name, account_path, address_type) in [
+            (
+                "cold-e2e-legacy",
+                "48'/1'/0'/0'",
+                MultisigAddressType::Legacy,
+            ),
+            (
+                "cold-e2e-sh-wit",
+                "48'/1'/0'/1'",
+                MultisigAddressType::ShWit,
+            ),
+            ("cold-e2e-wit", "48'/1'/0'/2'", MultisigAddressType::Wit),
+        ] {
+            control.reset_multisig().await.unwrap();
+            let account_path: DerivationPath = account_path.parse().unwrap();
+            let device_xpub = dev
+                .get_extended_pubkey(account_path.clone(), false)
+                .await
+                .unwrap();
+            let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path).unwrap();
+            let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
+            let policy_keys = format!(
+                "[{device_fingerprint}/{account_path}]{device_xpub}/0/*,[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/0/*"
+            );
+            let policy = multisig_descriptor(address_type, &policy_keys);
+            register_wallet_and_wait(&mut dev, &mut control, name, &policy).await;
+
+            let device_child = device_xpub.derive_pub(&secp, &child_path).unwrap();
+            let cosigner_child = cosigner_xpub.derive_pub(&secp, &child_path).unwrap();
+            let mut public_keys = [
+                PublicKey::new(device_child.public_key),
+                PublicKey::new(cosigner_child.public_key),
+            ];
+            public_keys.sort_by_key(|key| key.inner.serialize());
+            let redeem_script = Builder::new()
+                .push_int(2)
+                .push_key(&public_keys[0])
+                .push_key(&public_keys[1])
+                .push_int(2)
+                .push_opcode(OP_CHECKMULTISIG)
+                .into_script();
+            let expected_script = match address_type {
+                MultisigAddressType::Legacy => redeem_script.to_p2sh(),
+                MultisigAddressType::ShWit => redeem_script.to_p2wsh().to_p2sh(),
+                MultisigAddressType::Wit => redeem_script.to_p2wsh(),
+            };
+            let expected = Address::from_script(&expected_script, Network::Testnet)
+                .unwrap()
+                .to_string();
+            let display = DisplayAddress::ByMultisig(MultisigDisplayAddress {
+                threshold: 2,
+                address_type,
+                sorted: true,
+                keys: vec![
+                    format!(
+                        "[{device_fingerprint}/{account_path}/0/0]{}",
+                        device_child.public_key
+                    )
+                    .parse()
+                    .unwrap(),
+                    format!(
+                        "[{cosigner_fingerprint}/{account_path}/0/0]{}",
+                        cosigner_child.public_key
+                    )
+                    .parse()
+                    .unwrap(),
+                ],
+            });
+            let display_task = dev.display_address(display, None);
+            let (display_res, approve_res) = tokio::join!(display_task, control.approve());
+            assert_eq!(display_res.unwrap(), expected);
+            approve_res.unwrap();
+        }
+        control.reset_multisig().await.unwrap();
+    }
+
+    fn multisig_descriptor(address_type: MultisigAddressType, keys: &str) -> String {
+        match address_type {
+            MultisigAddressType::Legacy => format!("sh(sortedmulti(2,{keys}))"),
+            MultisigAddressType::ShWit => format!("sh(wsh(sortedmulti(2,{keys})))"),
+            MultisigAddressType::Wit => format!("wsh(sortedmulti(2,{keys}))"),
+        }
+    }
+
+    async fn register_wallet_and_wait(
+        dev: &mut ColdcardDevice,
+        control: &mut DeviceControl,
+        name: &str,
+        policy: &str,
+    ) {
         let registration = dev
-            .register_wallet("cold-e2e", &policy)
+            .register_wallet(name, policy)
             .await
             .expect("start Coldcard enrollment");
         assert_eq!(registration, WalletRegistration::PendingUserConfirmation);
@@ -211,17 +293,12 @@ mod tests {
             .await
             .unwrap();
         for _ in 0..40 {
-            if control
-                .multisig_settings()
-                .await
-                .unwrap()
-                .contains("cold-e2e")
-            {
+            if control.multisig_settings().await.unwrap().contains(name) {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        panic!("Coldcard multisig registration was not persisted");
+        panic!("Coldcard multisig registration was not persisted for {name}");
     }
 
     #[tokio::test]

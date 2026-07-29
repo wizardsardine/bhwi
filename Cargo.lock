@@ -347,6 +347,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64ct",
+ "bhwi",
  "bhwi-async",
  "bhwi-cli",
  "bitcoin",

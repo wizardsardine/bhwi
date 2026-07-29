@@ -10,6 +10,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 bitcoin.workspace = true
 base64ct = { workspace = true, features = ["alloc"] }
+bhwi.workspace = true
 bhwi-async.workspace = true
 rand_core.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
