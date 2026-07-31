@@ -1,8 +1,6 @@
 use core::convert::TryFrom;
 use core::fmt::Debug;
 
-use crate::common::{Recipient, Transmit};
-
 // p2 encodes the protocol version implemented
 pub const CURRENT_PROTOCOL_VERSION: u8 = 1;
 
@@ -122,16 +120,6 @@ impl ApduCommand {
         let mut vec = vec![self.cla, self.ins, self.p1, self.p2, self.data.len() as u8];
         vec.extend(self.data.iter());
         vec
-    }
-}
-
-impl From<ApduCommand> for Transmit {
-    fn from(payload: ApduCommand) -> Transmit {
-        Transmit {
-            recipient: Recipient::Device,
-            payload: payload.encode(),
-            encrypted: false,
-        }
     }
 }
 
