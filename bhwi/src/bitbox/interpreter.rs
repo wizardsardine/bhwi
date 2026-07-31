@@ -1,15 +1,10 @@
 use std::marker::PhantomData;
 
-use bitcoin::address::AddressType;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub};
 use bitcoin::psbt::Psbt;
 use prost::Message;
 
 use crate::Interpreter;
-use crate::common::{
-    Command, DeviceBackup, DeviceContext, DisplayAddress, Error, Info, Recipient, Response,
-    Transmit,
-};
 
 use super::api;
 use super::error::{BitBoxDeviceError, BitBoxError};
@@ -17,14 +12,13 @@ use super::noise::{HandshakeState, NoiseState};
 use super::proto as pb;
 use super::sign::{OurKey, Transaction, TxOutput, apply_signatures, is_schnorr};
 use super::{
-    ManagementContext, OP_HER_COMEZ_TEH_HANDSHAEK, OP_I_CAN_HAS_HANDSHAEK,
-    OP_I_CAN_HAS_PAIRIN_VERIFICASHUN, OP_NOISE_MSG, OP_UNLOCK, RESPONSE_SUCCESS, SetupMode,
+    OP_HER_COMEZ_TEH_HANDSHAEK, OP_I_CAN_HAS_HANDSHAEK, OP_I_CAN_HAS_PAIRIN_VERIFICASHUN,
+    OP_NOISE_MSG, OP_UNLOCK, RESPONSE_SUCCESS, SetupMode,
 };
 use super::{antiklepto, policy};
 
-/// Public BitBox02 command surface. Mirrors the shape of Coldcard/Ledger command enums
-/// in this crate: converted from `common::Command` by `TryFrom`. The target network is not
-/// carried per-command; it is interpreter state (see `BitBoxInterpreter::with_network`).
+/// Public BitBox02 command surface. The target network is not carried per-command;
+/// it is interpreter state (see `BitBoxInterpreter::with_network`).
 #[derive(Clone, Debug)]
 pub enum BitBoxCommand {
     UnlockAndPair,
@@ -106,7 +100,7 @@ pub enum BitBoxCommand {
 pub enum BitBoxResponse {
     TaskDone,
     DeviceAction(bool),
-    Info(Info),
+    Info(BitBoxDeviceInfo),
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
     Address(String),
@@ -117,6 +111,18 @@ pub enum BitBoxResponse {
     SignedPsbt(Box<Psbt>),
     Signature(u8, bitcoin::secp256k1::ecdsa::Signature),
     Backup,
+}
+
+#[derive(Clone, Debug)]
+pub struct BitBoxDeviceInfo {
+    pub version: String,
+    pub name: String,
+    pub initialized: bool,
+}
+
+pub struct BitBoxTransmit {
+    pub payload: Vec<u8>,
+    pub encrypted: bool,
 }
 
 /// Internal state machine.
@@ -274,17 +280,15 @@ fn expect_success(response: &[u8]) -> Result<&[u8], BitBoxError> {
     Ok(&response[1..])
 }
 
-fn encrypted_transmit(bytes: Vec<u8>) -> Transmit {
-    Transmit {
-        recipient: Recipient::Device,
+fn encrypted_transmit(bytes: Vec<u8>) -> BitBoxTransmit {
+    BitBoxTransmit {
         payload: bytes,
         encrypted: true,
     }
 }
 
-fn plain_transmit(bytes: Vec<u8>) -> Transmit {
-    Transmit {
-        recipient: Recipient::Device,
+fn plain_transmit(bytes: Vec<u8>) -> BitBoxTransmit {
+    BitBoxTransmit {
         payload: bytes,
         encrypted: false,
     }
@@ -302,36 +306,6 @@ fn build_sign_init_request(coin: pb::BtcCoin, tx: &Transaction) -> pb::request::
         format_unit: pb::btc_sign_init_request::FormatUnit::Default as _,
         contains_silent_payment_outputs: false,
     })
-}
-
-/// Pick the single-sig script type BitBox02 signs a message under, from the BIP-44-style
-/// purpose in the keypath. Defaults to native segwit.
-fn simple_type_from_path(path: &DerivationPath) -> pb::btc_script_config::SimpleType {
-    use pb::btc_script_config::SimpleType;
-    match path.into_iter().next() {
-        Some(ChildNumber::Hardened { index: 49 }) => SimpleType::P2wpkhP2sh,
-        Some(ChildNumber::Hardened { index: 86 }) => SimpleType::P2tr,
-        _ => SimpleType::P2wpkh,
-    }
-}
-
-fn simple_type_from_address_format(
-    path: &DerivationPath,
-    address_format: Option<AddressType>,
-) -> Result<pb::btc_script_config::SimpleType, BitBoxError> {
-    use pb::btc_script_config::SimpleType;
-    match address_format {
-        None => Ok(simple_type_from_path(path)),
-        Some(AddressType::P2sh) => Ok(SimpleType::P2wpkhP2sh),
-        Some(AddressType::P2wpkh) => Ok(SimpleType::P2wpkh),
-        Some(AddressType::P2tr) => Ok(SimpleType::P2tr),
-        Some(AddressType::P2pkh | AddressType::P2wsh) => Err(BitBoxError::InvalidInput(
-            "BitBox does not support this address format",
-        )),
-        _ => Err(BitBoxError::InvalidInput(
-            "BitBox does not support this address format",
-        )),
-    }
 }
 
 /// Build the full address keypath for a policy address: our account origin path (identified
@@ -672,12 +646,13 @@ impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
         let response = self.decode_encrypted_response(data)?;
         use pb::response::Response as R;
         match (ctx, response) {
-            (EncryptedContext::Version, R::DeviceInfo(info)) => Ok(BitBoxResponse::Info(Info {
-                version: info.version,
-                networks: vec![],
-                firmware: Some(info.name),
-                initialized: Some(info.initialized),
-            })),
+            (EncryptedContext::Version, R::DeviceInfo(info)) => {
+                Ok(BitBoxResponse::Info(BitBoxDeviceInfo {
+                    version: info.version,
+                    name: info.name,
+                    initialized: info.initialized,
+                }))
+            }
             (EncryptedContext::MasterFingerprint, R::Fingerprint(f)) => {
                 if f.fingerprint.len() != 4 {
                     return Err(BitBoxError::InvalidSignature);
@@ -715,7 +690,7 @@ impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
 impl<C, T, R, E> Interpreter for BitBoxInterpreter<'_, C, T, R, E>
 where
     C: TryInto<BitBoxCommand, Error = BitBoxError>,
-    T: From<Transmit>,
+    T: From<BitBoxTransmit>,
     R: From<BitBoxResponse>,
     E: From<BitBoxError>,
 {
@@ -1327,173 +1302,6 @@ where
     }
 }
 
-impl TryFrom<Command> for BitBoxCommand {
-    type Error = BitBoxError;
-    fn try_from(cmd: Command) -> Result<Self, Self::Error> {
-        match cmd {
-            Command::Setup(options, context) => {
-                if !options.backup_passphrase.is_empty() {
-                    return Err(BitBoxError::InvalidInput(
-                        "Passphrase not needed when setting up a BitBox02.",
-                    ));
-                }
-                let Some(DeviceContext::BitBoxManagement(ManagementContext::Setup {
-                    mode,
-                    timestamp,
-                    timezone_offset,
-                })) = context
-                else {
-                    return Err(BitBoxError::InvalidInput(
-                        "BitBox setup requires DeviceContext::BitBoxManagement",
-                    ));
-                };
-                Ok(BitBoxCommand::Setup {
-                    label: options.label,
-                    mode,
-                    timestamp,
-                    timezone_offset,
-                })
-            }
-            Command::Wipe => Ok(BitBoxCommand::Wipe),
-            Command::Restore(options, context) => {
-                let Some(DeviceContext::BitBoxManagement(ManagementContext::Restore {
-                    timestamp,
-                    timezone_offset,
-                })) = context
-                else {
-                    return Err(BitBoxError::InvalidInput(
-                        "BitBox restore requires DeviceContext::BitBoxManagement",
-                    ));
-                };
-                Ok(BitBoxCommand::Restore {
-                    label: options.label,
-                    timestamp,
-                    timezone_offset,
-                })
-            }
-            Command::TogglePassphrase => Ok(BitBoxCommand::TogglePassphrase),
-            Command::Unlock { .. } => Ok(BitBoxCommand::UnlockAndPair),
-            Command::GetVersion => Ok(BitBoxCommand::GetVersion),
-            Command::GetMasterFingerprint => Ok(BitBoxCommand::GetMasterFingerprint),
-            Command::GetXpub { path, display } => Ok(BitBoxCommand::GetXpub {
-                keypath: path,
-                display,
-            }),
-            Command::DisplayAddress(
-                DisplayAddress::ByPath {
-                    path,
-                    display,
-                    address_format,
-                },
-                _,
-            ) => {
-                let simple_type = simple_type_from_address_format(&path, address_format)?;
-                Ok(BitBoxCommand::ShowSimpleAddress {
-                    keypath: path,
-                    simple_type,
-                    display,
-                })
-            }
-            Command::DisplayAddress(
-                DisplayAddress::ByDescriptor {
-                    index,
-                    change,
-                    display,
-                    ..
-                },
-                context,
-            ) => {
-                let policy = match context {
-                    Some(DeviceContext::BitBox { policy }) => {
-                        policy::Policy::from_wallet_policy(&policy)?
-                    }
-                    _ => {
-                        return Err(BitBoxError::InvalidInput(
-                            "BitBox requires DeviceContext::BitBox for descriptor address display",
-                        ));
-                    }
-                };
-                Ok(BitBoxCommand::ShowDescriptorAddress {
-                    policy,
-                    change,
-                    index,
-                    display,
-                })
-            }
-            Command::DisplayAddress(DisplayAddress::ByMultisig(_), _) => Err(
-                BitBoxError::InvalidInput("BitBox raw multisig display is not implemented"),
-            ),
-            Command::RegisterWallet { name, policy } => Ok(BitBoxCommand::RegisterScriptConfig {
-                policy: policy::Policy::from_wallet_policy(&policy)?,
-                name,
-            }),
-            Command::SignTx(psbt, context) => {
-                // A `DeviceContext::BitBox` carries the registered wallet policy to sign under;
-                // without it, only single-sig inputs (inferred from the PSBT) can be signed.
-                let policy = match context {
-                    None => None,
-                    Some(DeviceContext::BitBox { policy }) => {
-                        Some(policy::Policy::from_wallet_policy(&policy)?)
-                    }
-                    Some(_) => {
-                        return Err(BitBoxError::InvalidInput(
-                            "BitBox requires DeviceContext::BitBox for policy signing",
-                        ));
-                    }
-                };
-                Ok(BitBoxCommand::SignPsbt {
-                    psbt: Box::new(psbt),
-                    force_script_config: None,
-                    policy,
-                })
-            }
-            Command::SignMessage { message, path } => Ok(BitBoxCommand::SignMessage {
-                simple_type: simple_type_from_path(&path),
-                keypath: path,
-                message,
-            }),
-            Command::Backup => Ok(BitBoxCommand::Backup),
-        }
-    }
-}
-
-impl From<BitBoxResponse> for Response {
-    fn from(res: BitBoxResponse) -> Response {
-        match res {
-            BitBoxResponse::TaskDone => Response::TaskDone,
-            BitBoxResponse::DeviceAction(success) => Response::DeviceAction(success),
-            BitBoxResponse::Info(info) => Response::Info(info),
-            BitBoxResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
-            BitBoxResponse::Xpub(xpub) => Response::Xpub(xpub),
-            BitBoxResponse::Address(addr) => Response::Address(addr),
-            BitBoxResponse::IsRegistered(_) => Response::TaskDone,
-            BitBoxResponse::Registered => {
-                Response::WalletRegistration(crate::common::WalletRegistration::Complete {
-                    hmac: None,
-                })
-            }
-            BitBoxResponse::SignedPsbt(psbt) => Response::SignedPsbt(*psbt),
-            BitBoxResponse::Signature(header, sig) => Response::Signature(header, sig),
-            BitBoxResponse::Backup => Response::Backup(DeviceBackup::Complete),
-        }
-    }
-}
-
-impl From<BitBoxError> for Error {
-    fn from(e: BitBoxError) -> Error {
-        match e {
-            BitBoxError::Device(super::error::BitBoxDeviceError::UserAbort) => {
-                Error::AuthenticationRefused
-            }
-            BitBoxError::NoisePairingRejected => Error::AuthenticationRefused,
-            BitBoxError::ProtobufDecode(s) | BitBoxError::ProtobufEncode(s) => {
-                Error::Serialization(s)
-            }
-            other => Error::Serialization(other.to_string()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1501,39 +1309,8 @@ mod tests {
     use miniscript::descriptor::WalletPolicy;
     use std::str::FromStr;
 
-    fn simple(path: &str) -> pb::btc_script_config::SimpleType {
-        simple_type_from_path(&DerivationPath::from_str(path).unwrap())
-    }
-
     fn policy_from(descriptor: &str) -> policy::Policy {
         policy::Policy::from_wallet_policy(&WalletPolicy::from_str(descriptor).unwrap()).unwrap()
-    }
-
-    #[test]
-    fn simple_type_matches_purpose() {
-        use pb::btc_script_config::SimpleType;
-        assert_eq!(simple("m/84'/0'/0'/0/0"), SimpleType::P2wpkh);
-        assert_eq!(simple("m/49'/0'/0'/0/0"), SimpleType::P2wpkhP2sh);
-        assert_eq!(simple("m/86'/0'/0'/0/0"), SimpleType::P2tr);
-        // Unknown/legacy purposes fall back to native segwit.
-        assert_eq!(simple("m/44'/0'/0'/0/0"), SimpleType::P2wpkh);
-    }
-
-    #[test]
-    fn display_path_address_format_selects_simple_type() {
-        use pb::btc_script_config::SimpleType;
-        let path = DerivationPath::from_str("m/49'/0'/0'/0/0").unwrap();
-
-        let nested = simple_type_from_address_format(&path, Some(AddressType::P2sh)).unwrap();
-        let native = simple_type_from_address_format(&path, Some(AddressType::P2wpkh)).unwrap();
-        let taproot = simple_type_from_address_format(&path, Some(AddressType::P2tr)).unwrap();
-        let default = simple_type_from_address_format(&path, None).unwrap();
-
-        assert_eq!(nested, SimpleType::P2wpkhP2sh);
-        assert_eq!(native, SimpleType::P2wpkh);
-        assert_eq!(taproot, SimpleType::P2tr);
-        assert_eq!(default, SimpleType::P2wpkhP2sh);
-        assert!(simple_type_from_address_format(&path, Some(AddressType::P2pkh)).is_err());
     }
 
     #[test]
@@ -1587,124 +1364,5 @@ mod tests {
         let policy = policy_from(DECAYING_POLICY);
         let unknown = Fingerprint::from_str("deadbeef").unwrap();
         assert!(policy_script_config(&policy, &unknown.as_bytes()[..]).is_err());
-    }
-
-    #[test]
-    fn common_backup_maps_to_bitbox_backup() {
-        let command = BitBoxCommand::try_from(Command::Backup).unwrap();
-        assert!(matches!(command, BitBoxCommand::Backup));
-    }
-
-    #[test]
-    fn common_setup_maps_to_bitbox_setup() {
-        let command = BitBoxCommand::try_from(Command::Setup(
-            crate::common::SetupOptions {
-                label: "BHWI".into(),
-                backup_passphrase: String::new(),
-            },
-            Some(DeviceContext::BitBoxManagement(ManagementContext::Setup {
-                mode: SetupMode::NewWallet {
-                    entropy: super::super::SetupEntropy::new([42; 32]),
-                },
-                timestamp: 1_601_450_521,
-                timezone_offset: 3_600,
-            })),
-        ))
-        .unwrap();
-        assert!(matches!(
-            command,
-            BitBoxCommand::Setup {
-                label,
-                mode: SetupMode::NewWallet { .. },
-                timestamp: 1_601_450_521,
-                timezone_offset: 3_600,
-            } if label == "BHWI"
-        ));
-    }
-
-    #[test]
-    fn common_setup_requires_context_and_rejects_passphrase() {
-        let missing_context =
-            BitBoxCommand::try_from(Command::Setup(crate::common::SetupOptions::default(), None));
-        assert!(matches!(missing_context, Err(BitBoxError::InvalidInput(_))));
-
-        let passphrase = BitBoxCommand::try_from(Command::Setup(
-            crate::common::SetupOptions {
-                label: String::new(),
-                backup_passphrase: "secret".into(),
-            },
-            Some(DeviceContext::BitBoxManagement(ManagementContext::Setup {
-                mode: SetupMode::RestoreFromMnemonic,
-                timestamp: 0,
-                timezone_offset: 0,
-            })),
-        ));
-        assert!(matches!(passphrase, Err(BitBoxError::InvalidInput(_))));
-    }
-
-    #[test]
-    fn bitbox_setup_response_maps_to_device_action() {
-        assert!(matches!(
-            Response::from(BitBoxResponse::DeviceAction(false)),
-            Response::DeviceAction(false)
-        ));
-    }
-
-    #[test]
-    fn common_wipe_maps_to_bitbox_wipe() {
-        assert!(matches!(
-            BitBoxCommand::try_from(Command::Wipe),
-            Ok(BitBoxCommand::Wipe)
-        ));
-    }
-
-    #[test]
-    fn common_restore_maps_to_bitbox_restore_and_ignores_word_count() {
-        let command = BitBoxCommand::try_from(Command::Restore(
-            crate::common::RestoreOptions {
-                label: "Recovered".into(),
-                word_count: 12,
-            },
-            Some(DeviceContext::BitBoxManagement(
-                ManagementContext::Restore {
-                    timestamp: 1_601_450_521,
-                    timezone_offset: -3_600,
-                },
-            )),
-        ))
-        .unwrap();
-        assert!(matches!(
-            command,
-            BitBoxCommand::Restore {
-                label,
-                timestamp: 1_601_450_521,
-                timezone_offset: -3_600,
-            } if label == "Recovered"
-        ));
-    }
-
-    #[test]
-    fn common_restore_requires_context() {
-        assert!(matches!(
-            BitBoxCommand::try_from(Command::Restore(
-                crate::common::RestoreOptions::default(),
-                None,
-            )),
-            Err(BitBoxError::InvalidInput(_))
-        ));
-    }
-
-    #[test]
-    fn common_toggle_passphrase_maps_to_bitbox_command() {
-        assert!(matches!(
-            BitBoxCommand::try_from(Command::TogglePassphrase),
-            Ok(BitBoxCommand::TogglePassphrase)
-        ));
-    }
-
-    #[test]
-    fn bitbox_backup_response_maps_to_completed_backup() {
-        let response = Response::from(BitBoxResponse::Backup);
-        assert!(matches!(response, Response::Backup(DeviceBackup::Complete)));
     }
 }
