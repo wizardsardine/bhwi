@@ -187,7 +187,8 @@ mod tests {
         os::unix::net::UnixDatagram,
         path::{Path, PathBuf},
         str::FromStr,
-        time::Duration,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, Instant},
     };
 
     use bitcoin::{
@@ -403,20 +404,9 @@ mod tests {
         };
 
         for case in displayaddress_arg_cases(&device_type)? {
-            match case.expect {
-                ExpectedResult::Success => assert_displayaddress_parity(case.args.clone())
-                    .with_context(|| {
-                        format!("displayaddress parity failed for args: {:?}", case.args)
-                    })?,
-                ExpectedResult::Error => {
-                    assert_error_json_parity(case.args.clone()).with_context(|| {
-                        format!(
-                            "displayaddress error parity failed for args: {:?}",
-                            case.args
-                        )
-                    })?
-                }
-            }
+            assert_displayaddress_parity(&case).with_context(|| {
+                format!("displayaddress parity failed for args: {:?}", case.args)
+            })?;
         }
 
         Ok(())
@@ -802,16 +792,14 @@ mod tests {
         Ok(())
     }
 
-    fn assert_displayaddress_parity(args: Vec<String>) -> Result<()> {
-        prepare_displayaddress_run(&args)?;
-        let reference = HwiBinary::reference()?.run(args.clone())?;
-        assert_success("reference", &reference)?;
-        assert_displayaddress_shape("reference", &reference.json)?;
+    fn assert_displayaddress_parity(case: &DisplayAddressCase) -> Result<()> {
+        prepare_displayaddress_case_run(case)?;
+        let reference = HwiBinary::reference()?.run(case.args.clone())?;
+        assert_displayaddress_result("reference", &reference, case.expect)?;
 
-        prepare_displayaddress_run(&args)?;
-        let candidate = HwiBinary::candidate()?.run(args)?;
-        assert_success("candidate", &candidate)?;
-        assert_displayaddress_shape("candidate", &candidate.json)?;
+        prepare_displayaddress_case_run(case)?;
+        let candidate = HwiBinary::candidate()?.run(case.args.clone())?;
+        assert_displayaddress_result("candidate", &candidate, case.expect)?;
 
         if reference.json != candidate.json {
             bail!(
@@ -822,6 +810,20 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn assert_displayaddress_result(
+        label: &str,
+        output: &HwiOutput,
+        expect: ExpectedResult,
+    ) -> Result<()> {
+        match expect {
+            ExpectedResult::Success => {
+                assert_success(label, output)?;
+                assert_displayaddress_shape(label, &output.json)
+            }
+            ExpectedResult::Error => assert_error_shape(label, &output.json),
+        }
     }
 
     fn assert_signtx_parity(args: Vec<String>, case: &SigntxCase) -> Result<()> {
@@ -1646,27 +1648,6 @@ mod tests {
         Xpub::from_str(xpub).context("reference xpub was invalid")
     }
 
-    struct ExpertXpub {
-        pubkey: String,
-    }
-
-    fn reference_expert_xpub(device_type: &str, path: &str) -> Result<ExpertXpub> {
-        let output = HwiBinary::reference()?.run(args([
-            "--emulators",
-            "--chain",
-            "test",
-            "--expert",
-            "--device-type",
-            device_type,
-            "getxpub",
-            path,
-        ]))?;
-        assert_success("reference", &output)?;
-        Ok(ExpertXpub {
-            pubkey: assert_string_json_field("reference", &output.json, "pubkey")?.to_owned(),
-        })
-    }
-
     fn signtx_args(device_type: &str, psbt: &str) -> Vec<String> {
         args([
             "--emulators",
@@ -1689,7 +1670,7 @@ mod tests {
         Ok(vec![("hello", path), ("hello world", path)])
     }
 
-    fn displayaddress_arg_cases(device_type: &str) -> Result<Vec<CommandCase>> {
+    fn displayaddress_arg_cases(device_type: &str) -> Result<Vec<DisplayAddressCase>> {
         let fingerprint = reference_fingerprint(device_type)?;
         let wit_xpub = reference_xpub(device_type, "m/84'/1'/0'")?;
         let sh_wit_xpub = reference_xpub(device_type, "m/49'/1'/0'")?;
@@ -1699,111 +1680,125 @@ mod tests {
         let sh_wit_xpub = sh_wit_xpub.to_string();
 
         let mut cases = vec![
-            CommandCase {
-                args: displayaddress_path_args(device_type, "sh_wit", "m/49h/1h/0h/0/0"),
-                expect: ExpectedResult::Success,
-            },
-            CommandCase {
-                args: displayaddress_path_args(device_type, "wit", "m/84h/1h/0h/0/0"),
-                expect: ExpectedResult::Success,
-            },
-            CommandCase {
-                args: displayaddress_desc_args(
-                    device_type,
-                    &format!("wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/0/0)"),
-                ),
-                expect: ExpectedResult::Success,
-            },
-            CommandCase {
-                args: displayaddress_desc_args(
-                    device_type,
-                    &format!("wpkh([{fingerprint}/84h/1h/0h]{wit_pubkey}/0/0)"),
-                ),
-                expect: ExpectedResult::Success,
-            },
-            CommandCase {
-                args: displayaddress_desc_args(
-                    device_type,
-                    &format!("sh(wpkh([{fingerprint}/49h/1h/0h]{sh_wit_xpub}/0/0))"),
-                ),
-                expect: ExpectedResult::Success,
-            },
+            DisplayAddressCase::success(displayaddress_path_args(
+                device_type,
+                "sh_wit",
+                "m/49h/1h/0h/0/0",
+            )),
+            DisplayAddressCase::success(displayaddress_path_args(
+                device_type,
+                "wit",
+                "m/84h/1h/0h/0/0",
+            )),
+            DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &format!("wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/0/0)"),
+            )),
+            DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &format!("wpkh([{fingerprint}/84h/1h/0h]{wit_pubkey}/0/0)"),
+            )),
+            DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &format!("sh(wpkh([{fingerprint}/49h/1h/0h]{sh_wit_xpub}/0/0))"),
+            )),
         ];
 
         if device_type != "bitbox02" {
             let legacy_xpub = reference_xpub(device_type, "m/44'/1'/0'")?.to_string();
             cases.insert(
                 0,
-                CommandCase {
-                    args: displayaddress_path_args(device_type, "legacy", "m/44h/1h/0h/0/0"),
-                    expect: ExpectedResult::Success,
-                },
-            );
-            cases.push(CommandCase {
-                args: displayaddress_desc_args(
+                DisplayAddressCase::success(displayaddress_path_args(
                     device_type,
-                    &format!("pkh([{fingerprint}/44h/1h/0h]{legacy_xpub}/0/0)"),
-                ),
-                expect: ExpectedResult::Success,
-            });
+                    "legacy",
+                    "m/44h/1h/0h/0/0",
+                )),
+            );
+            cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &format!("pkh([{fingerprint}/44h/1h/0h]{legacy_xpub}/0/0)"),
+            )));
         }
 
-        cases.push(CommandCase {
-            args: displayaddress_path_args(device_type, "tap", "m/86h/1h/0h/0/0"),
-            expect: if device_type == "bitbox02" || device_type == "ledger" {
+        cases.push(DisplayAddressCase::new(
+            displayaddress_path_args(device_type, "tap", "m/86h/1h/0h/0/0"),
+            if device_type == "bitbox02" || device_type == "ledger" {
                 ExpectedResult::Success
             } else {
                 ExpectedResult::Error
             },
-        });
-        cases.push(CommandCase {
-            args: displayaddress_desc_args(
-                device_type,
-                &format!("wpkh([00000000/84h/1h/0h]{wit_xpub_string}/0/0)"),
-            ),
-            expect: ExpectedResult::Error,
-        });
-        cases.push(CommandCase {
-            args: displayaddress_desc_args(
-                device_type,
-                &format!("wpkh([{fingerprint}/84h/1h/0h]not_an_xpub/0/0)"),
-            ),
-            expect: ExpectedResult::Error,
-        });
+        ));
+        cases.push(DisplayAddressCase::error(displayaddress_desc_args(
+            device_type,
+            &format!("wpkh([00000000/84h/1h/0h]{wit_xpub_string}/0/0)"),
+        )));
+        cases.push(DisplayAddressCase::error(displayaddress_desc_args(
+            device_type,
+            &format!("wpkh([{fingerprint}/84h/1h/0h]not_an_xpub/0/0)"),
+        )));
         if device_type == "coldcard" {
-            // A standalone Python HWI displayaddress run cannot display a
-            // Coldcard multisig descriptor until the matching multisig wallet
-            // is registered in simulator state. Keep the unregistered-wallet
-            // contract in parity here; registered multisig display belongs in a
-            // setup-backed case.
-            for descriptor in coldcard_multisig_display_descriptors(device_type, &fingerprint)? {
-                cases.push(CommandCase {
-                    args: displayaddress_desc_args(device_type, &descriptor),
-                    expect: ExpectedResult::Error,
-                });
+            for wallet in coldcard_multisig_display_wallets(device_type, &fingerprint)? {
+                let args = displayaddress_desc_args(device_type, &wallet.display_descriptor);
+                cases.push(DisplayAddressCase::registered(args.clone(), wallet));
+                cases.push(DisplayAddressCase::unregistered(args));
             }
         }
 
         Ok(cases)
     }
 
-    fn coldcard_multisig_display_descriptors(
+    fn coldcard_multisig_display_wallets(
         device_type: &str,
         fingerprint: &str,
-    ) -> Result<Vec<String>> {
-        let mut keys = Vec::new();
-        for account in 0..3 {
-            let origin_path = format!("48h/1h/{account}h/0h/0");
-            let full_path = format!("m/{origin_path}/0");
-            let expert = reference_expert_xpub(device_type, &full_path)?;
-            keys.push(format!("[{fingerprint}/{origin_path}/0]{}", expert.pubkey));
+    ) -> Result<Vec<ColdcardDisplayWallet>> {
+        let secp = Secp256k1::new();
+        let child_path = DerivationPath::from_str("m/0/0")?;
+        // The normal simulator accepts its own fingerprint once per wallet,
+        // so use synthetic cosigners instead of the patched upstream fixture.
+        let cosigner_masters = [
+            Xpriv::new_master(Network::Testnet, &[17_u8; 32])?,
+            Xpriv::new_master(Network::Testnet, &[34_u8; 32])?,
+        ];
+        let mut wallets = Vec::new();
+
+        for (origin_path, wrapper) in [
+            ("48h/1h/0h/0h", ColdcardDisplayWrapper::Legacy),
+            ("48h/1h/0h/1h", ColdcardDisplayWrapper::ShWit),
+            ("48h/1h/0h/2h", ColdcardDisplayWrapper::Wit),
+        ] {
+            let account_path = DerivationPath::from_str(&format!("m/{origin_path}"))?;
+            let device_xpub = reference_xpub(device_type, &format!("m/{origin_path}"))?;
+            let mut registration_keys =
+                vec![format!("[{fingerprint}/{origin_path}]{device_xpub}/0/*")];
+            let device_child = device_xpub.derive_pub(&secp, &child_path)?;
+            let mut display_keys = vec![format!(
+                "[{fingerprint}/{origin_path}/0/0]{}",
+                device_child.public_key
+            )];
+
+            for master in &cosigner_masters {
+                let cosigner_fingerprint = master.fingerprint(&secp);
+                let account_xpriv = master.derive_priv(&secp, &account_path)?;
+                let account_xpub = Xpub::from_priv(&secp, &account_xpriv);
+                registration_keys.push(format!(
+                    "[{cosigner_fingerprint}/{origin_path}]{account_xpub}/0/*"
+                ));
+                let child = account_xpub.derive_pub(&secp, &child_path)?;
+                display_keys.push(format!(
+                    "[{cosigner_fingerprint}/{origin_path}/0/0]{}",
+                    child.public_key
+                ));
+            }
+
+            wallets.push(ColdcardDisplayWallet {
+                name: "hwi-display".to_owned(),
+                registration_descriptor: wrapper.wrap(&registration_keys.join(",")),
+                display_descriptor: wrapper.wrap(&display_keys.join(",")),
+                fingerprint: fingerprint.to_owned(),
+            });
         }
-        let keys = keys.join(",");
-        Ok(vec![
-            format!("sh(sortedmulti(2,{keys}))"),
-            format!("wsh(sortedmulti(2,{keys}))"),
-            format!("sh(wsh(sortedmulti(2,{keys})))"),
-        ])
+
+        Ok(wallets)
     }
 
     fn signmessage_args(device_type: &str, message: &str, path: &str) -> Vec<String> {
@@ -1873,6 +1868,102 @@ mod tests {
             }
             _ => Ok(()),
         }
+    }
+
+    fn prepare_displayaddress_case_run(case: &DisplayAddressCase) -> Result<()> {
+        match &case.coldcard_setup {
+            ColdcardDisplaySetup::None => {}
+            ColdcardDisplaySetup::Registered(wallet) => register_coldcard_wallet(wallet)?,
+            ColdcardDisplaySetup::Unregistered => reset_coldcard_multisig()?,
+        }
+        if matches!(case.expect, ExpectedResult::Success) {
+            prepare_displayaddress_run(&case.args)?;
+        }
+        Ok(())
+    }
+
+    fn register_coldcard_wallet(wallet: &ColdcardDisplayWallet) -> Result<()> {
+        reset_coldcard_multisig()?;
+        let bin = native_bhwi_bin()?;
+        let mut child = Command::new(&bin)
+            .args([
+                "--network",
+                "testnet",
+                "--fingerprint",
+                &wallet.fingerprint,
+                "register-wallet",
+                "--name",
+                &wallet.name,
+                "--descriptor",
+                &wallet.registration_descriptor,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to spawn native bhwi at {}", bin.display()))?;
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while child.try_wait()?.is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                bail!("timed out waiting for Coldcard wallet registration acknowledgement");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            bail!(
+                "native bhwi registration failed with status {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Coldcard acknowledges the enrollment request before the user-facing
+        // confirmation is persisted, so approve and poll the simulator state.
+        std::thread::sleep(Duration::from_millis(100));
+        coldcard_control_exchange(b"XKEYy")?;
+        for _ in 0..40 {
+            if coldcard_multisig_settings()?.contains(&wallet.name) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        bail!(
+            "Coldcard multisig registration was not persisted for {:?}",
+            wallet.display_descriptor
+        )
+    }
+
+    fn native_bhwi_bin() -> Result<PathBuf> {
+        let path = match env::var_os("BHWI_BIN") {
+            Some(path) => PathBuf::from(path),
+            None => {
+                let hwi = env::var_os("HWI_BIN").context("HWI_BIN must point to candidate hwi")?;
+                PathBuf::from(hwi).with_file_name("bhwi")
+            }
+        };
+        if !path.is_file() {
+            bail!(
+                "BHWI_BIN must point to the native bhwi binary used for Coldcard setup: {}",
+                path.display()
+            );
+        }
+        Ok(path)
+    }
+
+    fn reset_coldcard_multisig() -> Result<()> {
+        coldcard_control_exchange(b"EXECsettings.set('multisig', []); settings.save()")?;
+        Ok(())
+    }
+
+    fn coldcard_multisig_settings() -> Result<String> {
+        let response = coldcard_control_exchange(b"EVALsettings.get('multisig', [])")?;
+        let value = response
+            .strip_prefix(b"biny")
+            .context("unexpected Coldcard multisig settings response")?;
+        String::from_utf8(value.to_vec()).context("Coldcard multisig settings were not UTF-8")
     }
 
     fn prepare_signtx_run(args: &[String], case: &SigntxCase) -> Result<()> {
@@ -1951,13 +2042,7 @@ mod tests {
     }
 
     fn send_coldcard_approval() -> Result<()> {
-        let client_socket = format!("/tmp/bhwi-hwi-parity-ckcc-{}.sock", std::process::id());
-        let _ = std::fs::remove_file(&client_socket);
-        let socket = UnixDatagram::bind(&client_socket)?;
-        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-        socket.connect("/tmp/ckcc-simulator.sock")?;
-        coldcard_hid_exchange(&socket, b"XKEYy")?;
-        let _ = std::fs::remove_file(client_socket);
+        coldcard_control_exchange(b"XKEYy")?;
         Ok(())
     }
 
@@ -1977,6 +2062,23 @@ mod tests {
         }
         let _ = std::fs::remove_file(client_socket);
         Ok(())
+    }
+
+    fn coldcard_control_exchange(request: &[u8]) -> Result<Vec<u8>> {
+        static SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let socket_id = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let client_socket = format!(
+            "/tmp/bhwi-hwi-parity-ckcc-{}-{socket_id}.sock",
+            std::process::id()
+        );
+        let _ = std::fs::remove_file(&client_socket);
+        let socket = UnixDatagram::bind(&client_socket)?;
+        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+        socket.connect("/tmp/ckcc-simulator.sock")?;
+        let response = coldcard_hid_exchange(&socket, request);
+        drop(socket);
+        let _ = std::fs::remove_file(client_socket);
+        response
     }
 
     fn coldcard_hid_exchange(socket: &UnixDatagram, request: &[u8]) -> Result<Vec<u8>> {
@@ -2192,6 +2294,7 @@ mod tests {
         ]
     }
 
+    #[derive(Clone, Copy)]
     enum ExpectedResult {
         Success,
         Error,
@@ -2200,6 +2303,76 @@ mod tests {
     struct CommandCase {
         args: Vec<String>,
         expect: ExpectedResult,
+    }
+
+    struct DisplayAddressCase {
+        args: Vec<String>,
+        expect: ExpectedResult,
+        coldcard_setup: ColdcardDisplaySetup,
+    }
+
+    impl DisplayAddressCase {
+        fn new(args: Vec<String>, expect: ExpectedResult) -> Self {
+            Self {
+                args,
+                expect,
+                coldcard_setup: ColdcardDisplaySetup::None,
+            }
+        }
+
+        fn success(args: Vec<String>) -> Self {
+            Self::new(args, ExpectedResult::Success)
+        }
+
+        fn error(args: Vec<String>) -> Self {
+            Self::new(args, ExpectedResult::Error)
+        }
+
+        fn registered(args: Vec<String>, wallet: ColdcardDisplayWallet) -> Self {
+            Self {
+                args,
+                expect: ExpectedResult::Success,
+                coldcard_setup: ColdcardDisplaySetup::Registered(wallet),
+            }
+        }
+
+        fn unregistered(args: Vec<String>) -> Self {
+            Self {
+                args,
+                expect: ExpectedResult::Error,
+                coldcard_setup: ColdcardDisplaySetup::Unregistered,
+            }
+        }
+    }
+
+    enum ColdcardDisplaySetup {
+        None,
+        Registered(ColdcardDisplayWallet),
+        Unregistered,
+    }
+
+    struct ColdcardDisplayWallet {
+        name: String,
+        registration_descriptor: String,
+        display_descriptor: String,
+        fingerprint: String,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ColdcardDisplayWrapper {
+        Legacy,
+        ShWit,
+        Wit,
+    }
+
+    impl ColdcardDisplayWrapper {
+        fn wrap(self, keys: &str) -> String {
+            match self {
+                Self::Legacy => format!("sh(sortedmulti(2,{keys}))"),
+                Self::ShWit => format!("sh(wsh(sortedmulti(2,{keys})))"),
+                Self::Wit => format!("wsh(sortedmulti(2,{keys}))"),
+            }
+        }
     }
 
     struct UnsupportedDeviceActionCase {

@@ -31,7 +31,7 @@ Coldcard, BHWI still tests Python HWI-compatible unsupported-action errors.
 |`getkeypool`      |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for receive/change ranges and address types.                  |
 |`signtx`          |`[~]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Ledger registered-wallet and non-default policy signing remains open. |
 |`signmessage`     |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for emulator-supported paths.                                 |
-|`displayaddress`  |`[x]` |`[x]`|`[~]`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Coldcard registered multisig display coverage remains open.           |
+|`displayaddress`  |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Registered Coldcard multisig display is covered for all script wrappers.|
 |`setup`           |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Physical setup uses fresh entropy and backup; simulator setup is covered end to end.|
 |`wipe`            |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |BitBox02 reset-disconnect behavior is covered by a stateful lifecycle.|
 |`restore`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI support excludes Ledger, Jade, Coldcard, and BitBox01.     |

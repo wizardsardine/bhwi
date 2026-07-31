@@ -74,6 +74,12 @@ mirrors each with its own `--emulators` enumerate.
 | Jade      | `hwi-parity-jade` | `hwi-upstream-jade` |
 | BitBox02  | `hwi-parity-bitbox` | `hwi-upstream-bitbox` |
 
+Coldcard multisig display cases reset simulator state and register the same
+deterministic wallet through the native `bhwi` binary before each reference
+and candidate run. The harness also repeats each descriptor without
+registration to preserve error-response parity. Set `BHWI_BIN` when the native
+binary is not next to the candidate `HWI_BIN`.
+
 ## BitBox02 parity notes
 
 BitBox02 parity is wired against Python HWI's built-in simulator transport. The
