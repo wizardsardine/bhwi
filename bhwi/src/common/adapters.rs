@@ -1,1 +1,2 @@
+mod coldcard;
 mod ledger;
