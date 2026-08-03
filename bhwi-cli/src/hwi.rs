@@ -151,6 +151,7 @@ pub enum HwiCliCommand {
         pin: String,
     },
     Togglepassphrase,
+    #[cfg(target_os = "linux")]
     Installudevrules {
         #[arg(long, default_value = "/etc/udev/rules.d/")]
         location: PathBuf,
@@ -3083,6 +3084,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::SendPin { pin })
         }
         HwiCliCommand::Togglepassphrase => HwiCommand::TogglePassphrase,
+        #[cfg(target_os = "linux")]
         HwiCliCommand::Installudevrules { location } => HwiCommand::InstallUdevRules { location },
         HwiCliCommand::External(argv) => {
             let command = argv
@@ -3668,6 +3670,7 @@ mod tests {
         assert_eq!(togglepassphrase.command, HwiCommand::TogglePassphrase);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parses_installudevrules_without_device_selection() {
         let request = parse_args(["hwi", "installudevrules", "--location", "/tmp/bhwi-rules.d"])

@@ -291,10 +291,11 @@ fn assert_success(label: &str, output: &HwiOutput) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::PermissionsExt;
     use std::{
         fs,
         io::{Read, Write},
-        os::unix::fs::PermissionsExt,
         os::unix::net::UnixDatagram,
         path::{Path, PathBuf},
         str::FromStr,
@@ -767,6 +768,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn candidate_installudevrules_matches_reference_or_avoids_getlogin_failure() -> Result<()> {
         if env::var("HWI_BIN").is_err() {
@@ -828,6 +830,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     fn is_upstream_getlogin_failure(json: &Value) -> bool {
         json.get("code").and_then(Value::as_i64) == Some(-13)
             && json
@@ -3385,6 +3388,7 @@ mod tests {
         Ok(path)
     }
 
+    #[cfg(target_os = "linux")]
     fn write_fake_command(path: &Path, exit_code: i32) -> Result<()> {
         fs::write(path, format!("#!/bin/sh\nexit {exit_code}\n"))
             .with_context(|| format!("failed to write {}", path.display()))?;
@@ -3393,6 +3397,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     fn assert_udev_rule_dirs_match(reference: &Path, candidate: &Path) -> Result<()> {
         let mut reference_files = rule_files(reference)?;
         let mut candidate_files = rule_files(candidate)?;
@@ -3420,6 +3425,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     fn rule_files(path: &Path) -> Result<Vec<String>> {
         fs::read_dir(path)
             .with_context(|| format!("failed to read {}", path.display()))?
