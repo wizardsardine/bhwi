@@ -8,6 +8,6 @@ license-file.workspace = true
 [dependencies]
 bhwi = { workspace = true, features = ["trezor"] }
 bhwi-async = { workspace = true, features = ["trezor"] }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 bhwi-cli = { path = "../../bhwi-cli" }

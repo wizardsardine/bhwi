@@ -1,8 +1,24 @@
 #[cfg(test)]
+mod debuglink;
+
+#[cfg(test)]
 mod tests {
     use bhwi::bitcoin::Network;
     use bhwi_async::{HWI, Trezor, transport::trezor::TrezorTransport};
     use bhwi_cli::trezor::emulator::{DEFAULT_EMULATOR_ADDR, EmulatorClient};
+
+    use crate::debuglink::{DEFAULT_DEBUGLINK_ADDR, DebugLink};
+    use bhwi::bitcoin::{
+        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+        absolute::LockTime,
+        address::Address,
+        bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
+        psbt::{Input, Output, Psbt},
+        secp256k1::Secp256k1,
+        transaction::Version as TxVersion,
+    };
+    use std::str::FromStr;
+    use std::time::Duration;
 
     const FINGERPRINT: &str = "5c9e228d";
     const XPUB_44: &str = "tpubDDKn3FtHc74CaRrRbi1WFdJNaaenZkDWqq9NsEhcafnDZ4VuKeuLG2aKHm5SuwuLgAhRkkfHqcCxpnVNSrs5kJYZXwa6Ud431VnevzzzK3U";
@@ -53,6 +69,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(xpub.to_string(), XPUB_84);
+    }
+
+    fn sample_psbt() -> Psbt {
+        let secp = Secp256k1::verification_only();
+        let account: DerivationPath = "m/84'/1'/0'".parse().unwrap();
+        let xpub = Xpub::from_str(XPUB_84).unwrap();
+        let fingerprint = Fingerprint::from_str(FINGERPRINT).unwrap();
+
+        let recv_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(0).unwrap(),
+            ChildNumber::from_normal_idx(0).unwrap(),
+        ]);
+        let change_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(1).unwrap(),
+            ChildNumber::from_normal_idx(0).unwrap(),
+        ]);
+        let recv = xpub.derive_pub(&secp, &recv_path).unwrap();
+        let change = xpub.derive_pub(&secp, &change_path).unwrap();
+        let recv_script = Address::p2wpkh(&recv.to_pub(), Network::Testnet).script_pubkey();
+        let change_script = Address::p2wpkh(&change.to_pub(), Network::Testnet).script_pubkey();
+
+        let prev = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: recv_script.clone(),
+            }],
+        };
+        let unsigned = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: prev.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: change_script,
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned).unwrap();
+        psbt.inputs[0] = Input {
+            non_witness_utxo: Some(prev),
+            witness_utxo: Some(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: recv_script,
+            }),
+            bip32_derivation: [(recv.public_key, (fingerprint, account.extend(recv_path)))].into(),
+            ..Default::default()
+        };
+        psbt.outputs[0] = Output {
+            bip32_derivation: [(
+                change.public_key,
+                (fingerprint, account.extend(change_path)),
+            )]
+            .into(),
+            ..Default::default()
+        };
+
+        psbt
+    }
+
+    #[tokio::test]
+    async fn can_sign_psbt() {
+        let mut dev = device().await;
+        let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+            .await
+            .expect("connect to debuglink");
+        let signed = tokio::select! {
+            signed = dev.sign_tx(sample_psbt(), None) => signed.expect("sign psbt"),
+            _ = debug.confirm_until_done(Duration::from_millis(300)) => unreachable!(),
+        };
+        assert!(!signed.inputs[0].partial_sigs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recovers_after_a_declined_signature() {
+        let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+            .await
+            .expect("connect to debuglink");
+        let mut dev = device().await;
+        let declined = tokio::select! {
+            result = dev.sign_tx(sample_psbt(), None) => result,
+            _ = debug.decline_until_done(Duration::from_millis(300)) => unreachable!(),
+        };
+        assert!(declined.is_err(), "expected the device to refuse");
+
+        let mut dev = device().await;
+        let fingerprint = dev
+            .get_master_fingerprint()
+            .await
+            .expect("get master fingerprint after a declined signature");
+        assert_eq!(fingerprint.to_string(), FINGERPRINT);
     }
 
     #[tokio::test]
