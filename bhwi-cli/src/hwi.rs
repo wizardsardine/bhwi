@@ -2957,7 +2957,8 @@ fn print_response(response: HwiResponse) -> ExitCode {
 }
 
 fn parse_device_type(value: &str) -> HwiResult<DeviceType> {
-    match value.to_ascii_lowercase().as_str() {
+    let family = value.split('_').next().unwrap_or(value);
+    match family.to_ascii_lowercase().as_str() {
         "bitbox02" => Ok(DeviceType::BitBox02),
         "coldcard" => Ok(DeviceType::Coldcard),
         "jade" => Ok(DeviceType::Jade),
@@ -3143,6 +3144,19 @@ mod tests {
         transaction::Version as TxVersion,
     };
     use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn device_type_accepts_model_qualified_names() {
+        for value in ["trezor", "trezor_1", "trezor_t", "trezor_1_simulator"] {
+            assert_eq!(parse_device_type(value).unwrap(), DeviceType::Trezor);
+        }
+        assert_eq!(parse_device_type("bitbox02").unwrap(), DeviceType::BitBox02);
+        assert_eq!(
+            parse_device_type("coldcard_simulator").unwrap(),
+            DeviceType::Coldcard
+        );
+        assert!(parse_device_type("notadevice").is_err());
+    }
 
     #[test]
     fn backup_filename_matches_python_hwi_local_time_format() {
