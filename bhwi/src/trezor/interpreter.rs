@@ -27,9 +27,11 @@ pub enum TrezorCommand {
         script_type: btc::InputScriptType,
     },
     SignTx(Box<Psbt>),
+    Wipe,
 }
 
 pub enum TrezorResponse {
+    DeviceAction(bool),
     SignedPsbt(Box<Psbt>),
     Info(common::Info),
     MasterFingerprint(Fingerprint),
@@ -47,6 +49,7 @@ enum State {
     AwaitFeatures,
     AwaitPublicKey(PublicKeyKind),
     AwaitAddress,
+    AwaitSuccess,
     AwaitSignKey(Box<Psbt>),
     AwaitTxRequest(Box<SignCtx>),
     Finished(TrezorResponse),
@@ -125,6 +128,10 @@ where
                 self.state = State::AwaitAddress;
                 api::get_address(address_n, display, script_type, coin)
             }
+            TrezorCommand::Wipe => {
+                self.state = State::AwaitSuccess;
+                api::wipe_device()
+            }
             TrezorCommand::SignTx(psbt) => {
                 self.state = State::AwaitSignKey(psbt);
                 api::get_public_key(Vec::new(), false, btc::InputScriptType::Spendaddress, coin)
@@ -200,6 +207,16 @@ where
                     expect(msg_type, MessageType::Address, &payload, "reading address")
                         .map_err(E::from)?;
                 TrezorResponse::Address(address.address)
+            }
+            State::AwaitSuccess => {
+                let _: pb::Success = expect(
+                    msg_type,
+                    MessageType::Success,
+                    &payload,
+                    "reading device action result",
+                )
+                .map_err(E::from)?;
+                TrezorResponse::DeviceAction(true)
             }
             State::AwaitSignKey(_) => {
                 let State::AwaitSignKey(psbt) = core::mem::replace(&mut self.state, State::New)
@@ -333,9 +350,7 @@ impl TryFrom<common::Command> for TrezorCommand {
             Command::Setup(..) => {
                 return Err(TrezorError::Unsupported("setup is not yet supported"));
             }
-            Command::Wipe => {
-                return Err(TrezorError::Unsupported("wipe is not yet supported"));
-            }
+            Command::Wipe => TrezorCommand::Wipe,
             Command::Restore(..) => {
                 return Err(TrezorError::Unsupported("restore is not yet supported"));
             }
@@ -358,6 +373,7 @@ impl From<TrezorResponse> for common::Response {
             TrezorResponse::Xpub(xpub) => common::Response::Xpub(xpub),
             TrezorResponse::Address(address) => common::Response::Address(address),
             TrezorResponse::SignedPsbt(psbt) => common::Response::SignedPsbt(*psbt),
+            TrezorResponse::DeviceAction(success) => common::Response::DeviceAction(success),
         }
     }
 }
@@ -1103,13 +1119,22 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_commands_rejected_at_boundary() {
+    fn wipe_encodes_wipe_device_and_reports_success() {
         let mut interp = Interp::default();
-        assert!(matches!(
-            interp.start(Command::Wipe),
-            Err(Error::MissingCommandInfo(_))
-        ));
+        let transmit = interp.start(Command::Wipe).unwrap();
+        let (msg_type, _) = decode_transmit::<mgmt::WipeDevice>(transmit);
+        assert_eq!(msg_type, MessageType::WipeDevice as u16);
 
+        let frame = framed(MessageType::Success, &pb::Success::default());
+        assert!(interp.exchange(frame).unwrap().is_none());
+        assert!(matches!(
+            interp.end().unwrap(),
+            Response::DeviceAction(true)
+        ));
+    }
+
+    #[test]
+    fn unsupported_commands_rejected_at_boundary() {
         let mut interp = Interp::default();
         let display = Command::DisplayAddress(
             DisplayAddress::ByDescriptor {

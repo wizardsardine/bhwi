@@ -9,6 +9,7 @@ const HEADER: [u8; 2] = *b"##";
 pub enum MessageType {
     Initialize = 0,
     Success = 2,
+    WipeDevice = 5,
     Failure = 3,
     GetPublicKey = 11,
     PublicKey = 12,
@@ -62,6 +63,10 @@ pub fn initialize() -> Vec<u8> {
 
 pub fn get_features() -> Vec<u8> {
     encode(MessageType::GetFeatures, &mgmt::GetFeatures::default())
+}
+
+pub fn wipe_device() -> Vec<u8> {
+    encode(MessageType::WipeDevice, &mgmt::WipeDevice::default())
 }
 
 pub fn button_ack() -> Vec<u8> {

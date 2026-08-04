@@ -164,7 +164,7 @@ enum DeviceCommands {
         #[arg(long, short, default_value = "")]
         label: String,
     },
-    /// Erase wallet material from the selected BitBox02
+    /// Erase wallet material from the selected device
     Wipe,
     /// Restore an unseeded BitBox02 using its on-device mnemonic flow
     Restore {
@@ -400,11 +400,14 @@ async fn main() -> Result<()> {
         }
         Commands::Device(DeviceCommands::Wipe) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
-                if device.device_type() != DeviceType::BitBox02 {
-                    anyhow::bail!("device wipe is currently supported only for BitBox02");
+                if !matches!(
+                    device.device_type(),
+                    DeviceType::BitBox02 | DeviceType::Trezor
+                ) {
+                    anyhow::bail!("device wipe is not supported for {}", device.device_type());
                 }
                 if !device.device().wipe_device().await? {
-                    anyhow::bail!("BitBox02 wipe was not completed");
+                    anyhow::bail!("device wipe was not completed");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
