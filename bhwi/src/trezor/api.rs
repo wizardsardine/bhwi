@@ -10,6 +10,7 @@ pub enum MessageType {
     Initialize = 0,
     Success = 2,
     WipeDevice = 5,
+    ApplySettings = 25,
     Failure = 3,
     GetPublicKey = 11,
     PublicKey = 12,
@@ -67,6 +68,16 @@ pub fn get_features() -> Vec<u8> {
 
 pub fn wipe_device() -> Vec<u8> {
     encode(MessageType::WipeDevice, &mgmt::WipeDevice::default())
+}
+
+pub fn apply_settings(use_passphrase: bool) -> Vec<u8> {
+    encode(
+        MessageType::ApplySettings,
+        &mgmt::ApplySettings {
+            use_passphrase: Some(use_passphrase),
+            ..Default::default()
+        },
+    )
 }
 
 pub fn button_ack() -> Vec<u8> {

@@ -28,6 +28,7 @@ pub enum TrezorCommand {
     },
     SignTx(Box<Psbt>),
     Wipe,
+    TogglePassphrase,
 }
 
 pub enum TrezorResponse {
@@ -50,6 +51,7 @@ enum State {
     AwaitPublicKey(PublicKeyKind),
     AwaitAddress,
     AwaitSuccess,
+    AwaitPassphraseSetting,
     AwaitSignKey(Box<Psbt>),
     AwaitTxRequest(Box<SignCtx>),
     Finished(TrezorResponse),
@@ -132,6 +134,10 @@ where
                 self.state = State::AwaitSuccess;
                 api::wipe_device()
             }
+            TrezorCommand::TogglePassphrase => {
+                self.state = State::AwaitPassphraseSetting;
+                api::get_features()
+            }
             TrezorCommand::SignTx(psbt) => {
                 self.state = State::AwaitSignKey(psbt);
                 api::get_public_key(Vec::new(), false, btc::InputScriptType::Spendaddress, coin)
@@ -207,6 +213,18 @@ where
                     expect(msg_type, MessageType::Address, &payload, "reading address")
                         .map_err(E::from)?;
                 TrezorResponse::Address(address.address)
+            }
+            State::AwaitPassphraseSetting => {
+                let features: mgmt::Features = expect(
+                    msg_type,
+                    MessageType::Features,
+                    &payload,
+                    "reading passphrase setting",
+                )
+                .map_err(E::from)?;
+                let enabled = features.passphrase_protection.unwrap_or(false);
+                self.state = State::AwaitSuccess;
+                return Ok(Some(T::from(api::apply_settings(!enabled))));
             }
             State::AwaitSuccess => {
                 let _: pb::Success = expect(
@@ -354,11 +372,7 @@ impl TryFrom<common::Command> for TrezorCommand {
             Command::Restore(..) => {
                 return Err(TrezorError::Unsupported("restore is not yet supported"));
             }
-            Command::TogglePassphrase => {
-                return Err(TrezorError::Unsupported(
-                    "toggle_passphrase is not yet supported",
-                ));
-            }
+            Command::TogglePassphrase => TrezorCommand::TogglePassphrase,
         })
     }
 }
@@ -1131,6 +1145,28 @@ mod tests {
             interp.end().unwrap(),
             Response::DeviceAction(true)
         ));
+    }
+
+    fn toggle_passphrase_from(enabled: bool) -> bool {
+        let mut interp = Interp::default();
+        interp.start(Command::TogglePassphrase).unwrap();
+        let features = mgmt::Features {
+            passphrase_protection: Some(enabled),
+            ..Default::default()
+        };
+        let transmit = interp
+            .exchange(framed(MessageType::Features, &features))
+            .unwrap()
+            .unwrap();
+        let (msg_type, applied) = decode_transmit::<mgmt::ApplySettings>(transmit);
+        assert_eq!(msg_type, MessageType::ApplySettings as u16);
+        applied.use_passphrase.unwrap()
+    }
+
+    #[test]
+    fn toggle_passphrase_inverts_the_current_setting() {
+        assert!(toggle_passphrase_from(false));
+        assert!(!toggle_passphrase_from(true));
     }
 
     #[test]

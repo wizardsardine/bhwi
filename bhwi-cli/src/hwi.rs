@@ -1035,7 +1035,10 @@ async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
         }
     };
 
-    if device.device_type() != DeviceType::BitBox02 {
+    if !matches!(
+        device.device_type(),
+        DeviceType::BitBox02 | DeviceType::Trezor
+    ) {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             hwi_unavailable_action_message(
@@ -1044,7 +1047,9 @@ async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
             ),
         ));
     }
-    if device.info().await.ok().and_then(|info| info.initialized) == Some(false) {
+    if device.device_type() == DeviceType::BitBox02
+        && device.info().await.ok().and_then(|info| info.initialized) == Some(false)
+    {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::DeviceNotInitialized,
             "The BitBox02 must be initialized first.",

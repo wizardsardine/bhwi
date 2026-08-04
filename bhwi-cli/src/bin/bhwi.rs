@@ -172,7 +172,7 @@ enum DeviceCommands {
         #[arg(long, short, default_value = "")]
         label: String,
     },
-    /// Toggle mnemonic-passphrase use on the selected BitBox02
+    /// Toggle mnemonic-passphrase use on the selected device
     TogglePassphrase,
     /// Install udev rules for hardware wallet device access
     InstallUdevRules {
@@ -440,13 +440,17 @@ async fn main() -> Result<()> {
         }
         Commands::Device(DeviceCommands::TogglePassphrase) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
-                if device.device_type() != DeviceType::BitBox02 {
+                if !matches!(
+                    device.device_type(),
+                    DeviceType::BitBox02 | DeviceType::Trezor
+                ) {
                     anyhow::bail!(
-                        "device toggle-passphrase is currently supported only for BitBox02"
+                        "device toggle-passphrase is not supported for {}",
+                        device.device_type()
                     );
                 }
                 if !device.device().toggle_passphrase().await? {
-                    anyhow::bail!("BitBox02 passphrase setting was not changed");
+                    anyhow::bail!("passphrase setting was not changed");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
