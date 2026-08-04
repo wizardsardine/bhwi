@@ -16,6 +16,9 @@ pub enum MessageType {
     PinMatrixRequest = 18,
     ButtonRequest = 26,
     ButtonAck = 27,
+    SignTx = 15,
+    TxRequest = 21,
+    TxAck = 22,
     GetAddress = 29,
     Address = 30,
     PassphraseRequest = 41,
@@ -89,6 +92,29 @@ pub fn get_public_key(
         ..Default::default()
     };
     encode(MessageType::GetPublicKey, &msg)
+}
+
+pub fn sign_tx(
+    inputs_count: u32,
+    outputs_count: u32,
+    version: u32,
+    lock_time: u32,
+    coin_name: &str,
+) -> Vec<u8> {
+    let msg = btc::SignTx {
+        inputs_count,
+        outputs_count,
+        coin_name: Some(coin_name.to_string()),
+        version: Some(version),
+        lock_time: Some(lock_time),
+        ..Default::default()
+    };
+    encode(MessageType::SignTx, &msg)
+}
+
+pub fn tx_ack(tx: btc::tx_ack::TransactionType) -> Vec<u8> {
+    let msg = btc::TxAck { tx: Some(tx) };
+    encode(MessageType::TxAck, &msg)
 }
 
 pub fn get_address(

@@ -3,7 +3,9 @@ use core::str::FromStr;
 
 use bitcoin::address::AddressType;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
-use bitcoin::{Network, NetworkKind};
+use bitcoin::hashes::Hash;
+use bitcoin::psbt::Psbt;
+use bitcoin::{Network, NetworkKind, Transaction};
 
 use crate::Interpreter;
 use crate::common;
@@ -24,9 +26,11 @@ pub enum TrezorCommand {
         display: bool,
         script_type: btc::InputScriptType,
     },
+    SignTx(Box<Psbt>),
 }
 
 pub enum TrezorResponse {
+    SignedPsbt(Box<Psbt>),
     Info(common::Info),
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
@@ -43,7 +47,17 @@ enum State {
     AwaitFeatures,
     AwaitPublicKey(PublicKeyKind),
     AwaitAddress,
+    AwaitSignKey(Box<Psbt>),
+    AwaitTxRequest(Box<SignCtx>),
     Finished(TrezorResponse),
+}
+
+struct SignCtx {
+    psbt: Box<Psbt>,
+    tx: Transaction,
+    coin: String,
+    master_fp: Fingerprint,
+    signatures: Vec<(u32, Vec<u8>)>,
 }
 
 pub struct TrezorInterpreter<C, T, R, E> {
@@ -110,6 +124,10 @@ where
             } => {
                 self.state = State::AwaitAddress;
                 api::get_address(address_n, display, script_type, coin)
+            }
+            TrezorCommand::SignTx(psbt) => {
+                self.state = State::AwaitSignKey(psbt);
+                api::get_public_key(Vec::new(), false, btc::InputScriptType::Spendaddress, coin)
             }
         };
         Ok(T::from(bytes))
@@ -183,6 +201,60 @@ where
                         .map_err(E::from)?;
                 TrezorResponse::Address(address.address)
             }
+            State::AwaitSignKey(_) => {
+                let State::AwaitSignKey(psbt) = core::mem::replace(&mut self.state, State::New)
+                else {
+                    unreachable!("state checked above")
+                };
+                let pubkey: btc::PublicKey = expect(
+                    msg_type,
+                    MessageType::PublicKey,
+                    &payload,
+                    "reading master public key",
+                )
+                .map_err(E::from)?;
+                let master_fp = match pubkey.root_fingerprint {
+                    Some(fingerprint) => Fingerprint::from(fingerprint.to_be_bytes()),
+                    None => parse_xpub(&pubkey.xpub).map_err(E::from)?.fingerprint(),
+                };
+                let tx = psbt.unsigned_tx.clone();
+                let bytes = api::sign_tx(
+                    tx.input.len() as u32,
+                    tx.output.len() as u32,
+                    tx.version.0 as u32,
+                    tx.lock_time.to_consensus_u32(),
+                    &coin_name(self.network),
+                );
+                self.state = State::AwaitTxRequest(Box::new(SignCtx {
+                    psbt,
+                    tx,
+                    coin: coin_name(self.network),
+                    master_fp,
+                    signatures: Vec::new(),
+                }));
+                return Ok(Some(T::from(bytes)));
+            }
+            State::AwaitTxRequest(_) => {
+                let State::AwaitTxRequest(mut ctx) =
+                    core::mem::replace(&mut self.state, State::New)
+                else {
+                    unreachable!("state checked above")
+                };
+                let request: btc::TxRequest = expect(
+                    msg_type,
+                    MessageType::TxRequest,
+                    &payload,
+                    "signing transaction",
+                )
+                .map_err(E::from)?;
+                match drive_sign(&mut ctx, request).map_err(E::from)? {
+                    SignStep::Continue(bytes) => {
+                        self.state = State::AwaitTxRequest(ctx);
+                        return Ok(Some(T::from(bytes)));
+                    }
+                    SignStep::Done(psbt) => TrezorResponse::SignedPsbt(psbt),
+                }
+            }
             State::New | State::Finished(_) => {
                 return Err(E::from(TrezorError::UnexpectedMessage(
                     msg_type,
@@ -239,8 +311,13 @@ impl TryFrom<common::Command> for TrezorCommand {
                     "multisig address display is not yet supported",
                 ));
             }
-            Command::SignTx(..) => {
-                return Err(TrezorError::Unsupported("sign_tx is not yet supported"));
+            Command::SignTx(psbt, context) => {
+                if context.is_some() {
+                    return Err(TrezorError::Unsupported(
+                        "Trezor SignTx does not support device context",
+                    ));
+                }
+                TrezorCommand::SignTx(Box::new(psbt))
             }
             Command::SignMessage { .. } => {
                 return Err(TrezorError::Unsupported(
@@ -280,6 +357,7 @@ impl From<TrezorResponse> for common::Response {
             }
             TrezorResponse::Xpub(xpub) => common::Response::Xpub(xpub),
             TrezorResponse::Address(address) => common::Response::Address(address),
+            TrezorResponse::SignedPsbt(psbt) => common::Response::SignedPsbt(*psbt),
         }
     }
 }
@@ -326,6 +404,311 @@ fn features_info(features: mgmt::Features, network: Network) -> common::Info {
         initialized: features.initialized,
         label: features.label,
     }
+}
+
+type TxType = btc::tx_ack::TransactionType;
+type AckInput = btc::tx_ack::transaction_type::TxInputType;
+type AckOutput = btc::tx_ack::transaction_type::TxOutputType;
+type AckBinOutput = btc::tx_ack::transaction_type::TxOutputBinType;
+
+fn prev_hash_bytes(txid: bitcoin::Txid) -> Vec<u8> {
+    let mut bytes = txid.to_byte_array();
+    bytes.reverse();
+    bytes.to_vec()
+}
+
+fn tx_meta(tx: &Transaction) -> TxType {
+    TxType {
+        version: Some(tx.version.0 as u32),
+        lock_time: Some(tx.lock_time.to_consensus_u32()),
+        inputs_cnt: Some(tx.input.len() as u32),
+        outputs_cnt: Some(tx.output.len() as u32),
+        ..Default::default()
+    }
+}
+
+fn prev_meta(tx: &Transaction) -> TxType {
+    tx_meta(tx)
+}
+
+fn prev_tx(ctx: &SignCtx, hash: &[u8]) -> Result<Transaction, TrezorError> {
+    ctx.psbt
+        .inputs
+        .iter()
+        .filter_map(|input| input.non_witness_utxo.as_ref())
+        .find(|tx| prev_hash_bytes(tx.compute_txid()) == hash)
+        .cloned()
+        .ok_or(TrezorError::InvalidInput(
+            "psbt is missing the previous transaction the device asked for".into(),
+        ))
+}
+
+fn prev_input(tx: &Transaction, index: usize) -> Result<TxType, TrezorError> {
+    let input = tx.input.get(index).ok_or(TrezorError::InvalidInput(
+        "previous input out of range".into(),
+    ))?;
+    Ok(TxType {
+        inputs: vec![AckInput {
+            prev_hash: prev_hash_bytes(input.previous_output.txid),
+            prev_index: input.previous_output.vout,
+            script_sig: Some(input.script_sig.to_bytes()),
+            sequence: Some(input.sequence.to_consensus_u32()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
+fn prev_output(tx: &Transaction, index: usize) -> Result<TxType, TrezorError> {
+    let output = tx.output.get(index).ok_or(TrezorError::InvalidInput(
+        "previous output out of range".into(),
+    ))?;
+    Ok(TxType {
+        bin_outputs: vec![AckBinOutput {
+            amount: output.value.to_sat(),
+            script_pubkey: output.script_pubkey.to_bytes(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
+fn our_derivation(
+    derivations: &std::collections::BTreeMap<
+        bitcoin::secp256k1::PublicKey,
+        (Fingerprint, DerivationPath),
+    >,
+    master_fp: Fingerprint,
+) -> Option<(bitcoin::secp256k1::PublicKey, DerivationPath)> {
+    derivations
+        .iter()
+        .find(|(_, (fingerprint, _))| *fingerprint == master_fp)
+        .map(|(key, (_, path))| (*key, path.clone()))
+}
+
+fn unsigned_derivation(
+    input: &bitcoin::psbt::Input,
+    master_fp: Fingerprint,
+) -> Option<(bitcoin::secp256k1::PublicKey, DerivationPath)> {
+    input
+        .bip32_derivation
+        .iter()
+        .filter(|(_, (fingerprint, _))| *fingerprint == master_fp)
+        .find(|(key, _)| {
+            !input
+                .partial_sigs
+                .contains_key(&bitcoin::PublicKey::new(**key))
+        })
+        .map(|(key, (_, path))| (*key, path.clone()))
+}
+
+fn spend_script_type(
+    input: &bitcoin::psbt::Input,
+    script_pubkey: &bitcoin::Script,
+) -> Result<btc::InputScriptType, TrezorError> {
+    let p2sh = script_pubkey.is_p2sh();
+    let script = if p2sh {
+        input
+            .redeem_script
+            .clone()
+            .ok_or(TrezorError::InvalidInput(
+                "p2sh input has no redeem script".into(),
+            ))?
+    } else {
+        script_pubkey.to_owned()
+    };
+    if input.witness_script.is_some() {
+        return Err(TrezorError::Unsupported(
+            "multisig and script path signing are not yet supported",
+        ));
+    }
+    match script.witness_version() {
+        Some(bitcoin::WitnessVersion::V0) if script.is_p2wpkh() => Ok(if p2sh {
+            btc::InputScriptType::Spendp2shwitness
+        } else {
+            btc::InputScriptType::Spendwitness
+        }),
+        Some(_) => Err(TrezorError::Unsupported(
+            "only p2wpkh and p2tr witness inputs are supported",
+        )),
+        None if script.is_p2pkh() => Ok(btc::InputScriptType::Spendaddress),
+        None => Err(TrezorError::Unsupported(
+            "only p2pkh, p2wpkh and p2tr inputs are supported",
+        )),
+    }
+}
+
+fn our_input(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
+    let txin = ctx
+        .tx
+        .input
+        .get(index)
+        .ok_or(TrezorError::InvalidInput("input out of range".into()))?;
+    let psbt_input = ctx
+        .psbt
+        .inputs
+        .get(index)
+        .ok_or(TrezorError::InvalidInput("psbt input out of range".into()))?;
+    let utxo = psbt_input
+        .witness_utxo
+        .clone()
+        .or_else(|| {
+            psbt_input
+                .non_witness_utxo
+                .as_ref()
+                .and_then(|tx| tx.output.get(txin.previous_output.vout as usize))
+                .cloned()
+        })
+        .ok_or(TrezorError::InvalidInput(
+            "psbt input has no utxo to sign".into(),
+        ))?;
+    let script_type = spend_script_type(psbt_input, &utxo.script_pubkey)?;
+    let path = unsigned_derivation(psbt_input, ctx.master_fp)
+        .map(|(_, path)| path)
+        .ok_or(TrezorError::InvalidInput(
+            "psbt input has no unsigned key derivation for this device".into(),
+        ))?;
+    Ok(TxType {
+        inputs: vec![AckInput {
+            address_n: address_n(&path),
+            prev_hash: prev_hash_bytes(txin.previous_output.txid),
+            prev_index: txin.previous_output.vout,
+            sequence: Some(txin.sequence.to_consensus_u32()),
+            script_type: Some(script_type as i32),
+            amount: Some(utxo.value.to_sat()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
+fn our_output(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
+    let txout = ctx
+        .tx
+        .output
+        .get(index)
+        .ok_or(TrezorError::InvalidInput("output out of range".into()))?;
+    let psbt_output = ctx
+        .psbt
+        .outputs
+        .get(index)
+        .ok_or(TrezorError::InvalidInput("psbt output out of range".into()))?;
+    let network = network_of(&ctx.coin);
+    let mut ack = AckOutput {
+        amount: txout.value.to_sat(),
+        ..Default::default()
+    };
+    let address = bitcoin::Address::from_script(&txout.script_pubkey, network)
+        .map_err(|e| TrezorError::InvalidInput(e.to_string()))?;
+    ack.script_type = Some(btc::OutputScriptType::Paytoaddress as i32);
+    ack.address = Some(address.to_string());
+    if let Some(path) = change_derivation(psbt_output, ctx.master_fp) {
+        ack.script_type = Some(change_script_type(&txout.script_pubkey) as i32);
+        ack.address_n = address_n(&path);
+        ack.address = None;
+    }
+    Ok(TxType {
+        outputs: vec![ack],
+        ..Default::default()
+    })
+}
+
+fn change_derivation(
+    output: &bitcoin::psbt::Output,
+    master_fp: Fingerprint,
+) -> Option<DerivationPath> {
+    our_derivation(&output.bip32_derivation, master_fp).map(|(_, path)| path)
+}
+
+fn change_script_type(script_pubkey: &bitcoin::Script) -> btc::OutputScriptType {
+    if script_pubkey.is_p2wpkh() {
+        btc::OutputScriptType::Paytowitness
+    } else if script_pubkey.is_p2sh() {
+        btc::OutputScriptType::Paytop2shwitness
+    } else {
+        btc::OutputScriptType::Paytoaddress
+    }
+}
+
+fn network_of(coin: &str) -> Network {
+    match coin {
+        "Bitcoin" => Network::Bitcoin,
+        "Regtest" => Network::Regtest,
+        _ => Network::Testnet,
+    }
+}
+
+fn finish_sign(ctx: &mut SignCtx) -> Result<Box<Psbt>, TrezorError> {
+    let master_fp = ctx.master_fp;
+    for (index, signature) in core::mem::take(&mut ctx.signatures) {
+        let input = ctx
+            .psbt
+            .inputs
+            .get_mut(index as usize)
+            .ok_or(TrezorError::InvalidInput(
+                "signature for unknown input".into(),
+            ))?;
+        let (public_key, _) = unsigned_derivation(input, master_fp).ok_or(
+            TrezorError::InvalidInput("signed input has no key derivation for this device".into()),
+        )?;
+        let sig = bitcoin::secp256k1::ecdsa::Signature::from_der(&signature)
+            .map_err(|e| TrezorError::InvalidInput(e.to_string()))?;
+        input.partial_sigs.insert(
+            bitcoin::PublicKey::new(public_key),
+            bitcoin::ecdsa::Signature {
+                signature: sig,
+                sighash_type: bitcoin::sighash::EcdsaSighashType::All,
+            },
+        );
+    }
+    Ok(ctx.psbt.clone())
+}
+
+enum SignStep {
+    Continue(Vec<u8>),
+    Done(Box<Psbt>),
+}
+
+fn drive_sign(ctx: &mut SignCtx, request: btc::TxRequest) -> Result<SignStep, TrezorError> {
+    if let Some(serialized) = request.serialized.as_ref()
+        && let (Some(index), Some(signature)) =
+            (serialized.signature_index, serialized.signature.as_ref())
+    {
+        ctx.signatures.push((index, signature.clone()));
+    }
+
+    let details = request.details.unwrap_or_default();
+    let request_type = request
+        .request_type
+        .and_then(|ty| btc::tx_request::RequestType::try_from(ty).ok())
+        .ok_or(TrezorError::Unsupported("unknown transaction request"))?;
+
+    let tx = match &details.tx_hash {
+        Some(hash) => Some(prev_tx(ctx, hash)?),
+        None => None,
+    };
+    let index = details.request_index.unwrap_or(0) as usize;
+
+    let ack = match (request_type, tx) {
+        (btc::tx_request::RequestType::Txfinished, _) => {
+            let psbt = finish_sign(ctx)?;
+            return Ok(SignStep::Done(psbt));
+        }
+        (btc::tx_request::RequestType::Txmeta, Some(prev)) => prev_meta(&prev),
+        (btc::tx_request::RequestType::Txmeta, None) => tx_meta(&ctx.tx),
+        (btc::tx_request::RequestType::Txinput, Some(prev)) => prev_input(&prev, index)?,
+        (btc::tx_request::RequestType::Txinput, None) => our_input(ctx, index)?,
+        (btc::tx_request::RequestType::Txoutput, Some(prev)) => prev_output(&prev, index)?,
+        (btc::tx_request::RequestType::Txoutput, None) => our_output(ctx, index)?,
+        (ty, _) => {
+            return Err(TrezorError::Unsupported(match ty {
+                btc::tx_request::RequestType::Txextradata => "extra data is not supported",
+                btc::tx_request::RequestType::Txpaymentreq => "payment requests are not supported",
+                _ => "origin transactions are not supported",
+            }));
+        }
+    };
+    Ok(SignStep::Continue(api::tx_ack(ack)))
 }
 
 fn address_n(path: &DerivationPath) -> Vec<u32> {
@@ -401,6 +784,102 @@ mod tests {
             root_fingerprint,
             descriptor: None,
         }
+    }
+
+    fn test_key(index: u32) -> bitcoin::secp256k1::PublicKey {
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        Xpub::from_str(XPUB)
+            .unwrap()
+            .derive_pub(
+                &secp,
+                &[bitcoin::bip32::ChildNumber::from_normal_idx(index).unwrap()],
+            )
+            .unwrap()
+            .public_key
+    }
+
+    fn ours() -> Fingerprint {
+        Fingerprint::from([1u8, 2, 3, 4])
+    }
+
+    fn theirs() -> Fingerprint {
+        Fingerprint::from([9u8, 9, 9, 9])
+    }
+
+    fn p2pkh_script(key: bitcoin::secp256k1::PublicKey) -> bitcoin::ScriptBuf {
+        bitcoin::ScriptBuf::new_p2pkh(&bitcoin::PublicKey::new(key).pubkey_hash())
+    }
+
+    #[test]
+    fn spend_script_type_follows_script_pubkey_not_purpose() {
+        let key = test_key(0);
+        let input = bitcoin::psbt::Input {
+            bip32_derivation: [(key, (ours(), "m/84'/1'/0'/0/0".parse().unwrap()))].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            spend_script_type(&input, &p2pkh_script(key)).unwrap(),
+            btc::InputScriptType::Spendaddress
+        );
+    }
+
+    #[test]
+    fn spend_script_type_rejects_witness_script() {
+        let key = test_key(0);
+        let input = bitcoin::psbt::Input {
+            witness_script: Some(bitcoin::ScriptBuf::new()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            spend_script_type(&input, &p2pkh_script(key)),
+            Err(TrezorError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn unsigned_derivation_skips_foreign_fingerprint() {
+        let mine = test_key(0);
+        let other = test_key(1);
+        let input = bitcoin::psbt::Input {
+            bip32_derivation: [
+                (other, (theirs(), "m/48'/1'/0'/2'/0/0".parse().unwrap())),
+                (mine, (ours(), "m/84'/1'/0'/0/7".parse().unwrap())),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let (key, path) = unsigned_derivation(&input, ours()).unwrap();
+        assert_eq!(key, mine);
+        assert_eq!(path, "m/84'/1'/0'/0/7".parse::<DerivationPath>().unwrap());
+    }
+
+    #[test]
+    fn unsigned_derivation_skips_already_signed_key() {
+        let key = test_key(0);
+        let mut input = bitcoin::psbt::Input {
+            bip32_derivation: [(key, (ours(), "m/84'/1'/0'/0/0".parse().unwrap()))].into(),
+            ..Default::default()
+        };
+        assert!(unsigned_derivation(&input, ours()).is_some());
+        input.partial_sigs.insert(
+            bitcoin::PublicKey::new(key),
+            bitcoin::ecdsa::Signature {
+                signature: bitcoin::secp256k1::ecdsa::Signature::from_compact(&[1u8; 64]).unwrap(),
+                sighash_type: bitcoin::sighash::EcdsaSighashType::All,
+            },
+        );
+        assert!(unsigned_derivation(&input, ours()).is_none());
+    }
+
+    #[test]
+    fn change_derivation_ignores_foreign_fingerprint() {
+        let key = test_key(0);
+        let script = p2pkh_script(key);
+        let output = bitcoin::psbt::Output {
+            bip32_derivation: [(key, (theirs(), "m/84'/1'/0'/1/0".parse().unwrap()))].into(),
+            ..Default::default()
+        };
+        assert!(change_derivation(&output, ours()).is_none());
     }
 
     #[test]
