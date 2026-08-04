@@ -23,6 +23,7 @@ mod tests {
     const FINGERPRINT: &str = "5c9e228d";
     const XPUB_44: &str = "tpubDDKn3FtHc74CaRrRbi1WFdJNaaenZkDWqq9NsEhcafnDZ4VuKeuLG2aKHm5SuwuLgAhRkkfHqcCxpnVNSrs5kJYZXwa6Ud431VnevzzzK3U";
     const XPUB_49: &str = "tpubDCHRnuvE95JrpEVTUmr36sK3K9ADf3s3aztpXzL8coBeCTE8cHV8PjxS6SjWJM3GfPn798gyEa3dRPgjoUDSuNfuC9xz4PHznwKEk2XL7X1";
+    const XPUB_86: &str = "tpubDC88gkaZi5HvJGxGDNLADkvtdpni3mLmx6vr2KnXmWMG8zfkBRggsxHVBkUpgcwPe2KKpkyvTJCdXHb1UHEWE64vczyyPQfHr1skBcsRedN";
     const XPUB_84: &str = "tpubDCZB6sR48s4T5Cr8qHUYSZEFCQMMHRg8AoVKVmvcAP5bRw7ArDKeoNwKAJujV3xCPkBvXH5ejSgbgyN6kREmF7sMd41NdbuHa8n1DZNxSMg";
 
     async fn device() -> Trezor<TrezorTransport<EmulatorClient>> {
@@ -151,6 +152,191 @@ mod tests {
             .expect("connect to debuglink");
         let signed = tokio::select! {
             signed = dev.sign_tx(sample_psbt(), None) => signed.expect("sign psbt"),
+            _ = debug.confirm_until_done(Duration::from_millis(300)) => unreachable!(),
+        };
+        assert!(!signed.inputs[0].partial_sigs.is_empty());
+    }
+
+    fn foreign_outputs() -> Vec<TxOut> {
+        let secp = Secp256k1::verification_only();
+        let xpub = Xpub::from_str(XPUB_84).unwrap();
+        let key = |index: u32| {
+            xpub.derive_pub(&secp, &[ChildNumber::from_normal_idx(index).unwrap()])
+                .unwrap()
+                .to_pub()
+        };
+        let value = Amount::from_sat(5_000);
+        let p2tr_key = bhwi::bitcoin::key::XOnlyPublicKey::from(key(20).0);
+        vec![
+            TxOut {
+                value,
+                script_pubkey: ScriptBuf::new_p2pkh(&key(10).pubkey_hash()),
+            },
+            TxOut {
+                value,
+                script_pubkey: ScriptBuf::new_p2sh(
+                    &ScriptBuf::new_p2wpkh(&key(11).wpubkey_hash()).script_hash(),
+                ),
+            },
+            TxOut {
+                value,
+                script_pubkey: ScriptBuf::new_p2wpkh(&key(12).wpubkey_hash()),
+            },
+            TxOut {
+                value,
+                script_pubkey: ScriptBuf::new_p2tr(&secp, p2tr_key, None),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn can_sign_psbt_with_every_output_type() {
+        let mut psbt = sample_psbt();
+        psbt.unsigned_tx.output[0].value = Amount::from_sat(29_000);
+        for output in foreign_outputs() {
+            psbt.unsigned_tx.output.push(output);
+            psbt.outputs.push(Default::default());
+        }
+        let payload: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let data: &bhwi::bitcoin::script::PushBytes =
+            payload.as_slice().try_into().expect("push bytes");
+        psbt.unsigned_tx.output.push(TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::new_op_return(data),
+        });
+        psbt.outputs.push(Default::default());
+
+        let mut dev = device().await;
+        let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+            .await
+            .expect("connect to debuglink");
+        let signed = tokio::select! {
+            signed = dev.sign_tx(psbt, None) => signed.expect("sign psbt with every output type"),
+            _ = debug.confirm_until_done(Duration::from_millis(300)) => unreachable!(),
+        };
+        assert!(!signed.inputs[0].partial_sigs.is_empty());
+    }
+
+    fn taproot_psbt() -> Psbt {
+        let secp = Secp256k1::verification_only();
+        let account: DerivationPath = "m/86'/1'/0'".parse().unwrap();
+        let xpub = Xpub::from_str(XPUB_86).unwrap();
+        let fingerprint = Fingerprint::from_str(FINGERPRINT).unwrap();
+        let recv_path = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(0).unwrap(),
+            ChildNumber::from_normal_idx(0).unwrap(),
+        ]);
+        let recv = xpub.derive_pub(&secp, &recv_path).unwrap();
+        let internal_key = bhwi::bitcoin::key::XOnlyPublicKey::from(recv.public_key);
+        let script = ScriptBuf::new_p2tr(&secp, internal_key, None);
+
+        let prev = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: script.clone(),
+            }],
+        };
+        let unsigned = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: prev.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: script.clone(),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned).unwrap();
+        psbt.inputs[0] = Input {
+            witness_utxo: Some(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: script,
+            }),
+            tap_internal_key: Some(internal_key),
+            tap_key_origins: [(
+                internal_key,
+                (vec![], (fingerprint, account.extend(recv_path))),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        psbt
+    }
+
+    #[tokio::test]
+    async fn can_sign_taproot_psbt() {
+        let mut dev = device().await;
+        let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+            .await
+            .expect("connect to debuglink");
+        let signed = tokio::select! {
+            signed = dev.sign_tx(taproot_psbt(), None) => signed.expect("sign taproot psbt"),
+            _ = debug.confirm_until_done(Duration::from_millis(300)) => unreachable!(),
+        };
+        assert!(signed.inputs[0].tap_key_sig.is_some());
+    }
+
+    #[tokio::test]
+    async fn can_sign_taproot_psbt_with_every_output_type() {
+        let mut psbt = taproot_psbt();
+        psbt.unsigned_tx.output[0].value = Amount::from_sat(29_000);
+        for output in foreign_outputs() {
+            psbt.unsigned_tx.output.push(output);
+            psbt.outputs.push(Default::default());
+        }
+        let payload: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let data: &bhwi::bitcoin::script::PushBytes =
+            payload.as_slice().try_into().expect("push bytes");
+        psbt.unsigned_tx.output.push(TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::new_op_return(data),
+        });
+        psbt.outputs.push(Default::default());
+
+        let mut dev = device().await;
+        let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+            .await
+            .expect("connect to debuglink");
+        let signed = tokio::select! {
+            signed = dev.sign_tx(psbt, None) => signed.expect("sign taproot psbt with every output type"),
+            _ = debug.confirm_until_done(Duration::from_millis(300)) => unreachable!(),
+        };
+        assert!(signed.inputs[0].tap_key_sig.is_some());
+    }
+
+    #[tokio::test]
+    async fn can_sign_psbt_with_op_return() {
+        let mut psbt = sample_psbt();
+        let payload: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let data: &bhwi::bitcoin::script::PushBytes =
+            payload.as_slice().try_into().expect("push bytes");
+        psbt.unsigned_tx.output.push(TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::new_op_return(data),
+        });
+        psbt.outputs.push(Default::default());
+
+        let mut dev = device().await;
+        let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+            .await
+            .expect("connect to debuglink");
+        let signed = tokio::select! {
+            signed = dev.sign_tx(psbt, None) => signed.expect("sign psbt with op_return"),
             _ = debug.confirm_until_done(Duration::from_millis(300)) => unreachable!(),
         };
         assert!(!signed.inputs[0].partial_sigs.is_empty());
