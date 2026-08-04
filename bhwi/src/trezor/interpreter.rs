@@ -615,6 +615,14 @@ fn our_output(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
         amount: txout.value.to_sat(),
         ..Default::default()
     };
+    if txout.script_pubkey.is_op_return() {
+        ack.script_type = Some(btc::OutputScriptType::Paytoopreturn as i32);
+        ack.op_return_data = Some(op_return_data(&txout.script_pubkey)?);
+        return Ok(TxType {
+            outputs: vec![ack],
+            ..Default::default()
+        });
+    }
     let address = bitcoin::Address::from_script(&txout.script_pubkey, network)
         .map_err(|e| TrezorError::InvalidInput(e.to_string()))?;
     ack.script_type = Some(btc::OutputScriptType::Paytoaddress as i32);
@@ -628,6 +636,20 @@ fn our_output(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
         outputs: vec![ack],
         ..Default::default()
     })
+}
+
+fn op_return_data(script_pubkey: &bitcoin::Script) -> Result<Vec<u8>, TrezorError> {
+    script_pubkey
+        .instructions()
+        .flatten()
+        .find_map(|instruction| {
+            instruction
+                .push_bytes()
+                .map(|bytes| bytes.as_bytes().to_vec())
+        })
+        .ok_or(TrezorError::InvalidInput(
+            "op_return output has no data to sign".into(),
+        ))
 }
 
 fn change_derivation(
@@ -939,6 +961,13 @@ mod tests {
             ..Default::default()
         };
         assert!(change_derivation(&output, &script, ours()).is_none());
+    }
+
+    #[test]
+    fn op_return_data_extracts_payload() {
+        let payload: &bitcoin::script::PushBytes = b"bhwi".as_slice().try_into().unwrap();
+        let script = bitcoin::ScriptBuf::new_op_return(payload);
+        assert_eq!(op_return_data(&script).unwrap(), b"bhwi".to_vec());
     }
 
     #[test]
