@@ -502,6 +502,18 @@ fn unsigned_derivation(
         .map(|(key, (_, path))| (*key, path.clone()))
 }
 
+fn taproot_derivation(
+    input: &bitcoin::psbt::Input,
+    master_fp: Fingerprint,
+) -> Option<DerivationPath> {
+    let internal_key = input.tap_internal_key?;
+    input
+        .tap_key_origins
+        .iter()
+        .find(|(key, (_, (fingerprint, _)))| **key == internal_key && *fingerprint == master_fp)
+        .map(|(_, (_, (_, path)))| path.clone())
+}
+
 fn spend_script_type(
     input: &bitcoin::psbt::Input,
     script_pubkey: &bitcoin::Script,
@@ -528,6 +540,9 @@ fn spend_script_type(
         } else {
             btc::InputScriptType::Spendwitness
         }),
+        Some(bitcoin::WitnessVersion::V1) if script.is_p2tr() => {
+            Ok(btc::InputScriptType::Spendtaproot)
+        }
         Some(_) => Err(TrezorError::Unsupported(
             "only p2wpkh and p2tr witness inputs are supported",
         )),
@@ -563,11 +578,13 @@ fn our_input(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
             "psbt input has no utxo to sign".into(),
         ))?;
     let script_type = spend_script_type(psbt_input, &utxo.script_pubkey)?;
-    let path = unsigned_derivation(psbt_input, ctx.master_fp)
-        .map(|(_, path)| path)
-        .ok_or(TrezorError::InvalidInput(
-            "psbt input has no unsigned key derivation for this device".into(),
-        ))?;
+    let path = match script_type {
+        btc::InputScriptType::Spendtaproot => taproot_derivation(psbt_input, ctx.master_fp),
+        _ => unsigned_derivation(psbt_input, ctx.master_fp).map(|(_, path)| path),
+    }
+    .ok_or(TrezorError::InvalidInput(
+        "psbt input has no unsigned key derivation for this device".into(),
+    ))?;
     Ok(TxType {
         inputs: vec![AckInput {
             address_n: address_n(&path),
@@ -602,7 +619,7 @@ fn our_output(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
         .map_err(|e| TrezorError::InvalidInput(e.to_string()))?;
     ack.script_type = Some(btc::OutputScriptType::Paytoaddress as i32);
     ack.address = Some(address.to_string());
-    if let Some(path) = change_derivation(psbt_output, ctx.master_fp) {
+    if let Some(path) = change_derivation(psbt_output, &txout.script_pubkey, ctx.master_fp) {
         ack.script_type = Some(change_script_type(&txout.script_pubkey) as i32);
         ack.address_n = address_n(&path);
         ack.address = None;
@@ -615,13 +632,24 @@ fn our_output(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
 
 fn change_derivation(
     output: &bitcoin::psbt::Output,
+    script_pubkey: &bitcoin::Script,
     master_fp: Fingerprint,
 ) -> Option<DerivationPath> {
+    if script_pubkey.is_p2tr() {
+        let internal_key = output.tap_internal_key?;
+        return output
+            .tap_key_origins
+            .iter()
+            .find(|(key, (_, (fingerprint, _)))| **key == internal_key && *fingerprint == master_fp)
+            .map(|(_, (_, (_, path)))| path.clone());
+    }
     our_derivation(&output.bip32_derivation, master_fp).map(|(_, path)| path)
 }
 
 fn change_script_type(script_pubkey: &bitcoin::Script) -> btc::OutputScriptType {
-    if script_pubkey.is_p2wpkh() {
+    if script_pubkey.is_p2tr() {
+        btc::OutputScriptType::Paytotaproot
+    } else if script_pubkey.is_p2wpkh() {
         btc::OutputScriptType::Paytowitness
     } else if script_pubkey.is_p2sh() {
         btc::OutputScriptType::Paytop2shwitness
@@ -648,6 +676,15 @@ fn finish_sign(ctx: &mut SignCtx) -> Result<Box<Psbt>, TrezorError> {
             .ok_or(TrezorError::InvalidInput(
                 "signature for unknown input".into(),
             ))?;
+        if input.tap_internal_key.is_some() && input.tap_key_sig.is_none() {
+            let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&signature)
+                .map_err(|e| TrezorError::InvalidInput(e.to_string()))?;
+            input.tap_key_sig = Some(bitcoin::taproot::Signature {
+                signature: sig,
+                sighash_type: bitcoin::sighash::TapSighashType::Default,
+            });
+            continue;
+        }
         let (public_key, _) = unsigned_derivation(input, master_fp).ok_or(
             TrezorError::InvalidInput("signed input has no key derivation for this device".into()),
         )?;
@@ -872,6 +909,28 @@ mod tests {
     }
 
     #[test]
+    fn taproot_derivation_requires_internal_key() {
+        let key = test_key(0);
+        let x_only = bitcoin::key::XOnlyPublicKey::from(key);
+        let origins = [(
+            x_only,
+            (vec![], (ours(), "m/86'/1'/0'/0/0".parse().unwrap())),
+        )];
+        let without_internal_key = bitcoin::psbt::Input {
+            tap_key_origins: origins.clone().into(),
+            ..Default::default()
+        };
+        assert!(taproot_derivation(&without_internal_key, ours()).is_none());
+
+        let with_internal_key = bitcoin::psbt::Input {
+            tap_internal_key: Some(x_only),
+            tap_key_origins: origins.into(),
+            ..Default::default()
+        };
+        assert!(taproot_derivation(&with_internal_key, ours()).is_some());
+    }
+
+    #[test]
     fn change_derivation_ignores_foreign_fingerprint() {
         let key = test_key(0);
         let script = p2pkh_script(key);
@@ -879,7 +938,7 @@ mod tests {
             bip32_derivation: [(key, (theirs(), "m/84'/1'/0'/1/0".parse().unwrap()))].into(),
             ..Default::default()
         };
-        assert!(change_derivation(&output, ours()).is_none());
+        assert!(change_derivation(&output, &script, ours()).is_none());
     }
 
     #[test]
