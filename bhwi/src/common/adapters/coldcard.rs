@@ -33,6 +33,9 @@ impl TryFrom<Command> for ColdcardCommand {
             Command::TogglePassphrase => Err(ColdcardError::MissingCommandInfo(
                 "Toggle passphrase not supported by Coldcard",
             )),
+            Command::PromptPin | Command::SendPin(_) => Err(ColdcardError::MissingCommandInfo(
+                "PIN entry from the host not needed by Coldcard",
+            )),
             Command::Backup => Ok(Self::Backup),
             Command::Unlock { .. } => Ok(Self::StartEncryption),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
@@ -282,6 +285,7 @@ impl From<ColdcardResponse> for Response {
                 initialized: None,
                 label: None,
                 on_device_passphrase_entry: None,
+                needs_pin_sent: None,
             }),
             ColdcardResponse::MyPub { encryption_key, .. } => Self::EncryptionKey(encryption_key),
             ColdcardResponse::Signature(header, signature) => Self::Signature(header, signature),

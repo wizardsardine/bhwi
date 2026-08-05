@@ -109,6 +109,8 @@ pub enum Command {
     Unlock {
         options: UnlockOptions,
     },
+    PromptPin,
+    SendPin(Option<DeviceContext>),
 }
 
 /// Device-specific context data required by certain commands.
@@ -180,6 +182,8 @@ pub struct Info {
     pub label: Option<String>,
     /// Whether the device can take a passphrase on its own screen, when it reports the capability.
     pub on_device_passphrase_entry: Option<bool>,
+    /// Whether the device is waiting for a PIN from the host, when it reports a lock state.
+    pub needs_pin_sent: Option<bool>,
 }
 
 pub enum Recipient {
@@ -227,6 +231,9 @@ pub enum Error {
 
     #[error("unsupported display address: {0}")]
     UnsupportedDisplayAddress(String),
+
+    #[error("{0}")]
+    DeviceAlreadyUnlocked(&'static str),
 }
 
 impl Error {

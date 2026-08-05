@@ -25,6 +25,9 @@ impl TryFrom<Command> for LedgerCommand {
             Command::TogglePassphrase => Err(LedgerError::MissingCommandInfo(
                 "Toggle passphrase not supported by Ledger",
             )),
+            Command::PromptPin | Command::SendPin(_) => Err(LedgerError::MissingCommandInfo(
+                "PIN entry from the host not needed by Ledger",
+            )),
             Command::Backup => Err(LedgerError::MissingCommandInfo(
                 "Backup not supported by Ledger",
             )),
@@ -107,6 +110,7 @@ impl From<LedgerResponse> for Response {
                     initialized: None,
                     label: None,
                     on_device_passphrase_entry: None,
+                    needs_pin_sent: None,
                 })
             }
             LedgerResponse::Signature(header, signature) => Self::Signature(header, signature),

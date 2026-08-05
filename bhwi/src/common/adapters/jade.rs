@@ -22,6 +22,9 @@ impl TryFrom<Command> for JadeCommand {
             Command::TogglePassphrase => Err(Error::MissingCommandInfo(
                 "Toggle passphrase not supported by Jade",
             )),
+            Command::PromptPin | Command::SendPin(_) => Err(Error::MissingCommandInfo(
+                "PIN entry from the host not needed by Jade",
+            )),
             Command::Backup => Err(Error::MissingCommandInfo("Backup not supported by Jade")),
             Command::Unlock { .. } => Ok(Self::Auth),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
@@ -164,6 +167,7 @@ impl From<JadeResponse> for Response {
                 initialized: None,
                 label: None,
                 on_device_passphrase_entry: None,
+                needs_pin_sent: None,
             }),
             JadeResponse::Address(address) => Self::Address(address),
             JadeResponse::RegisteredDescriptor => {

@@ -32,12 +32,37 @@ impl core::fmt::Debug for HostPassphrase {
         f.write_str("HostPassphrase(<redacted>)")
     }
 }
+
+/// Scrambled keypad positions, never the PIN digits themselves.
+#[derive(Clone, Default, zeroize::Zeroize, zeroize_derive::ZeroizeOnDrop)]
+pub struct HostPin(String);
+
+impl HostPin {
+    pub fn new(positions: String) -> Result<Self, TrezorError> {
+        if positions.is_empty() || !positions.chars().all(|c| c.is_ascii_digit()) {
+            return Err(TrezorError::NonNumericPin);
+        }
+        Ok(Self(positions))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for HostPin {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("HostPin(<redacted>)")
+    }
+}
+
 pub use interpreter::{TrezorCommand, TrezorInterpreter, TrezorResponse};
 
 /// External data needed by Trezor management commands while keeping the interpreter sans-I/O.
 #[derive(Clone, Debug)]
 pub enum ManagementContext {
     Setup { host_entropy: [u8; 32] },
+    Pin(HostPin),
 }
 
 pub const TREZOR_VID: u16 = 0x1209;

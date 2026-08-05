@@ -19,6 +19,7 @@ pub enum MessageType {
     PublicKey = 12,
     Features = 17,
     PinMatrixRequest = 18,
+    PinMatrixAck = 19,
     ButtonRequest = 26,
     ButtonAck = 27,
     SignTx = 15,
@@ -134,6 +135,13 @@ pub fn passphrase_ack_from_host(passphrase: &str) -> Vec<u8> {
         ..Default::default()
     };
     encode(MessageType::PassphraseAck, &msg)
+}
+
+pub fn pin_matrix_ack(positions: &str) -> Vec<u8> {
+    let msg = pb::PinMatrixAck {
+        pin: positions.to_owned(),
+    };
+    encode(MessageType::PinMatrixAck, &msg)
 }
 
 pub fn get_public_key(

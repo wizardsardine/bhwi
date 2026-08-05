@@ -10,7 +10,7 @@ pub enum TrezorError {
     UnexpectedMessage(u16, &'static str),
     #[error("device failure: {1}")]
     Failure(i32, String),
-    #[error("device is locked: {0}")]
+    #[error("{0}")]
     Locked(&'static str),
     #[error("device returned a key for the wrong network")]
     NetworkMismatch,
@@ -24,8 +24,19 @@ pub enum TrezorError {
     UnsupportedDisplayAddress(&'static str),
     #[error("Passphrase too long")]
     PassphraseTooLong,
+    #[error("Non-numeric PIN provided")]
+    NonNumericPin,
+    #[error("{0}")]
+    AlreadyUnlocked(&'static str),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+}
+
+impl TrezorError {
+    pub const NO_PIN_NEEDED: &'static str = "This device does not need a PIN";
+    pub const PIN_ALREADY_SENT: &'static str = "The PIN has already been sent to this device";
+    pub const LOCKED: &'static str =
+        "Trezor is locked. Unlock by using 'promptpin' and then 'sendpin'.";
 }
 
 impl From<TrezorError> for common::Error {
@@ -39,7 +50,7 @@ impl From<TrezorError> for common::Error {
                 common::Error::unexpected_result(t.to_be_bytes().to_vec(), format!("trezor: {ctx}"))
             }
             TrezorError::Failure(code, msg) => common::Error::Rpc(code, Some(msg)),
-            TrezorError::Locked(ctx) => common::Error::Device(format!("device is locked: {ctx}")),
+            TrezorError::Locked(ctx) => common::Error::Device(ctx.into()),
             TrezorError::NetworkMismatch => {
                 common::Error::InvalidInput("device returned a key for the wrong network".into())
             }
@@ -54,6 +65,10 @@ impl From<TrezorError> for common::Error {
             TrezorError::PassphraseTooLong => {
                 common::Error::InvalidInput("Passphrase too long".into())
             }
+            TrezorError::NonNumericPin => {
+                common::Error::InvalidInput("Non-numeric PIN provided".into())
+            }
+            TrezorError::AlreadyUnlocked(s) => common::Error::DeviceAlreadyUnlocked(s),
             TrezorError::InvalidInput(s) => common::Error::InvalidInput(s),
         }
     }

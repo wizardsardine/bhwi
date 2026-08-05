@@ -33,7 +33,12 @@ pub enum TrezorCommand {
         label: Option<String>,
         host_entropy: [u8; 32],
     },
+    PromptPin,
+    SendPin(crate::trezor::HostPin),
 }
+
+/// m/44'/1'/0', the key asked for to raise the keypad. The reply is never read.
+const PIN_PROMPT_PATH: [u32; 3] = [0x8000_002c, 0x8000_0001, 0x8000_0000];
 
 pub enum TrezorResponse {
     DeviceAction(bool),
@@ -55,8 +60,12 @@ enum State {
     AwaitPublicKey(PublicKeyKind),
     AwaitAddress,
     AwaitSuccess,
-    AwaitPassphraseSetting,
     AwaitPassphraseCancel,
+    AwaitPassphraseSetting,
+    AwaitPinPromptFeatures,
+    AwaitPinMatrix,
+    AwaitPinResult,
+    AwaitPinFailureFeatures,
     AwaitSetupFeatures(Box<SetupCtx>),
     AwaitEntropyRequest([u8; 32]),
     AwaitSignKey(Box<Psbt>),
@@ -171,6 +180,17 @@ where
                 self.state = State::AwaitPassphraseSetting;
                 api::get_features()
             }
+            TrezorCommand::PromptPin => {
+                self.state = State::AwaitPinPromptFeatures;
+                api::get_features()
+            }
+            TrezorCommand::SendPin(pin) => {
+                // Nothing may be sent before the ack, so the features exchange that reports
+                // on-device passphrase entry has not happened.
+                self.on_device_passphrase = false;
+                self.state = State::AwaitPinResult;
+                api::pin_matrix_ack(pin.as_str())
+            }
             TrezorCommand::Setup {
                 label,
                 host_entropy,
@@ -224,14 +244,14 @@ where
                 .map_or("", crate::trezor::HostPassphrase::as_str);
             return Ok(Some(T::from(api::passphrase_ack_from_host(passphrase))));
         }
-        if msg_type == MessageType::Failure as u16 {
+        if msg_type == MessageType::Failure as u16 && !matches!(self.state, State::AwaitPinResult) {
             let failure: pb::Failure = api::decode(&payload).map_err(E::from)?;
             return Err(E::from(failure_error(failure)));
         }
-        if msg_type == MessageType::PinMatrixRequest as u16 {
-            return Err(E::from(TrezorError::Locked(
-                "PIN entry is not supported in this build",
-            )));
+        if msg_type == MessageType::PinMatrixRequest as u16
+            && !matches!(self.state, State::AwaitPinMatrix)
+        {
+            return Err(E::from(TrezorError::Locked(TrezorError::LOCKED)));
         }
 
         let response = match &self.state {
@@ -333,6 +353,42 @@ where
                 let enabled = features.passphrase_protection.unwrap_or(false);
                 self.state = State::AwaitSuccess;
                 return Ok(Some(T::from(api::apply_settings(!enabled))));
+            }
+            State::AwaitPinPromptFeatures => {
+                let features: mgmt::Features = expect(
+                    msg_type,
+                    MessageType::Features,
+                    &payload,
+                    "reading features before PIN entry",
+                )
+                .map_err(E::from)?;
+                check_pin_needed(&features).map_err(E::from)?;
+                self.state = State::AwaitPinMatrix;
+                return Ok(Some(T::from(api::get_public_key(
+                    PIN_PROMPT_PATH.to_vec(),
+                    false,
+                    btc::InputScriptType::Spendaddress,
+                    coin_name(self.network),
+                ))));
+            }
+            State::AwaitPinMatrix => TrezorResponse::DeviceAction(true),
+            State::AwaitPinResult => {
+                if msg_type == MessageType::Failure as u16 {
+                    self.state = State::AwaitPinFailureFeatures;
+                    return Ok(Some(T::from(api::get_features())));
+                }
+                TrezorResponse::DeviceAction(true)
+            }
+            State::AwaitPinFailureFeatures => {
+                let features: mgmt::Features = expect(
+                    msg_type,
+                    MessageType::Features,
+                    &payload,
+                    "reading features after a rejected PIN",
+                )
+                .map_err(E::from)?;
+                check_pin_needed(&features).map_err(E::from)?;
+                TrezorResponse::DeviceAction(false)
             }
             State::AwaitSuccess => {
                 let _: pb::Success = expect(
@@ -495,6 +551,18 @@ impl TryFrom<common::Command> for TrezorCommand {
                 return Err(TrezorError::Unsupported("restore is not yet supported"));
             }
             Command::TogglePassphrase => TrezorCommand::TogglePassphrase,
+            Command::PromptPin => TrezorCommand::PromptPin,
+            Command::SendPin(context) => {
+                let Some(common::DeviceContext::TrezorManagement(
+                    crate::trezor::ManagementContext::Pin(pin),
+                )) = context
+                else {
+                    return Err(TrezorError::Unsupported(
+                        "Trezor sendpin requires the PIN positions in the device context",
+                    ));
+                };
+                TrezorCommand::SendPin(pin)
+            }
         })
     }
 }
@@ -512,6 +580,16 @@ impl From<TrezorResponse> for common::Response {
             TrezorResponse::DeviceAction(success) => common::Response::DeviceAction(success),
         }
     }
+}
+
+fn check_pin_needed(features: &mgmt::Features) -> Result<(), TrezorError> {
+    if !features.pin_protection.unwrap_or(false) {
+        return Err(TrezorError::AlreadyUnlocked(TrezorError::NO_PIN_NEEDED));
+    }
+    if features.unlocked.unwrap_or(false) {
+        return Err(TrezorError::AlreadyUnlocked(TrezorError::PIN_ALREADY_SENT));
+    }
+    Ok(())
 }
 
 fn expect<M: prost::Message + Default>(
@@ -557,6 +635,9 @@ fn features_info(features: mgmt::Features, network: Network) -> common::Info {
         initialized: features.initialized,
         label: features.label,
         on_device_passphrase_entry: Some(on_device),
+        needs_pin_sent: Some(
+            features.pin_protection.unwrap_or(false) && !features.unlocked.unwrap_or(false),
+        ),
     }
 }
 
@@ -1274,15 +1355,243 @@ mod tests {
         assert!(matches!(interp.exchange(frame), Err(Error::Rpc(_, _))));
     }
 
+    fn locked_features() -> mgmt::Features {
+        mgmt::Features {
+            pin_protection: Some(true),
+            unlocked: Some(false),
+            ..Default::default()
+        }
+    }
+
+    fn send_pin_command(positions: &str) -> Command {
+        Command::SendPin(Some(common::DeviceContext::TrezorManagement(
+            crate::trezor::ManagementContext::Pin(
+                crate::trezor::HostPin::new(positions.to_owned()).unwrap(),
+            ),
+        )))
+    }
+
     #[test]
-    fn pin_matrix_request_is_locked() {
+    fn prompt_pin_reads_features_then_raises_the_keypad() {
+        let mut interp = Interp::default();
+        let transmit = interp.start(Command::PromptPin).unwrap();
+        let (msg_type, _) = decode_transmit::<mgmt::GetFeatures>(transmit);
+        assert_eq!(msg_type, MessageType::GetFeatures as u16);
+
+        let transmit = interp
+            .exchange(framed(MessageType::Features, &locked_features()))
+            .unwrap()
+            .unwrap();
+        let (msg_type, request) = decode_transmit::<btc::GetPublicKey>(transmit);
+        assert_eq!(msg_type, MessageType::GetPublicKey as u16);
+        assert_eq!(
+            request.address_n,
+            vec![0x8000_002c, 0x8000_0001, 0x8000_0000]
+        );
+        assert_eq!(request.show_display, Some(false));
+
+        assert!(
+            interp
+                .exchange(framed(
+                    MessageType::PinMatrixRequest,
+                    &pb::PinMatrixRequest::default(),
+                ))
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            interp.end().unwrap(),
+            Response::DeviceAction(true)
+        ));
+    }
+
+    #[test]
+    fn prompt_pin_refuses_a_device_that_has_no_pin() {
+        let mut interp = Interp::default();
+        interp.start(Command::PromptPin).unwrap();
+        let features = mgmt::Features {
+            pin_protection: Some(false),
+            ..Default::default()
+        };
+        assert!(matches!(
+            interp.exchange(framed(MessageType::Features, &features)),
+            Err(Error::DeviceAlreadyUnlocked(TrezorError::NO_PIN_NEEDED))
+        ));
+    }
+
+    #[test]
+    fn prompt_pin_refuses_a_device_already_unlocked() {
+        let mut interp = Interp::default();
+        interp.start(Command::PromptPin).unwrap();
+        let features = mgmt::Features {
+            pin_protection: Some(true),
+            unlocked: Some(true),
+            ..Default::default()
+        };
+        assert!(matches!(
+            interp.exchange(framed(MessageType::Features, &features)),
+            Err(Error::DeviceAlreadyUnlocked(TrezorError::PIN_ALREADY_SENT))
+        ));
+    }
+
+    #[test]
+    fn send_pin_encodes_positions_and_reports_success() {
+        let mut interp = Interp::default();
+        let transmit = interp.start(send_pin_command("796")).unwrap();
+        let (msg_type, ack) = decode_transmit::<pb::PinMatrixAck>(transmit);
+        assert_eq!(msg_type, MessageType::PinMatrixAck as u16);
+        assert_eq!(ack.pin, "796");
+
+        let frame = framed(MessageType::PublicKey, &public_key(XPUB, Some(0x0102_0304)));
+        assert!(interp.exchange(frame).unwrap().is_none());
+        assert!(matches!(
+            interp.end().unwrap(),
+            Response::DeviceAction(true)
+        ));
+    }
+
+    #[test]
+    fn send_pin_rechecks_features_before_reporting_a_wrong_pin() {
+        let mut interp = Interp::default();
+        interp.start(send_pin_command("1234")).unwrap();
+
+        let transmit = interp
+            .exchange(framed(MessageType::Failure, &pb::Failure::default()))
+            .unwrap()
+            .unwrap();
+        let (msg_type, _) = decode_transmit::<mgmt::GetFeatures>(transmit);
+        assert_eq!(msg_type, MessageType::GetFeatures as u16);
+
+        assert!(
+            interp
+                .exchange(framed(MessageType::Features, &locked_features()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            interp.end().unwrap(),
+            Response::DeviceAction(false)
+        ));
+    }
+
+    #[test]
+    fn send_pin_failure_on_an_unlocked_device_reports_already_unlocked() {
+        let mut interp = Interp::default();
+        interp.start(send_pin_command("1234")).unwrap();
+        interp
+            .exchange(framed(MessageType::Failure, &pb::Failure::default()))
+            .unwrap();
+
+        let features = mgmt::Features {
+            pin_protection: Some(true),
+            unlocked: Some(true),
+            ..Default::default()
+        };
+        assert!(matches!(
+            interp.exchange(framed(MessageType::Features, &features)),
+            Err(Error::DeviceAlreadyUnlocked(TrezorError::PIN_ALREADY_SENT))
+        ));
+    }
+
+    #[test]
+    fn send_pin_answers_a_passphrase_request_then_succeeds() {
+        let mut interp = Interp::default().with_on_device_passphrase(false);
+        interp.start(send_pin_command("1234")).unwrap();
+
+        let transmit = interp
+            .exchange(framed(
+                MessageType::PassphraseRequest,
+                &pb::PassphraseRequest::default(),
+            ))
+            .unwrap()
+            .unwrap();
+        let (msg_type, ack) = decode_transmit::<pb::PassphraseAck>(transmit);
+        assert_eq!(msg_type, MessageType::PassphraseAck as u16);
+        assert_eq!(ack.on_device, Some(false));
+
+        let frame = framed(MessageType::PublicKey, &public_key(XPUB, Some(0x0102_0304)));
+        assert!(interp.exchange(frame).unwrap().is_none());
+        assert!(matches!(
+            interp.end().unwrap(),
+            Response::DeviceAction(true)
+        ));
+    }
+
+    #[test]
+    fn a_keypad_request_outside_prompt_pin_points_at_the_pin_commands() {
         let mut interp = Interp::default();
         interp.start(Command::GetMasterFingerprint).unwrap();
         let frame = framed(
             MessageType::PinMatrixRequest,
             &pb::PinMatrixRequest::default(),
         );
-        assert!(matches!(interp.exchange(frame), Err(Error::Device(_))));
+        let Err(Error::Device(message)) = interp.exchange(frame) else {
+            panic!("expected a locked-device error");
+        };
+        assert_eq!(
+            message,
+            "Trezor is locked. Unlock by using 'promptpin' and then 'sendpin'."
+        );
+    }
+
+    #[test]
+    fn host_pin_takes_digits_only() {
+        use crate::trezor::HostPin;
+        assert_eq!(HostPin::new("1234".to_owned()).unwrap().as_str(), "1234");
+        assert!(matches!(
+            HostPin::new(String::new()),
+            Err(TrezorError::NonNumericPin)
+        ));
+        assert!(matches!(
+            HostPin::new("12a4".to_owned()),
+            Err(TrezorError::NonNumericPin)
+        ));
+        // Unicode digits are still digits, but the device only reads ASCII positions.
+        assert!(matches!(
+            HostPin::new("１２３".to_owned()),
+            Err(TrezorError::NonNumericPin)
+        ));
+    }
+
+    #[test]
+    fn host_pin_debug_does_not_leak_the_positions() {
+        let pin = crate::trezor::HostPin::new("8675309".to_owned()).unwrap();
+        let rendered = format!("{pin:?}");
+        assert_eq!(rendered, "HostPin(<redacted>)");
+        assert!(!rendered.contains("8675309"));
+    }
+
+    #[test]
+    fn features_report_whether_a_pin_is_still_needed() {
+        assert_eq!(
+            features_info(locked_features(), Network::Testnet).needs_pin_sent,
+            Some(true)
+        );
+        let unlocked = mgmt::Features {
+            pin_protection: Some(true),
+            unlocked: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            features_info(unlocked, Network::Testnet).needs_pin_sent,
+            Some(false)
+        );
+        let no_pin = mgmt::Features {
+            pin_protection: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            features_info(no_pin, Network::Testnet).needs_pin_sent,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn send_pin_without_context_is_rejected() {
+        assert!(matches!(
+            TrezorCommand::try_from(Command::SendPin(None)),
+            Err(TrezorError::Unsupported(_))
+        ));
     }
 
     #[test]
