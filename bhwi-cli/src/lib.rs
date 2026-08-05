@@ -53,6 +53,8 @@ pub struct Info {
     pub label: Option<String>,
     #[serde(skip)]
     pub on_device_passphrase_entry: Option<bool>,
+    #[serde(skip)]
+    pub needs_pin_sent: Option<bool>,
 }
 
 impl Info {
@@ -74,6 +76,7 @@ impl From<bhwi_async::Info> for Info {
             initialized: info.initialized,
             label: info.label,
             on_device_passphrase_entry: info.on_device_passphrase_entry,
+            needs_pin_sent: info.needs_pin_sent,
         }
     }
 }

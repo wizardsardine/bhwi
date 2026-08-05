@@ -286,6 +286,7 @@ pub enum HwiErrorCode {
     DeviceConnectionError,
     NeedToBeRoot,
     DeviceAlreadyInitialized,
+    DeviceNotReady,
     DeviceNotInitialized,
 }
 
@@ -301,6 +302,7 @@ impl HwiErrorCode {
             HwiErrorCode::DeviceConnectionError => -3,
             HwiErrorCode::NeedToBeRoot => -16,
             HwiErrorCode::DeviceAlreadyInitialized => -10,
+            HwiErrorCode::DeviceNotReady => -12,
             HwiErrorCode::DeviceNotInitialized => -18,
         }
     }
@@ -702,29 +704,42 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
     for mut device in devices {
         let mut error = None;
         let mut code = None;
-        let fingerprint = match device.device().unlock(manager.selector.network).await {
-            Ok(()) => match device.fingerprint().await {
-                Ok(fingerprint) => Some(fingerprint),
-                Err(err) => {
-                    error = Some(err.to_string());
-                    code = Some(HwiErrorCode::DeviceConnectionError.code());
-                    None
+        let mut info = None;
+        let mut fingerprint = None;
+        let mut needs_pin_sent = false;
+        match device.device().unlock(manager.selector.network).await {
+            Ok(()) => {
+                // A device waiting for a PIN stops answering every other request, and the
+                // fingerprint request is what makes it start waiting.
+                if reports_device_info(device.device_type()) {
+                    match device.info().await {
+                        Ok(device_info) => info = Some(device_info),
+                        Err(err) => {
+                            error = Some(err.to_string());
+                            code = Some(HwiErrorCode::DeviceConnectionError.code());
+                        }
+                    }
                 }
-            },
+                needs_pin_sent = info
+                    .as_ref()
+                    .and_then(|info| info.needs_pin_sent)
+                    .unwrap_or(false);
+                if needs_pin_sent {
+                    error = Some(bhwi::trezor::TrezorError::LOCKED.to_owned());
+                    code = Some(HwiErrorCode::DeviceNotReady.code());
+                } else if error.is_none() {
+                    match device.fingerprint().await {
+                        Ok(device_fingerprint) => fingerprint = Some(device_fingerprint),
+                        Err(err) => {
+                            error = Some(err.to_string());
+                            code = Some(HwiErrorCode::DeviceConnectionError.code());
+                        }
+                    }
+                }
+            }
             Err(err) => {
                 error = Some(err.to_string());
                 code = Some(HwiErrorCode::DeviceConnectionError.code());
-                None
-            }
-        };
-        let mut info = None;
-        if error.is_none() && reports_device_info(device.device_type()) {
-            match device.info().await {
-                Ok(device_info) => info = Some(device_info),
-                Err(err) => {
-                    error = Some(err.to_string());
-                    code = Some(HwiErrorCode::DeviceConnectionError.code());
-                }
             }
         }
         let label = info.as_ref().and_then(|info| info.label.clone());
@@ -740,7 +755,7 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
             path: hwi_enumerate_path(device.device_type(), device.path(), device.is_emulated()),
             label: label_for(device.device_type(), label),
             fingerprint,
-            needs_pin_sent: false,
+            needs_pin_sent,
             needs_passphrase_sent: false,
             error,
             code,
