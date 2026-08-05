@@ -547,10 +547,13 @@ fn exit_status(outcome: &CliOutcome) -> u8 {
 
 fn cli_outcome(args: Vec<OsString>) -> CliOutcome {
     let prog = program_name(&args);
-    let cli = match HwiCli::try_parse_from(args) {
+    let mut cli = match HwiCli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(err) => return clap_outcome(&prog, err),
     };
+    if let Err(err) = read_stdin_password(&mut cli) {
+        return CliOutcome::Response(HwiResponse::Error(err));
+    }
     match request_from_cli(cli) {
         Ok(request) => {
             if let HwiCommand::Unsupported(command) = &request.command {
@@ -3002,6 +3005,25 @@ fn is_known_emulator_path(device_type: Option<DeviceType>, path: Option<&str>) -
                 Some("127.0.0.1:21324" | "udp:127.0.0.1:21324")
             )
     )
+}
+
+fn read_stdin_password(args: &mut HwiCli) -> HwiResult<()> {
+    if args.stdinpass {
+        let password = match rpassword::prompt_password("Enter your device password: ") {
+            Ok(password) => password,
+            Err(_) => {
+                eprintln!("Warning: Password input may be echoed.");
+                eprint!("Enter your device password: ");
+                let mut line = String::new();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
+                line.trim_end_matches(['\r', '\n']).to_owned()
+            }
+        };
+        args.password = Some(password);
+    }
+    Ok(())
 }
 
 fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
