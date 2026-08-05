@@ -213,6 +213,12 @@ impl DeviceManager {
         Ok(Some(dev))
     }
 
+    /// Selects a device without sending it anything: an `Initialize` would clear the
+    /// keypad a device is waiting on.
+    pub async fn get_device_without_contacting(&self) -> Result<Option<Device>> {
+        Ok(self.enumerate().await?.into_iter().next())
+    }
+
     pub async fn enumerate(&self) -> Result<Vec<Device>> {
         let device_types: Vec<DeviceType> = self
             .selector

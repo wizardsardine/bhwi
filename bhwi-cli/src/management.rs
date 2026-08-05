@@ -12,6 +12,13 @@ pub fn trezor_setup_context() -> DeviceContext {
     DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Setup { host_entropy })
 }
 
+pub fn trezor_pin_context(positions: String) -> Result<DeviceContext> {
+    let pin = bhwi::trezor::HostPin::new(positions)?;
+    Ok(DeviceContext::TrezorManagement(
+        bhwi::trezor::ManagementContext::Pin(pin),
+    ))
+}
+
 pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
     let mode = if is_emulated {

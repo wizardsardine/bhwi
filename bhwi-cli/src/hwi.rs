@@ -215,6 +215,10 @@ pub enum HwiCommand {
         label: String,
     },
     TogglePassphrase,
+    PromptPin,
+    SendPin {
+        pin: String,
+    },
     UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
     InstallUdevRules {
         location: PathBuf,
@@ -286,6 +290,7 @@ pub enum HwiErrorCode {
     DeviceConnectionError,
     NeedToBeRoot,
     DeviceAlreadyInitialized,
+    DeviceAlreadyUnlocked,
     DeviceNotReady,
     DeviceNotInitialized,
 }
@@ -302,6 +307,7 @@ impl HwiErrorCode {
             HwiErrorCode::DeviceConnectionError => -3,
             HwiErrorCode::NeedToBeRoot => -16,
             HwiErrorCode::DeviceAlreadyInitialized => -10,
+            HwiErrorCode::DeviceAlreadyUnlocked => -11,
             HwiErrorCode::DeviceNotReady => -12,
             HwiErrorCode::DeviceNotInitialized => -18,
         }
@@ -478,6 +484,8 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
             label,
         } => restore_device(request.selector, interactive, word_count, label).await,
         HwiCommand::TogglePassphrase => toggle_passphrase_device(request.selector).await,
+        HwiCommand::PromptPin => prompt_pin_device(request.selector).await,
+        HwiCommand::SendPin { pin } => send_pin_device(request.selector, pin).await,
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
@@ -1103,6 +1111,121 @@ async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
             HwiErrorCode::DeviceConnectionError,
             err.to_string(),
         )),
+    }
+}
+
+pub const PIN_MATRIX_DESCRIPTION: &str =
+    "Use the numeric keypad to describe number positions. The layout is:
+    7 8 9
+    4 5 6
+    1 2 3";
+
+async fn device_for_pin_command(
+    selector: DeviceSelector,
+    action: HwiUnsupportedDeviceAction,
+    contact_device: bool,
+) -> Result<crate::Device, HwiError> {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return Err(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+    // Reading a fingerprint means unlocking first, which is what the PIN is for.
+    if !contact_device && selector.fingerprint.is_some() {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "A locked device cannot be matched by fingerprint; use --device-type or --device-path",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let found = if contact_device {
+        manager.get_device_with_fingerprint().await
+    } else {
+        manager.get_device_without_contacting().await
+    };
+    let device = match found {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return Err(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return Err(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                err.to_string(),
+            ));
+        }
+    };
+
+    if device.device_type() != DeviceType::Trezor {
+        return Err(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            hwi_unavailable_action_message(device.device_type(), &action),
+        ));
+    }
+    Ok(device)
+}
+
+/// Reports the bare device message rather than the wrapped transport error.
+fn pin_error(err: impl std::fmt::Display) -> HwiError {
+    let message = err.to_string();
+    for known in [
+        bhwi::trezor::TrezorError::NO_PIN_NEEDED,
+        bhwi::trezor::TrezorError::PIN_ALREADY_SENT,
+    ] {
+        if message.contains(known) {
+            return HwiError::new(HwiErrorCode::DeviceAlreadyUnlocked, known);
+        }
+    }
+    HwiError::new(HwiErrorCode::DeviceConnectionError, message)
+}
+
+async fn prompt_pin_device(selector: DeviceSelector) -> HwiResponse {
+    let mut device =
+        match device_for_pin_command(selector, HwiUnsupportedDeviceAction::PromptPin, true).await {
+            Ok(device) => device,
+            Err(error) => return HwiResponse::Error(error),
+        };
+
+    eprintln!(
+        "Use 'sendpin' to provide the number positions for the PIN as displayed on your device's screen"
+    );
+    eprintln!("{PIN_MATRIX_DESCRIPTION}");
+
+    match device.device().prompt_pin().await {
+        Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        Err(err) => HwiResponse::Error(pin_error(err)),
+    }
+}
+
+async fn send_pin_device(selector: DeviceSelector, pin: String) -> HwiResponse {
+    let pin = match bhwi::trezor::HostPin::new(pin) {
+        Ok(pin) => pin,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
+        }
+    };
+
+    let mut device = match device_for_pin_command(
+        selector,
+        HwiUnsupportedDeviceAction::SendPin { pin: String::new() },
+        false,
+    )
+    .await
+    {
+        Ok(device) => device,
+        Err(error) => return HwiResponse::Error(error),
+    };
+
+    let context =
+        bhwi::common::DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Pin(pin));
+    match device.device().send_pin(Some(context)).await {
+        Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        Err(err) => HwiResponse::Error(pin_error(err)),
     }
 }
 
@@ -2920,7 +3043,7 @@ fn hwi_unavailable_action_message(
             "Trezor restore is not yet supported"
         }
         (DeviceType::Trezor, HwiUnsupportedDeviceAction::Backup { .. }) => {
-            "Trezor does not support creating a backup via software"
+            "The Trezor does not support creating a backup via software"
         }
         (DeviceType::Trezor, HwiUnsupportedDeviceAction::PromptPin) => {
             "Trezor PIN entry is not yet supported"
@@ -3143,12 +3266,8 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             label,
             backup_passphrase,
         },
-        HwiCliCommand::Promptpin => {
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::PromptPin)
-        }
-        HwiCliCommand::Sendpin { pin } => {
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::SendPin { pin })
-        }
+        HwiCliCommand::Promptpin => HwiCommand::PromptPin,
+        HwiCliCommand::Sendpin { pin } => HwiCommand::SendPin { pin },
         HwiCliCommand::Togglepassphrase => HwiCommand::TogglePassphrase,
         #[cfg(target_os = "linux")]
         HwiCliCommand::Installudevrules { location } => HwiCommand::InstallUdevRules { location },
@@ -3729,20 +3848,18 @@ mod tests {
 
     #[test]
     fn parses_pin_actions_and_toggle_passphrase() {
-        let promptpin = parse_args(["hwi", "--device-type", "ledger", "promptpin"])
-            .expect("unsupported promptpin request");
-        assert_eq!(
-            promptpin.command,
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::PromptPin)
-        );
+        // Device support is decided when the device is found, not while parsing.
+        let promptpin =
+            parse_args(["hwi", "--device-type", "ledger", "promptpin"]).expect("promptpin request");
+        assert_eq!(promptpin.command, HwiCommand::PromptPin);
 
-        let sendpin = parse_args(["hwi", "--device-type", "ledger", "sendpin", "1234"])
-            .expect("unsupported sendpin request");
+        let sendpin = parse_args(["hwi", "--device-type", "trezor", "sendpin", "1234"])
+            .expect("sendpin request");
         assert_eq!(
             sendpin.command,
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::SendPin {
+            HwiCommand::SendPin {
                 pin: "1234".to_owned()
-            })
+            }
         );
 
         let togglepassphrase = parse_args(["hwi", "--device-type", "ledger", "togglepassphrase"])

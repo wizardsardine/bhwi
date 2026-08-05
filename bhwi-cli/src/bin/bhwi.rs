@@ -7,7 +7,10 @@ use bhwi_cli::{
     address::AddressTarget,
     config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
-    management::{bitbox_restore_context, bitbox_setup_context, trezor_setup_context},
+    hwi::PIN_MATRIX_DESCRIPTION,
+    management::{
+        bitbox_restore_context, bitbox_setup_context, trezor_pin_context, trezor_setup_context,
+    },
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -163,7 +166,7 @@ enum DeviceCommands {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
-    /// Initialize an unseeded BitBox02
+    /// Initialize an unseeded device
     Setup {
         /// User-visible device name
         #[arg(long, short, default_value = "")]
@@ -179,6 +182,13 @@ enum DeviceCommands {
     },
     /// Toggle mnemonic-passphrase use on the selected device
     TogglePassphrase,
+    /// Ask the selected device to show its PIN keypad
+    PromptPin,
+    /// Send the keypad positions shown on the device screen
+    SendPin {
+        /// Positions on the device's scrambled keypad, not the PIN digits themselves
+        positions: String,
+    },
     /// Install udev rules for hardware wallet device access
     InstallUdevRules {
         /// Device rule targets to install
@@ -463,6 +473,41 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Device(DeviceCommands::PromptPin) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::Trezor {
+                    anyhow::bail!(
+                        "device prompt-pin is not supported for {}",
+                        device.device_type()
+                    );
+                }
+                eprintln!("{PIN_MATRIX_DESCRIPTION}");
+                if !device.device().prompt_pin().await? {
+                    anyhow::bail!("device did not ask for a PIN");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::SendPin { positions }) => {
+            // Nothing may be sent to a device waiting for a PIN, so this lookup stays quiet.
+            if let Some(mut device) = dev_man.get_device_without_contacting().await? {
+                if device.device_type() != DeviceType::Trezor {
+                    anyhow::bail!(
+                        "device send-pin is not supported for {}",
+                        device.device_type()
+                    );
+                }
+                let context = trezor_pin_context(positions)?;
+                if !device.device().send_pin(Some(context)).await? {
+                    anyhow::bail!("device rejected the PIN");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
         Commands::Device(DeviceCommands::InstallUdevRules {
             targets,
             all,
@@ -711,6 +756,31 @@ mod tests {
             args.command,
             Commands::Device(DeviceCommands::TogglePassphrase)
         ));
+    }
+
+    #[test]
+    fn parses_device_prompt_pin() {
+        let args = Args::try_parse_from(["bhwi", "device", "prompt-pin"])
+            .expect("parse device prompt-pin");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::PromptPin)
+        ));
+    }
+
+    #[test]
+    fn parses_device_send_pin_positions() {
+        let args = Args::try_parse_from(["bhwi", "device", "send-pin", "7913"])
+            .expect("parse device send-pin");
+        let Commands::Device(DeviceCommands::SendPin { positions }) = args.command else {
+            panic!("expected device send-pin");
+        };
+        assert_eq!(positions, "7913");
+    }
+
+    #[test]
+    fn device_send_pin_requires_positions() {
+        assert!(Args::try_parse_from(["bhwi", "device", "send-pin"]).is_err());
     }
 
     #[test]
