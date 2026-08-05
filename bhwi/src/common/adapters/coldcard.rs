@@ -281,6 +281,7 @@ impl From<ColdcardResponse> for Response {
                 firmware: Some(device_model),
                 initialized: None,
                 label: None,
+                on_device_passphrase_entry: None,
             }),
             ColdcardResponse::MyPub { encryption_key, .. } => Self::EncryptionKey(encryption_key),
             ColdcardResponse::Signature(header, signature) => Self::Signature(header, signature),

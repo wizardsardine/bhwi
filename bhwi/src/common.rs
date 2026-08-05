@@ -175,6 +175,8 @@ pub struct Info {
     pub initialized: Option<bool>,
     /// User-set device name, when the device protocol reports one.
     pub label: Option<String>,
+    /// Whether the device can take a passphrase on its own screen, when it reports the capability.
+    pub on_device_passphrase_entry: Option<bool>,
 }
 
 pub enum Recipient {

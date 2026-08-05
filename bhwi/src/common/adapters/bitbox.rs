@@ -176,6 +176,7 @@ impl From<BitBoxResponse> for Response {
                 firmware: Some(info.name),
                 initialized: Some(info.initialized),
                 label: None,
+                on_device_passphrase_entry: None,
             }),
             BitBoxResponse::MasterFingerprint(fingerprint) => Self::MasterFingerprint(fingerprint),
             BitBoxResponse::Xpub(xpub) => Self::Xpub(xpub),

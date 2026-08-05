@@ -51,6 +51,8 @@ pub struct Info {
     pub initialized: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(skip)]
+    pub on_device_passphrase_entry: Option<bool>,
 }
 
 impl Info {
@@ -71,6 +73,7 @@ impl From<bhwi_async::Info> for Info {
             firmware: info.firmware,
             initialized: info.initialized,
             label: info.label,
+            on_device_passphrase_entry: info.on_device_passphrase_entry,
         }
     }
 }

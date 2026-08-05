@@ -163,6 +163,7 @@ impl From<JadeResponse> for Response {
                 firmware: None,
                 initialized: None,
                 label: None,
+                on_device_passphrase_entry: None,
             }),
             JadeResponse::Address(address) => Self::Address(address),
             JadeResponse::RegisteredDescriptor => {

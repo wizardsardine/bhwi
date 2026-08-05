@@ -106,6 +106,7 @@ impl From<LedgerResponse> for Response {
                     firmware: Some(response.app_name),
                     initialized: None,
                     label: None,
+                    on_device_passphrase_entry: None,
                 })
             }
             LedgerResponse::Signature(header, signature) => Self::Signature(header, signature),

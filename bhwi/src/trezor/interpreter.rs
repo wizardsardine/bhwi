@@ -424,6 +424,7 @@ fn failure_error(failure: pb::Failure) -> TrezorError {
 }
 
 fn features_info(features: mgmt::Features, network: Network) -> common::Info {
+    let on_device = on_device_passphrase_entry(&features);
     common::Info {
         version: format!(
             "{}.{}.{}",
@@ -433,7 +434,14 @@ fn features_info(features: mgmt::Features, network: Network) -> common::Info {
         firmware: features.model,
         initialized: features.initialized,
         label: features.label,
+        on_device_passphrase_entry: Some(on_device),
     }
+}
+
+fn on_device_passphrase_entry(features: &mgmt::Features) -> bool {
+    features
+        .capabilities
+        .contains(&(mgmt::features::Capability::PassphraseEntry as i32))
 }
 
 type TxType = btc::tx_ack::TransactionType;
@@ -998,6 +1006,29 @@ mod tests {
         let payload: &bitcoin::script::PushBytes = b"bhwi".as_slice().try_into().unwrap();
         let script = bitcoin::ScriptBuf::new_op_return(payload);
         assert_eq!(op_return_data(&script).unwrap(), b"bhwi".to_vec());
+    }
+
+    #[test]
+    fn passphrase_entry_capability_comes_from_features_not_the_model() {
+        let one = mgmt::Features {
+            model: Some("1".into()),
+            capabilities: vec![mgmt::features::Capability::PassphraseEntry as i32],
+            ..Default::default()
+        };
+        assert_eq!(
+            features_info(one, Network::Testnet).on_device_passphrase_entry,
+            Some(true)
+        );
+
+        let model_t = mgmt::Features {
+            model: Some("T".into()),
+            capabilities: Vec::new(),
+            ..Default::default()
+        };
+        assert_eq!(
+            features_info(model_t, Network::Testnet).on_device_passphrase_entry,
+            Some(false)
+        );
     }
 
     #[test]
