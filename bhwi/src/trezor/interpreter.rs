@@ -52,6 +52,7 @@ enum State {
     AwaitAddress,
     AwaitSuccess,
     AwaitPassphraseSetting,
+    AwaitPassphraseCancel,
     AwaitSignKey(Box<Psbt>),
     AwaitTxRequest(Box<SignCtx>),
     Finished(TrezorResponse),
@@ -68,6 +69,8 @@ struct SignCtx {
 pub struct TrezorInterpreter<C, T, R, E> {
     state: State,
     network: Network,
+    passphrase: Option<crate::trezor::HostPassphrase>,
+    on_device_passphrase: bool,
     _marker: PhantomData<(C, T, R, E)>,
 }
 
@@ -76,6 +79,8 @@ impl<C, T, R, E> Default for TrezorInterpreter<C, T, R, E> {
         Self {
             state: State::New,
             network: Network::Bitcoin,
+            passphrase: None,
+            on_device_passphrase: true,
             _marker: PhantomData,
         }
     }
@@ -84,6 +89,16 @@ impl<C, T, R, E> Default for TrezorInterpreter<C, T, R, E> {
 impl<C, T, R, E> TrezorInterpreter<C, T, R, E> {
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = network;
+        self
+    }
+
+    pub fn with_passphrase(mut self, passphrase: Option<crate::trezor::HostPassphrase>) -> Self {
+        self.passphrase = passphrase;
+        self
+    }
+
+    pub fn with_on_device_passphrase(mut self, on_device: bool) -> Self {
+        self.on_device_passphrase = on_device;
         self
     }
 }
@@ -156,11 +171,29 @@ where
             )));
         }
 
+        if matches!(self.state, State::AwaitPassphraseCancel) {
+            return Err(E::from(TrezorError::PassphraseTooLong));
+        }
         if msg_type == MessageType::ButtonRequest as u16 {
             return Ok(Some(T::from(api::button_ack())));
         }
         if msg_type == MessageType::PassphraseRequest as u16 {
-            return Ok(Some(T::from(api::passphrase_ack_on_device())));
+            if self.on_device_passphrase {
+                return Ok(Some(T::from(api::passphrase_ack_on_device())));
+            }
+            if self
+                .passphrase
+                .as_ref()
+                .is_some_and(crate::trezor::HostPassphrase::is_too_long)
+            {
+                self.state = State::AwaitPassphraseCancel;
+                return Ok(Some(T::from(api::cancel())));
+            }
+            let passphrase = self
+                .passphrase
+                .as_ref()
+                .map_or("", crate::trezor::HostPassphrase::as_str);
+            return Ok(Some(T::from(api::passphrase_ack_from_host(passphrase))));
         }
         if msg_type == MessageType::Failure as u16 {
             let failure: pb::Failure = api::decode(&payload).map_err(E::from)?;
@@ -289,6 +322,9 @@ where
                     }
                     SignStep::Done(psbt) => TrezorResponse::SignedPsbt(psbt),
                 }
+            }
+            State::AwaitPassphraseCancel => {
+                return Err(E::from(TrezorError::PassphraseTooLong));
             }
             State::New | State::Finished(_) => {
                 return Err(E::from(TrezorError::UnexpectedMessage(
@@ -1283,5 +1319,97 @@ mod tests {
         let (ack_type, msg): (u16, pb::PassphraseAck) = decode_transmit(ack);
         assert_eq!(ack_type, MessageType::PassphraseAck as u16);
         assert_eq!(msg.on_device, Some(true));
+    }
+
+    fn passphrase_ack(interp: &mut Interp) -> Result<Option<Transmit>, Error> {
+        interp.start(Command::GetMasterFingerprint).unwrap();
+        interp.exchange(framed(
+            MessageType::PassphraseRequest,
+            &pb::PassphraseRequest::default(),
+        ))
+    }
+
+    #[test]
+    fn passphrase_from_host_is_sent_when_the_device_cannot_prompt() {
+        let mut interp = Interp::default()
+            .with_on_device_passphrase(false)
+            .with_passphrase(Some(crate::trezor::HostPassphrase::new("secret".into())));
+        let ack = passphrase_ack(&mut interp)
+            .unwrap()
+            .expect("passphrase ack");
+        let (_, msg): (u16, pb::PassphraseAck) = decode_transmit(ack);
+        assert_eq!(msg.on_device, Some(false));
+        assert_eq!(msg.passphrase.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn passphrase_from_host_is_ignored_when_the_device_can_prompt() {
+        let mut interp = Interp::default()
+            .with_passphrase(Some(crate::trezor::HostPassphrase::new("secret".into())));
+        let ack = passphrase_ack(&mut interp)
+            .unwrap()
+            .expect("passphrase ack");
+        let (_, msg): (u16, pb::PassphraseAck) = decode_transmit(ack);
+        assert_eq!(msg.on_device, Some(true));
+        assert_eq!(msg.passphrase, None);
+    }
+
+    #[test]
+    fn missing_passphrase_defaults_to_empty_like_python_hwi() {
+        let mut interp = Interp::default().with_on_device_passphrase(false);
+        let ack = passphrase_ack(&mut interp)
+            .unwrap()
+            .expect("passphrase ack");
+        let (_, msg): (u16, pb::PassphraseAck) = decode_transmit(ack);
+        assert_eq!(msg.on_device, Some(false));
+        assert_eq!(msg.passphrase.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn host_passphrase_is_normalized_to_nfkd() {
+        let composed = crate::trezor::HostPassphrase::new("caf\u{e9}".into());
+        assert_eq!(composed.as_str(), "cafe\u{301}");
+
+        let mut interp = Interp::default()
+            .with_on_device_passphrase(false)
+            .with_passphrase(Some(crate::trezor::HostPassphrase::new("caf\u{e9}".into())));
+        let ack = passphrase_ack(&mut interp)
+            .unwrap()
+            .expect("passphrase ack");
+        let (_, msg): (u16, pb::PassphraseAck) = decode_transmit(ack);
+        assert_eq!(msg.passphrase.as_deref(), Some("cafe\u{301}"));
+    }
+
+    #[test]
+    fn overlong_passphrase_cancels_then_errors() {
+        let mut interp = Interp::default()
+            .with_on_device_passphrase(false)
+            .with_passphrase(Some(crate::trezor::HostPassphrase::new("a".repeat(51))));
+        let transmit = passphrase_ack(&mut interp).unwrap().expect("cancel");
+        let (msg_type, _) = decode_transmit::<mgmt::Cancel>(transmit);
+        assert_eq!(msg_type, MessageType::Cancel as u16);
+
+        let failure = framed(
+            MessageType::Failure,
+            &pb::Failure {
+                code: Some(pb::failure::FailureType::FailureActionCancelled as i32),
+                message: None,
+            },
+        );
+        assert!(matches!(
+            interp.exchange(failure),
+            Err(Error::InvalidInput(_))
+        ));
+
+        let mut ok = Interp::default()
+            .with_on_device_passphrase(false)
+            .with_passphrase(Some(crate::trezor::HostPassphrase::new("a".repeat(50))));
+        assert!(passphrase_ack(&mut ok).unwrap().is_some());
+    }
+
+    #[test]
+    fn host_passphrase_is_redacted_when_formatted() {
+        let passphrase = crate::trezor::HostPassphrase::new("secret".into());
+        assert!(!format!("{passphrase:?}").contains("secret"));
     }
 }

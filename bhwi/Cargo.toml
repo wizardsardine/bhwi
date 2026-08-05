@@ -26,7 +26,12 @@ bitbox = [
     "dep:zeroize",
     "dep:zeroize_derive",
 ]
-trezor = ["dep:prost"]
+trezor = [
+    "dep:prost",
+    "dep:unicode-normalization",
+    "dep:zeroize",
+    "dep:zeroize_derive",
+]
 
 [dependencies]
 base64ct = { workspace = true, features = ["alloc"] }
@@ -55,5 +60,6 @@ getrandom = { version = "=0.2.16", optional = true }
 itertools = { version = "=0.14.0", optional = true }
 prost = { version = "=0.13.5", optional = true }
 semver = { version = "=1.0.27", optional = true }
+unicode-normalization = { version = "=0.1.24", optional = true }
 zeroize = { version = "=1.8.1", optional = true }
 zeroize_derive = { version = "=1.4.3", optional = true }

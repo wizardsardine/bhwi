@@ -4,12 +4,15 @@ use bhwi::{
     Interpreter,
     bitcoin::Network,
     common,
-    trezor::{TrezorCommand, TrezorError, TrezorInterpreter, TrezorResponse},
+    trezor::{HostPassphrase, TrezorCommand, TrezorError, TrezorInterpreter, TrezorResponse},
 };
 
 pub struct Trezor<T> {
     pub transport: T,
     network: Network,
+    passphrase: Option<HostPassphrase>,
+    on_device_passphrase: bool,
+    is_emulated: bool,
 }
 
 impl<T> Trezor<T> {
@@ -17,11 +20,26 @@ impl<T> Trezor<T> {
         Self {
             transport,
             network: Network::Bitcoin,
+            passphrase: None,
+            on_device_passphrase: true,
+            is_emulated: false,
         }
     }
 
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = network;
+        self
+    }
+
+    pub fn with_passphrase(mut self, passphrase: Option<HostPassphrase>) -> Self {
+        self.passphrase = passphrase;
+        self
+    }
+
+    /// Emulators report the on-device passphrase capability but have no way to take one,
+    /// so the host supplies it regardless.
+    pub fn with_emulator(mut self, is_emulated: bool) -> Self {
+        self.is_emulated = is_emulated;
         self
     }
 }
@@ -46,13 +64,21 @@ where
         (
             &mut self.transport,
             &DummyClient {},
-            TrezorInterpreter::default().with_network(self.network),
+            TrezorInterpreter::default()
+                .with_network(self.network)
+                .with_passphrase(self.passphrase.clone())
+                .with_on_device_passphrase(self.on_device_passphrase),
         )
     }
 }
 
 impl<T> crate::OnUnlock for Trezor<T> {
-    fn on_unlock(&mut self, _response: common::Response) -> Result<(), common::Error> {
+    fn on_unlock(&mut self, response: common::Response) -> Result<(), common::Error> {
+        if let common::Response::Info(info) = response
+            && let Some(on_device) = info.on_device_passphrase_entry
+        {
+            self.on_device_passphrase = on_device && !self.is_emulated;
+        }
         Ok(())
     }
 }

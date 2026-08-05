@@ -19,6 +19,7 @@ pub enum MessageType {
     ButtonRequest = 26,
     ButtonAck = 27,
     SignTx = 15,
+    Cancel = 20,
     TxRequest = 21,
     TxAck = 22,
     GetAddress = 29,
@@ -80,6 +81,10 @@ pub fn apply_settings(use_passphrase: bool) -> Vec<u8> {
     )
 }
 
+pub fn cancel() -> Vec<u8> {
+    encode(MessageType::Cancel, &mgmt::Cancel::default())
+}
+
 pub fn button_ack() -> Vec<u8> {
     encode(MessageType::ButtonAck, &pb::ButtonAck::default())
 }
@@ -88,6 +93,15 @@ pub fn passphrase_ack_on_device() -> Vec<u8> {
     let msg = pb::PassphraseAck {
         on_device: Some(true),
         passphrase: None,
+        ..Default::default()
+    };
+    encode(MessageType::PassphraseAck, &msg)
+}
+
+pub fn passphrase_ack_from_host(passphrase: &str) -> Vec<u8> {
+    let msg = pb::PassphraseAck {
+        on_device: Some(false),
+        passphrase: Some(passphrase.to_owned()),
         ..Default::default()
     };
     encode(MessageType::PassphraseAck, &msg)

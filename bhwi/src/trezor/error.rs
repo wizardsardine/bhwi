@@ -20,6 +20,8 @@ pub enum TrezorError {
     Unsupported(&'static str),
     #[error("unsupported display address: {0}")]
     UnsupportedDisplayAddress(&'static str),
+    #[error("Passphrase too long")]
+    PassphraseTooLong,
     #[error("invalid input: {0}")]
     InvalidInput(String),
 }
@@ -43,6 +45,9 @@ impl From<TrezorError> for common::Error {
             TrezorError::Unsupported(s) => common::Error::MissingCommandInfo(s),
             TrezorError::UnsupportedDisplayAddress(s) => {
                 common::Error::UnsupportedDisplayAddress(s.into())
+            }
+            TrezorError::PassphraseTooLong => {
+                common::Error::InvalidInput("Passphrase too long".into())
             }
             TrezorError::InvalidInput(s) => common::Error::InvalidInput(s),
         }
