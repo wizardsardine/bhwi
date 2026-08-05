@@ -127,6 +127,9 @@ pub enum DeviceContext {
     /// Required context for BitBox02 setup and restore operations.
     #[cfg(feature = "bitbox")]
     BitBoxManagement(bitbox::ManagementContext),
+    /// Required context for Trezor setup.
+    #[cfg(feature = "trezor")]
+    TrezorManagement(trezor::ManagementContext),
 }
 
 pub enum Response {

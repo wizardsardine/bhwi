@@ -16,6 +16,8 @@ pub enum TrezorError {
     NetworkMismatch,
     #[error("device refused the operation")]
     ActionCancelled,
+    #[error("device is already initialized")]
+    AlreadyInitialized,
     #[error("unsupported command: {0}")]
     Unsupported(&'static str),
     #[error("unsupported display address: {0}")]
@@ -42,6 +44,9 @@ impl From<TrezorError> for common::Error {
                 common::Error::InvalidInput("device returned a key for the wrong network".into())
             }
             TrezorError::ActionCancelled => common::Error::AuthenticationRefused,
+            TrezorError::AlreadyInitialized => common::Error::Device(
+                "Device is already initialized. Use wipe first and try again".into(),
+            ),
             TrezorError::Unsupported(s) => common::Error::MissingCommandInfo(s),
             TrezorError::UnsupportedDisplayAddress(s) => {
                 common::Error::UnsupportedDisplayAddress(s.into())

@@ -7,7 +7,7 @@ use bhwi_cli::{
     address::AddressTarget,
     config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
-    management::{bitbox_restore_context, bitbox_setup_context},
+    management::{bitbox_restore_context, bitbox_setup_context, trezor_setup_context},
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -381,10 +381,11 @@ async fn main() -> Result<()> {
         }
         Commands::Device(DeviceCommands::Setup { label }) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
-                if device.device_type() != DeviceType::BitBox02 {
-                    anyhow::bail!("device setup is currently supported only for BitBox02");
-                }
-                let context = bitbox_setup_context(device.is_emulated())?;
+                let context = match device.device_type() {
+                    DeviceType::BitBox02 => bitbox_setup_context(device.is_emulated())?,
+                    DeviceType::Trezor => trezor_setup_context(),
+                    other => anyhow::bail!("device setup is not supported for {other}"),
+                };
                 let success = device
                     .device()
                     .setup_device(
@@ -396,7 +397,7 @@ async fn main() -> Result<()> {
                     )
                     .await?;
                 if !success {
-                    anyhow::bail!("BitBox02 setup was not completed");
+                    anyhow::bail!("device setup was not completed");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));

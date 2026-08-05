@@ -34,6 +34,12 @@ impl core::fmt::Debug for HostPassphrase {
 }
 pub use interpreter::{TrezorCommand, TrezorInterpreter, TrezorResponse};
 
+/// External data needed by Trezor management commands while keeping the interpreter sans-I/O.
+#[derive(Clone, Debug)]
+pub enum ManagementContext {
+    Setup { host_entropy: [u8; 32] },
+}
+
 pub const TREZOR_VID: u16 = 0x1209;
 pub const TREZOR_PID: u16 = 0x53c1;
 pub const TREZOR_BOOTLOADER_PID: u16 = 0x53c0;

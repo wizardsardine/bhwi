@@ -6,6 +6,12 @@ use bhwi::{
 use chrono::Local;
 use rand_core::{OsRng, RngCore};
 
+pub fn trezor_setup_context() -> DeviceContext {
+    let mut host_entropy = [0; 32];
+    OsRng.fill_bytes(&mut host_entropy);
+    DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Setup { host_entropy })
+}
+
 pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
     let mode = if is_emulated {

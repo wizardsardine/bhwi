@@ -29,6 +29,10 @@ pub enum TrezorCommand {
     SignTx(Box<Psbt>),
     Wipe,
     TogglePassphrase,
+    Setup {
+        label: Option<String>,
+        host_entropy: [u8; 32],
+    },
 }
 
 pub enum TrezorResponse {
@@ -53,9 +57,17 @@ enum State {
     AwaitSuccess,
     AwaitPassphraseSetting,
     AwaitPassphraseCancel,
+    AwaitSetupFeatures(Box<SetupCtx>),
+    AwaitEntropyRequest([u8; 32]),
     AwaitSignKey(Box<Psbt>),
     AwaitTxRequest(Box<SignCtx>),
     Finished(TrezorResponse),
+}
+
+struct SetupCtx {
+    label: Option<String>,
+    passphrase_protection: bool,
+    host_entropy: [u8; 32],
 }
 
 struct SignCtx {
@@ -100,6 +112,12 @@ impl<C, T, R, E> TrezorInterpreter<C, T, R, E> {
     pub fn with_on_device_passphrase(mut self, on_device: bool) -> Self {
         self.on_device_passphrase = on_device;
         self
+    }
+
+    fn wants_passphrase_protection(&self) -> bool {
+        self.passphrase
+            .as_ref()
+            .is_some_and(|passphrase| !passphrase.as_str().is_empty())
     }
 }
 
@@ -151,6 +169,17 @@ where
             }
             TrezorCommand::TogglePassphrase => {
                 self.state = State::AwaitPassphraseSetting;
+                api::get_features()
+            }
+            TrezorCommand::Setup {
+                label,
+                host_entropy,
+            } => {
+                self.state = State::AwaitSetupFeatures(Box::new(SetupCtx {
+                    label,
+                    passphrase_protection: self.wants_passphrase_protection(),
+                    host_entropy,
+                }));
                 api::get_features()
             }
             TrezorCommand::SignTx(psbt) => {
@@ -246,6 +275,52 @@ where
                     expect(msg_type, MessageType::Address, &payload, "reading address")
                         .map_err(E::from)?;
                 TrezorResponse::Address(address.address)
+            }
+            State::AwaitSetupFeatures(_) => {
+                let State::AwaitSetupFeatures(ctx) =
+                    core::mem::replace(&mut self.state, State::New)
+                else {
+                    unreachable!("state checked above")
+                };
+                let features: mgmt::Features = expect(
+                    msg_type,
+                    MessageType::Features,
+                    &payload,
+                    "reading features before setup",
+                )
+                .map_err(E::from)?;
+                if features.initialized.unwrap_or(false) {
+                    return Err(E::from(TrezorError::AlreadyInitialized));
+                }
+                if features.model.as_deref() == Some("1") {
+                    return Err(E::from(TrezorError::Unsupported(
+                        "Trezor One setup needs host PIN entry, which is not supported in this build",
+                    )));
+                }
+                // trezorlib's defaults: Trezor One seeds at 256 bits, later models at 128.
+                let strength = if features.model.as_deref() == Some("1") {
+                    256
+                } else {
+                    128
+                };
+                self.state = State::AwaitEntropyRequest(ctx.host_entropy);
+                return Ok(Some(T::from(api::reset_device(
+                    strength,
+                    ctx.passphrase_protection,
+                    ctx.label,
+                ))));
+            }
+            State::AwaitEntropyRequest(host_entropy) => {
+                let entropy = *host_entropy;
+                let _: mgmt::EntropyRequest = expect(
+                    msg_type,
+                    MessageType::EntropyRequest,
+                    &payload,
+                    "reading entropy request",
+                )
+                .map_err(E::from)?;
+                self.state = State::AwaitSuccess;
+                return Ok(Some(T::from(api::entropy_ack(&entropy))));
             }
             State::AwaitPassphraseSetting => {
                 let features: mgmt::Features = expect(
@@ -401,8 +476,19 @@ impl TryFrom<common::Command> for TrezorCommand {
             Command::Backup => {
                 return Err(TrezorError::Unsupported("backup is not yet supported"));
             }
-            Command::Setup(..) => {
-                return Err(TrezorError::Unsupported("setup is not yet supported"));
+            Command::Setup(options, context) => {
+                let Some(common::DeviceContext::TrezorManagement(
+                    crate::trezor::ManagementContext::Setup { host_entropy },
+                )) = context
+                else {
+                    return Err(TrezorError::Unsupported(
+                        "Trezor setup requires host entropy in the device context",
+                    ));
+                };
+                TrezorCommand::Setup {
+                    label: (!options.label.is_empty()).then_some(options.label),
+                    host_entropy,
+                }
             }
             Command::Wipe => TrezorCommand::Wipe,
             Command::Restore(..) => {
@@ -1405,6 +1491,21 @@ mod tests {
             .with_on_device_passphrase(false)
             .with_passphrase(Some(crate::trezor::HostPassphrase::new("a".repeat(50))));
         assert!(passphrase_ack(&mut ok).unwrap().is_some());
+    }
+
+    #[test]
+    fn setup_enables_passphrase_protection_from_the_global_passphrase() {
+        assert!(
+            !Interp::default()
+                .with_passphrase(Some(crate::trezor::HostPassphrase::new(String::new())))
+                .wants_passphrase_protection()
+        );
+        assert!(!Interp::default().wants_passphrase_protection());
+        assert!(
+            Interp::default()
+                .with_passphrase(Some(crate::trezor::HostPassphrase::new("secret".into())))
+                .wants_passphrase_protection()
+        );
     }
 
     #[test]

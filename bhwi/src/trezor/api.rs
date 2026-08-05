@@ -10,7 +10,10 @@ pub enum MessageType {
     Initialize = 0,
     Success = 2,
     WipeDevice = 5,
+    ResetDevice = 14,
     ApplySettings = 25,
+    EntropyRequest = 35,
+    EntropyAck = 36,
     Failure = 3,
     GetPublicKey = 11,
     PublicKey = 12,
@@ -69,6 +72,32 @@ pub fn get_features() -> Vec<u8> {
 
 pub fn wipe_device() -> Vec<u8> {
     encode(MessageType::WipeDevice, &mgmt::WipeDevice::default())
+}
+
+pub fn reset_device(strength: u32, passphrase_protection: bool, label: Option<String>) -> Vec<u8> {
+    encode(
+        MessageType::ResetDevice,
+        &mgmt::ResetDevice {
+            strength: Some(strength),
+            passphrase_protection: Some(passphrase_protection),
+            pin_protection: Some(true),
+            label,
+            u2f_counter: Some(0),
+            skip_backup: Some(false),
+            no_backup: Some(false),
+            backup_type: Some(mgmt::BackupType::Bip39 as i32),
+            ..Default::default()
+        },
+    )
+}
+
+pub fn entropy_ack(entropy: &[u8]) -> Vec<u8> {
+    encode(
+        MessageType::EntropyAck,
+        &mgmt::EntropyAck {
+            entropy: entropy.to_vec(),
+        },
+    )
 }
 
 pub fn apply_settings(use_passphrase: bool) -> Vec<u8> {

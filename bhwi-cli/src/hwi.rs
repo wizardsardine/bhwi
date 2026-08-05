@@ -37,7 +37,7 @@ use crate::{
     Device, DeviceManager, DeviceType,
     config::DeviceSelector,
     get_descriptors::GetDescriptorOptions,
-    management::{bitbox_restore_context, bitbox_setup_context},
+    management::{bitbox_restore_context, bitbox_setup_context, trezor_setup_context},
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -285,6 +285,7 @@ pub enum HwiErrorCode {
     DeviceFailure,
     DeviceConnectionError,
     NeedToBeRoot,
+    DeviceAlreadyInitialized,
     DeviceNotInitialized,
 }
 
@@ -299,6 +300,7 @@ impl HwiErrorCode {
             HwiErrorCode::DeviceFailure => -13,
             HwiErrorCode::DeviceConnectionError => -3,
             HwiErrorCode::NeedToBeRoot => -16,
+            HwiErrorCode::DeviceAlreadyInitialized => -10,
             HwiErrorCode::DeviceNotInitialized => -18,
         }
     }
@@ -838,7 +840,18 @@ async fn setup_device(
             "setup requires interactive mode",
         ));
     }
-    if device.device_type() != DeviceType::BitBox02 {
+    if device.device_type() == DeviceType::Trezor
+        && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
+    {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceAlreadyInitialized,
+            "Device is already initialized. Use wipe first and try again",
+        ));
+    }
+    if !matches!(
+        device.device_type(),
+        DeviceType::BitBox02 | DeviceType::Trezor
+    ) {
         let action = HwiUnsupportedDeviceAction::Setup {
             interactive,
             label,
@@ -849,23 +862,32 @@ async fn setup_device(
             hwi_unavailable_action_message(device.device_type(), &action),
         ));
     }
-    if !backup_passphrase.is_empty() {
+    if device.device_type() == DeviceType::BitBox02 && !backup_passphrase.is_empty() {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             "Passphrase not needed when setting up a BitBox02.",
         ));
     }
-    if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+    if device.device_type() == DeviceType::BitBox02
+        && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
+    {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             "The BitBox02 must be wiped before setup.",
         ));
     }
 
-    let context = match bitbox_setup_context(device.is_emulated()) {
-        Ok(context) => context,
-        Err(err) => {
-            return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, err.to_string()));
+    let context = if device.device_type() == DeviceType::Trezor {
+        trezor_setup_context()
+    } else {
+        match bitbox_setup_context(device.is_emulated()) {
+            Ok(context) => context,
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
         }
     };
     match device
