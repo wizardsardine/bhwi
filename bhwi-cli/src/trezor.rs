@@ -8,7 +8,6 @@ use bhwi::trezor::{
     TREZOR_DEVICE_ID, TREZOR_ONE_DEVICE_ID, TREZOR_ONE_PID, TREZOR_ONE_VID, TREZOR_PID, TREZOR_VID,
 };
 use bhwi_async::{Trezor, transport::trezor::TrezorTransport};
-use bitcoin::Network;
 use futures::stream::{StreamExt, TryStreamExt};
 
 use crate::{
@@ -25,7 +24,8 @@ const EMULATOR_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 pub struct TrezorDevice;
 
 impl TrezorDevice {
-    async fn hid_device(network: Network, dev: HidDevice) -> Result<Option<Device>> {
+    async fn hid_device(selector: &DeviceSelector, dev: HidDevice) -> Result<Option<Device>> {
+        let network = selector.network;
         let path = hid_path(&dev);
         let name = dev.name.clone();
         let model = trezor_model(dev.product_id, false);
@@ -44,7 +44,8 @@ impl TrezorDevice {
                 model,
                 Box::new(
                     TrezorOneDevice::new(TrezorTransport::new(HidChannel::new(opened)))
-                        .with_network(network),
+                        .with_network(network)
+                        .with_passphrase(selector.passphrase.clone()),
                 ),
                 false,
             )
@@ -52,21 +53,26 @@ impl TrezorDevice {
         ))
     }
 
-    async fn webusb_device(network: Network, info: &nusb::DeviceInfo) -> Result<Device> {
+    async fn webusb_device(selector: &DeviceSelector, info: &nusb::DeviceInfo) -> Result<Device> {
+        let network = selector.network;
         let channel = WebUsbChannel::open(info).await?;
         Device::new(
             "Trezor",
             DeviceType::Trezor,
             webusb_path(info),
             trezor_model(info.product_id(), false),
-            Box::new(TrezorWebUsbDevice::new(TrezorTransport::new(channel)).with_network(network)),
+            Box::new(
+                TrezorWebUsbDevice::new(TrezorTransport::new(channel))
+                    .with_network(network)
+                    .with_passphrase(selector.passphrase.clone()),
+            ),
             false,
         )
         .await
     }
 
     async fn emulator_device(
-        network: Network,
+        selector: &DeviceSelector,
         addr: &str,
         client: EmulatorClient,
     ) -> Result<Device> {
@@ -75,7 +81,12 @@ impl TrezorDevice {
             DeviceType::Trezor,
             addr,
             trezor_model(0, true),
-            Box::new(TrezorEmulatorDevice::new(TrezorTransport::new(client)).with_network(network)),
+            Box::new(
+                TrezorEmulatorDevice::new(TrezorTransport::new(client))
+                    .with_network(selector.network)
+                    .with_passphrase(selector.passphrase.clone())
+                    .with_emulator(true),
+            ),
             true,
         )
         .await
@@ -99,7 +110,7 @@ impl DeviceEnumerator for TrezorDevice {
                             .usage_page
                             .context("trezor one usage page constant not set")?
                 {
-                    Self::hid_device(selector.network, dev).await
+                    Self::hid_device(selector, dev).await
                 } else {
                     Ok(None)
                 }
@@ -115,7 +126,7 @@ impl DeviceEnumerator for TrezorDevice {
             if !selector.matches(DeviceType::Trezor, &path) {
                 continue;
             }
-            match Self::webusb_device(selector.network, &info).await {
+            match Self::webusb_device(selector, &info).await {
                 Ok(device) => devices.push(device),
                 Err(err) => eprintln!("Warning: skipping Trezor at {path}: {err}"),
             }
@@ -128,7 +139,7 @@ impl DeviceEnumerator for TrezorDevice {
             && let Ok(client) = EmulatorClient::new(addr).await
             && client.ping(EMULATOR_PROBE_TIMEOUT).await
         {
-            devices.push(Self::emulator_device(selector.network, addr, client).await?);
+            devices.push(Self::emulator_device(selector, addr, client).await?);
         }
 
         Ok(devices)

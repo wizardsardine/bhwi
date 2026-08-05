@@ -194,6 +194,9 @@ impl DeviceManager {
         let Some(mut dev) = target_dev else {
             return Ok(None);
         };
+        if self.selector.passphrase.is_some() && dev.device_type == DeviceType::BitBox02 {
+            anyhow::bail!(crate::bitbox::HOST_PASSPHRASE_REJECTED);
+        }
         let info = dev.info().await?;
         let networks = &info.networks;
         let net = self.selector.network;

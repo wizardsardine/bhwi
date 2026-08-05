@@ -11,6 +11,7 @@ use bhwi::{
     bitcoin::psbt::Psbt,
     common::{MultisigAddressType, MultisigDisplayAddress},
     ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
+    trezor::HostPassphrase,
 };
 use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions};
 use bitcoin::{
@@ -3004,13 +3005,8 @@ fn is_known_emulator_path(device_type: Option<DeviceType>, path: Option<&str>) -
 }
 
 fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
-    let _accepted_python_hwi_globals = (
-        args.password,
-        args.debug,
-        args.stdin,
-        args.interactive,
-        args.stdinpass,
-    );
+    let _accepted_python_hwi_globals = (args.debug, args.stdin, args.interactive, args.stdinpass);
+    let passphrase = args.password.map(HostPassphrase::new);
     let expert = args.expert;
     let device_type = args
         .device_type
@@ -3113,6 +3109,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             device_type,
             device_path: args.device_path,
             include_emulators,
+            passphrase,
         },
         command,
     })

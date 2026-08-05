@@ -1,3 +1,4 @@
+use bhwi::trezor::HostPassphrase;
 use bitcoin::{Network, bip32::Fingerprint};
 
 use crate::DeviceType;
@@ -9,6 +10,7 @@ pub struct DeviceSelector {
     pub device_type: Option<DeviceType>,
     pub device_path: Option<String>,
     pub include_emulators: bool,
+    pub passphrase: Option<HostPassphrase>,
 }
 
 impl Default for DeviceSelector {
@@ -19,6 +21,7 @@ impl Default for DeviceSelector {
             device_type: None,
             device_path: None,
             include_emulators: false,
+            passphrase: None,
         }
     }
 }

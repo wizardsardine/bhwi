@@ -1,5 +1,6 @@
 use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
+use bhwi::trezor::HostPassphrase;
 use bhwi_async::{DeviceBackup, DeviceContext, RestoreOptions, SetupOptions, WalletRegistration};
 use bhwi_cli::{
     DeviceManager, DeviceType, OutputFormat,
@@ -43,6 +44,9 @@ struct Args {
     /// output formatting
     #[arg(long, short)]
     format: Option<OutputFormat>,
+    /// passphrase for devices that take one from the host
+    #[arg(long, short)]
+    passphrase: Option<String>,
 }
 
 impl Args {
@@ -53,6 +57,7 @@ impl Args {
             device_type: self.device_type,
             device_path: self.device_path.clone(),
             include_emulators: true,
+            passphrase: self.passphrase.clone().map(HostPassphrase::new),
         }
     }
 }
@@ -795,6 +800,22 @@ mod tests {
 
         assert_eq!(args.device_type, Some(DeviceType::BitBox02));
         assert_eq!(args.device_path.as_deref(), Some("tcp:127.0.0.1:15423"));
+    }
+
+    #[test]
+    fn native_cli_passes_password_through_to_the_selector() {
+        let args = Args::try_parse_from(["bhwi", "-p", "secret", "device", "list"])
+            .expect("password parses");
+        assert_eq!(
+            args.device_selector()
+                .passphrase
+                .as_ref()
+                .map(|p| p.as_str()),
+            Some("secret")
+        );
+
+        let without = Args::try_parse_from(["bhwi", "device", "list"]).expect("no password parses");
+        assert!(without.device_selector().passphrase.is_none());
     }
 
     #[test]
