@@ -69,6 +69,8 @@ pub trait HWI {
         context: Option<DeviceContext>,
     ) -> Result<bool, Self::Error>;
     async fn toggle_passphrase(&mut self) -> Result<bool, Self::Error>;
+    async fn prompt_pin(&mut self) -> Result<bool, Self::Error>;
+    async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, Self::Error>;
     async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
     async fn get_info(&mut self) -> Result<Info, Self::Error>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, Self::Error>;
@@ -117,6 +119,8 @@ pub trait HWIDevice {
         context: Option<DeviceContext>,
     ) -> Result<bool, HWIDeviceError>;
     async fn toggle_passphrase(&mut self) -> Result<bool, HWIDeviceError>;
+    async fn prompt_pin(&mut self) -> Result<bool, HWIDeviceError>;
+    async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, HWIDeviceError>;
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError>;
     async fn get_info(&mut self) -> Result<Info, HWIDeviceError>;
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError>;
@@ -226,6 +230,26 @@ where
     async fn toggle_passphrase(&mut self) -> Result<bool, Self::Error> {
         if let common::Response::DeviceAction(success) =
             run_command(self, common::Command::TogglePassphrase).await?
+        {
+            Ok(success)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
+
+    async fn prompt_pin(&mut self) -> Result<bool, Self::Error> {
+        if let common::Response::DeviceAction(success) =
+            run_command(self, common::Command::PromptPin).await?
+        {
+            Ok(success)
+        } else {
+            Err(common::Error::NoErrorOrResult.into())
+        }
+    }
+
+    async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, Self::Error> {
+        if let common::Response::DeviceAction(success) =
+            run_command(self, common::Command::SendPin(context)).await?
         {
             Ok(success)
         } else {
@@ -388,6 +412,16 @@ where
 
     async fn toggle_passphrase(&mut self) -> Result<bool, HWIDeviceError> {
         HWI::toggle_passphrase(self)
+            .await
+            .map_err(HWIDeviceError::new)
+    }
+
+    async fn prompt_pin(&mut self) -> Result<bool, HWIDeviceError> {
+        HWI::prompt_pin(self).await.map_err(HWIDeviceError::new)
+    }
+
+    async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, HWIDeviceError> {
+        HWI::send_pin(self, context)
             .await
             .map_err(HWIDeviceError::new)
     }
