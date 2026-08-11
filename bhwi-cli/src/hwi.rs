@@ -1020,6 +1020,14 @@ async fn restore_device(
             "restore requires interactive mode",
         ));
     }
+    if device.device_type() == DeviceType::Trezor
+        && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
+    {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceFailure,
+            "Device already initialized. Call device.wipe() and try again.",
+        ));
+    }
     if device.device_type() != DeviceType::BitBox02 {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
