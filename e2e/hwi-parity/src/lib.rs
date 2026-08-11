@@ -296,6 +296,7 @@ mod tests {
     use std::{
         fs,
         io::{Read, Write},
+        net::UdpSocket,
         os::unix::net::UnixDatagram,
         path::{Path, PathBuf},
         str::FromStr,
@@ -1032,16 +1033,18 @@ mod tests {
 
     fn assert_signmessage_parity(args: Vec<String>, case: &SignMessageCase) -> Result<()> {
         let device_type = arg_value(&args, "--device-type").map(str::to_owned);
-        prepare_signmessage_run(&args)?;
+        let approval = prepare_signmessage_run(&args)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
+        drop(approval);
         assert_success("reference", &reference)?;
         assert_signmessage_shape("reference", &reference.json)?;
         let reference_payload = signmessage_payload("reference", &reference.json)?;
         signature::verify_message_signature(&case.pubkey, case.message, &reference_payload)
             .context("reference hwi signmessage signature failed cryptographic verification")?;
 
-        prepare_signmessage_run(&args)?;
+        let approval = prepare_signmessage_run(&args)?;
         let candidate = HwiBinary::candidate()?.run(args)?;
+        drop(approval);
         assert_success("candidate", &candidate)?;
         assert_signmessage_shape("candidate", &candidate.json)?;
         let candidate_payload = signmessage_payload("candidate", &candidate.json)?;
@@ -1102,14 +1105,16 @@ mod tests {
     }
 
     fn assert_signtx_parity(args: Vec<String>, case: &SigntxCase) -> Result<()> {
-        prepare_signtx_run(&args, case)?;
+        let approval = prepare_signtx_run(&args, case)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
+        drop(approval);
         assert_success("reference", &reference)?;
         assert_signtx_shape("reference", &reference.json)?;
         let reference_psbt = assert_signed_psbt("reference", &reference.json, case)?;
 
-        prepare_signtx_run(&args, case)?;
+        let approval = prepare_signtx_run(&args, case)?;
         let candidate = HwiBinary::candidate()?.run(args)?;
+        drop(approval);
         assert_success("candidate", &candidate)?;
         assert_signtx_shape("candidate", &candidate.json)?;
         let candidate_psbt = assert_signed_psbt("candidate", &candidate.json, case)?;
@@ -2414,17 +2419,18 @@ mod tests {
         ])
     }
 
-    fn prepare_signmessage_run(args: &[String]) -> Result<()> {
+    fn prepare_signmessage_run(args: &[String]) -> Result<Option<TrezorApproval>> {
         let Some(device_type) = arg_value(args, "--device-type") else {
-            return Ok(());
+            return Ok(None);
         };
         match device_type {
-            "ledger" => set_ledger_signmessage_automation(),
+            "ledger" => set_ledger_signmessage_automation().map(|()| None),
             "coldcard" => {
                 spawn_coldcard_approval();
-                Ok(())
+                Ok(None)
             }
-            _ => Ok(()),
+            "trezor" => Ok(Some(spawn_trezor_approval())),
+            _ => Ok(None),
         }
     }
 
@@ -2538,17 +2544,18 @@ mod tests {
         String::from_utf8(value.to_vec()).context("Coldcard multisig settings were not UTF-8")
     }
 
-    fn prepare_signtx_run(args: &[String], case: &SigntxCase) -> Result<()> {
+    fn prepare_signtx_run(args: &[String], case: &SigntxCase) -> Result<Option<TrezorApproval>> {
         let Some(device_type) = arg_value(args, "--device-type") else {
-            return Ok(());
+            return Ok(None);
         };
         match device_type {
-            "ledger" => set_ledger_automation(case.ledger_registers_wallet),
+            "ledger" => set_ledger_automation(case.ledger_registers_wallet).map(|()| None),
             "coldcard" => {
                 spawn_coldcard_approval();
-                Ok(())
+                Ok(None)
             }
-            _ => Ok(()),
+            "trezor" => Ok(Some(spawn_trezor_approval())),
+            _ => Ok(None),
         }
     }
 
@@ -2635,6 +2642,58 @@ mod tests {
             self.done.store(true, Ordering::Relaxed);
             let _ = self.handle.join();
         }
+    }
+
+    struct TrezorApproval {
+        stop: Arc<AtomicBool>,
+        presser: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for TrezorApproval {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(presser) = self.presser.take() {
+                let _ = presser.join();
+            }
+        }
+    }
+
+    fn spawn_trezor_approval() -> TrezorApproval {
+        let stop = Arc::new(AtomicBool::new(false));
+        let pressing = stop.clone();
+        let presser = std::thread::spawn(move || {
+            while !pressing.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(250));
+                if pressing.load(Ordering::Relaxed) || send_trezor_approval().is_err() {
+                    return;
+                }
+            }
+        });
+        TrezorApproval {
+            stop,
+            presser: Some(presser),
+        }
+    }
+
+    fn send_trezor_approval() -> Result<()> {
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        socket.connect("127.0.0.1:21325")?;
+        socket.send(&trezor_confirm_report())?;
+        Ok(())
+    }
+
+    fn trezor_confirm_report() -> [u8; 64] {
+        const DEBUGLINK_DECISION: u16 = 100;
+        const DEBUG_BUTTON_YES: [u8; 2] = [0x08, 0x01];
+
+        let mut report = [0u8; 64];
+        report[0] = 0x3f;
+        report[1] = b'#';
+        report[2] = b'#';
+        report[3..5].copy_from_slice(&DEBUGLINK_DECISION.to_be_bytes());
+        report[5..9].copy_from_slice(&(DEBUG_BUTTON_YES.len() as u32).to_be_bytes());
+        report[9..9 + DEBUG_BUTTON_YES.len()].copy_from_slice(&DEBUG_BUTTON_YES);
+        report
     }
 
     fn send_coldcard_approval() -> Result<()> {
@@ -3052,7 +3111,7 @@ mod tests {
                 "0",
                 "1",
             ]),
-            expect: if device_type == "ledger" {
+            expect: if matches!(device_type, "ledger" | "trezor") {
                 ExpectedResult::Success
             } else {
                 ExpectedResult::Error
@@ -3182,6 +3241,15 @@ mod tests {
             });
         }
 
+        if device_type == "trezor" {
+            cases.retain(|case| {
+                !case
+                    .args
+                    .iter()
+                    .any(|arg| arg == "wipe" || arg == "togglepassphrase")
+            });
+        }
+
         cases
     }
 
@@ -3272,6 +3340,20 @@ mod tests {
                     expect: ExpectedResult::Error,
                 },
             ];
+        }
+
+        if device_type == "trezor" {
+            return vec![CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "backup",
+                ]),
+                expect: ExpectedResult::Error,
+            }];
         }
 
         Vec::new()
