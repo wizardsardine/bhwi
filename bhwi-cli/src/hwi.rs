@@ -702,10 +702,7 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
     let devices = match manager.enumerate().await {
         Ok(devices) => devices,
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
     let mut response = Vec::with_capacity(devices.len());
@@ -807,10 +804,7 @@ async fn unsupported_device_action(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -850,10 +844,7 @@ async fn setup_device(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -925,10 +916,7 @@ async fn setup_device(
         .await
     {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -950,10 +938,7 @@ async fn wipe_device(selector: DeviceSelector) -> HwiResponse {
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -977,10 +962,7 @@ async fn wipe_device(selector: DeviceSelector) -> HwiResponse {
 
     match device.device().wipe_device().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1007,10 +989,7 @@ async fn restore_device(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1060,10 +1039,7 @@ async fn restore_device(
         .await
     {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1085,10 +1061,7 @@ async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1115,10 +1088,7 @@ async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
 
     match device.device().toggle_passphrase().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1162,10 +1132,7 @@ async fn device_for_pin_command(
             ));
         }
         Err(err) => {
-            return Err(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return Err(device_error(err));
         }
     };
 
@@ -1176,6 +1143,18 @@ async fn device_for_pin_command(
         ));
     }
     Ok(device)
+}
+
+/// A device waiting for its PIN reports being locked rather than failing to connect.
+fn device_error(err: impl std::fmt::Display) -> HwiError {
+    let message = err.to_string();
+    if message.contains(bhwi::trezor::TrezorError::LOCKED) {
+        return HwiError::new(
+            HwiErrorCode::DeviceNotReady,
+            bhwi::trezor::TrezorError::LOCKED,
+        );
+    }
+    HwiError::new(HwiErrorCode::DeviceConnectionError, message)
 }
 
 /// Reports the bare device message rather than the wrapped transport error.
@@ -1259,10 +1238,7 @@ async fn backup_device(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1304,10 +1280,7 @@ async fn backup_device(
                 format!("backup failed: {err}"),
             )),
         },
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1370,10 +1343,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1431,10 +1401,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
                 psbt: signed,
             })
         }
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1460,10 +1427,7 @@ async fn sign_message(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1484,10 +1448,7 @@ async fn sign_message(
                 &signature,
             ),
         }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1512,10 +1473,7 @@ async fn display_address(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1687,19 +1645,13 @@ async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) 
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
     match device.device().get_extended_pubkey(path, false).await {
         Ok(xpub) => HwiResponse::GetXpub(get_xpub_response(xpub, expert)),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1721,20 +1673,14 @@ async fn get_descriptors(selector: DeviceSelector, account: u32) -> HwiResponse 
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
     let device_type = device.device_type();
@@ -1758,10 +1704,7 @@ async fn get_descriptors(selector: DeviceSelector, account: u32) -> HwiResponse 
             let descriptor = match manager.get_descriptor(device.device(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(HwiError::new(
-                        HwiErrorCode::DeviceConnectionError,
-                        err.to_string(),
-                    ));
+                    return HwiResponse::Error(device_error(err));
                 }
             };
             let descriptor = match hwi_descriptor_string(&descriptor) {
@@ -1819,20 +1762,14 @@ async fn get_keypool(selector: DeviceSelector, request: HwiGetKeypoolRequest) ->
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
     let device_type = device.device_type();
@@ -1882,10 +1819,7 @@ async fn get_keypool(selector: DeviceSelector, request: HwiGetKeypoolRequest) ->
             let descriptor = match manager.get_descriptor(device.device(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(HwiError::new(
-                        HwiErrorCode::DeviceConnectionError,
-                        err.to_string(),
-                    ));
+                    return HwiResponse::Error(device_error(err));
                 }
             };
             let desc = match hwi_descriptor_string(&descriptor) {
