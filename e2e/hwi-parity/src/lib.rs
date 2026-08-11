@@ -2230,7 +2230,7 @@ mod tests {
             "bitbox02" => "m/49'/1'/0'/0/10",
             "ledger" => "m/44'/1'/0'/0",
             "jade" | "coldcard" => "m/44'/1'/0'",
-            _ if skipped_for_trezor(device_type) => return Ok(Vec::new()),
+            "trezor" => "m/44'/1'/0'/0/0",
             _ => bail!("unsupported signmessage device type {device_type:?}"),
         };
         let pubkey = PublicKey::new(reference_xpub(device_type, path)?.public_key);

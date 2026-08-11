@@ -26,6 +26,10 @@ pub enum TrezorCommand {
         display: bool,
         script_type: btc::InputScriptType,
     },
+    SignMessage {
+        address_n: Vec<u32>,
+        message: Vec<u8>,
+    },
     SignTx(Box<Psbt>),
     Wipe,
     TogglePassphrase,
@@ -47,6 +51,7 @@ pub enum TrezorResponse {
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
     Address(String),
+    Signature(u8, bitcoin::secp256k1::ecdsa::Signature),
 }
 
 enum PublicKeyKind {
@@ -59,6 +64,7 @@ enum State {
     AwaitFeatures,
     AwaitPublicKey(PublicKeyKind),
     AwaitAddress,
+    AwaitMessageSignature,
     AwaitSuccess,
     AwaitPassphraseCancel,
     AwaitPassphraseSetting,
@@ -171,6 +177,10 @@ where
             } => {
                 self.state = State::AwaitAddress;
                 api::get_address(address_n, display, script_type, coin)
+            }
+            TrezorCommand::SignMessage { address_n, message } => {
+                self.state = State::AwaitMessageSignature;
+                api::sign_message(address_n, message, coin)
             }
             TrezorCommand::Wipe => {
                 self.state = State::AwaitSuccess;
@@ -295,6 +305,23 @@ where
                     expect(msg_type, MessageType::Address, &payload, "reading address")
                         .map_err(E::from)?;
                 TrezorResponse::Address(address.address)
+            }
+            State::AwaitMessageSignature => {
+                let signed: btc::MessageSignature = expect(
+                    msg_type,
+                    MessageType::MessageSignature,
+                    &payload,
+                    "reading message signature",
+                )
+                .map_err(E::from)?;
+                let (header, compact) = signed
+                    .signature
+                    .split_first()
+                    .ok_or(TrezorError::InvalidInput("empty message signature".into()))?;
+                let signature = bitcoin::secp256k1::ecdsa::Signature::from_compact(compact)
+                    .map_err(|e| TrezorError::InvalidInput(e.to_string()))
+                    .map_err(E::from)?;
+                TrezorResponse::Signature(*header, signature)
             }
             State::AwaitSetupFeatures(_) => {
                 let State::AwaitSetupFeatures(ctx) =
@@ -521,11 +548,10 @@ impl TryFrom<common::Command> for TrezorCommand {
                 }
                 TrezorCommand::SignTx(Box::new(psbt))
             }
-            Command::SignMessage { .. } => {
-                return Err(TrezorError::Unsupported(
-                    "sign_message is not yet supported",
-                ));
-            }
+            Command::SignMessage { message, path } => TrezorCommand::SignMessage {
+                address_n: address_n(&path),
+                message,
+            },
             Command::RegisterWallet { .. } => {
                 return Err(TrezorError::Unsupported("register_wallet is not supported"));
             }
@@ -576,6 +602,9 @@ impl From<TrezorResponse> for common::Response {
             }
             TrezorResponse::Xpub(xpub) => common::Response::Xpub(xpub),
             TrezorResponse::Address(address) => common::Response::Address(address),
+            TrezorResponse::Signature(header, signature) => {
+                common::Response::Signature(header, signature)
+            }
             TrezorResponse::SignedPsbt(psbt) => common::Response::SignedPsbt(*psbt),
             TrezorResponse::DeviceAction(success) => common::Response::DeviceAction(success),
         }
@@ -1299,6 +1328,47 @@ mod tests {
         match interp.end().unwrap() {
             Response::MasterFingerprint(fingerprint) => assert_eq!(fingerprint, expected),
             _ => panic!("expected master fingerprint response"),
+        }
+    }
+
+    #[test]
+    fn sign_message_encodes_the_request_then_splits_the_signature() {
+        let mut interp = Interp::default().with_network(Network::Testnet);
+        let transmit = interp
+            .start(Command::SignMessage {
+                message: b"hello".to_vec(),
+                path: "m/44'/1'/0'/0/0".parse().unwrap(),
+            })
+            .unwrap();
+        let (msg_type, msg): (u16, btc::SignMessage) = decode_transmit(transmit);
+        assert_eq!(msg_type, MessageType::SignMessage as u16);
+        assert_eq!(msg.message, b"hello".to_vec());
+        assert_eq!(msg.coin_name.as_deref(), Some("Testnet"));
+        assert_eq!(
+            msg.script_type,
+            Some(btc::InputScriptType::Spendaddress as i32)
+        );
+        assert_eq!(
+            msg.address_n,
+            vec![0x8000_002c, 0x8000_0001, 0x8000_0000, 0, 0]
+        );
+
+        let mut signature = vec![0x1f];
+        signature.extend_from_slice(&[1u8; 64]);
+        let signed = framed(
+            MessageType::MessageSignature,
+            &btc::MessageSignature {
+                address: "mtestaddress".to_string(),
+                signature,
+            },
+        );
+        assert!(interp.exchange(signed).unwrap().is_none());
+        match interp.end().unwrap() {
+            Response::Signature(header, signature) => {
+                assert_eq!(header, 0x1f);
+                assert_eq!(signature.serialize_compact(), [1u8; 64]);
+            }
+            _ => panic!("expected signature response"),
         }
     }
 

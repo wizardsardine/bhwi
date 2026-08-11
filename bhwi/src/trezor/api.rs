@@ -28,6 +28,8 @@ pub enum MessageType {
     TxAck = 22,
     GetAddress = 29,
     Address = 30,
+    SignMessage = 38,
+    MessageSignature = 40,
     PassphraseRequest = 41,
     PassphraseAck = 42,
     GetFeatures = 55,
@@ -182,6 +184,18 @@ pub fn sign_tx(
 pub fn tx_ack(tx: btc::tx_ack::TransactionType) -> Vec<u8> {
     let msg = btc::TxAck { tx: Some(tx) };
     encode(MessageType::TxAck, &msg)
+}
+
+pub fn sign_message(address_n: Vec<u32>, message: Vec<u8>, coin_name: String) -> Vec<u8> {
+    let msg = btc::SignMessage {
+        address_n,
+        message,
+        coin_name: Some(coin_name),
+        script_type: Some(btc::InputScriptType::Spendaddress as i32),
+        no_script_type: Some(false),
+        ..Default::default()
+    };
+    encode(MessageType::SignMessage, &msg)
 }
 
 pub fn get_address(

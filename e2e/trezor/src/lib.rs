@@ -25,6 +25,7 @@ mod tests {
     const XPUB_49: &str = "tpubDCHRnuvE95JrpEVTUmr36sK3K9ADf3s3aztpXzL8coBeCTE8cHV8PjxS6SjWJM3GfPn798gyEa3dRPgjoUDSuNfuC9xz4PHznwKEk2XL7X1";
     const XPUB_86: &str = "tpubDC88gkaZi5HvJGxGDNLADkvtdpni3mLmx6vr2KnXmWMG8zfkBRggsxHVBkUpgcwPe2KKpkyvTJCdXHb1UHEWE64vczyyPQfHr1skBcsRedN";
     const XPUB_84: &str = "tpubDCZB6sR48s4T5Cr8qHUYSZEFCQMMHRg8AoVKVmvcAP5bRw7ArDKeoNwKAJujV3xCPkBvXH5ejSgbgyN6kREmF7sMd41NdbuHa8n1DZNxSMg";
+    const MESSAGE_SIGNATURE: &str = "3045022100ffb95fe6080ad50300854f87aef68238e83cda4f81a52dc84ffdf15cb07d53e1022052709e68e1786ece3ff1408c74f1cb39ca176a0ec88f44a52d55e9b45628dfed";
 
     async fn device() -> Trezor<TrezorTransport<EmulatorClient>> {
         let client = EmulatorClient::new(DEFAULT_EMULATOR_ADDR)
@@ -142,6 +143,22 @@ mod tests {
         };
 
         psbt
+    }
+
+    #[tokio::test]
+    async fn can_sign_message() {
+        let mut dev = device().await;
+        let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+            .await
+            .expect("connect to debuglink");
+        let (header, signature) = tokio::select! {
+            signed = dev.sign_message(b"hello", "m/44'/1'/0'/0/0".parse().unwrap()) => {
+                signed.expect("sign message")
+            }
+            _ = debug.confirm_until_done(Duration::from_millis(300)) => unreachable!(),
+        };
+        assert_eq!(header, 0x1f);
+        assert_eq!(signature.to_string(), MESSAGE_SIGNATURE);
     }
 
     #[tokio::test]
