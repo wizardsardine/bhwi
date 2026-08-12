@@ -1500,7 +1500,7 @@ async fn display_address(
                 Err(single_sig_error) => {
                     if matches!(
                         device.device_type(),
-                        DeviceType::Coldcard | DeviceType::Jade
+                        DeviceType::Coldcard | DeviceType::Jade | DeviceType::Trezor
                     ) {
                         match multisig_display_address_from_descriptor(&descriptor) {
                             Ok(address) => Ok(DisplayAddress::ByMultisig(address)),
