@@ -203,12 +203,14 @@ pub fn get_address(
     show_display: bool,
     script_type: btc::InputScriptType,
     coin_name: String,
+    multisig: Option<btc::MultisigRedeemScriptType>,
 ) -> Vec<u8> {
     let msg = btc::GetAddress {
         address_n,
         show_display: Some(show_display),
         coin_name: Some(coin_name),
         script_type: Some(script_type as i32),
+        multisig,
         ..Default::default()
     };
     encode(MessageType::GetAddress, &msg)

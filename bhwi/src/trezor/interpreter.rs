@@ -9,6 +9,7 @@ use bitcoin::{Network, NetworkKind, Transaction};
 
 use crate::Interpreter;
 use crate::common;
+use crate::miniscript::descriptor::{DescriptorPublicKey, SinglePubKey, Wildcard};
 use crate::trezor::api::{self, MessageType};
 use crate::trezor::error::TrezorError;
 use crate::trezor::proto::{bitcoin as btc, common as pb, management as mgmt};
@@ -26,6 +27,7 @@ pub enum TrezorCommand {
         display: bool,
         script_type: btc::InputScriptType,
     },
+    GetMultisigAddress(common::MultisigDisplayAddress),
     SignMessage {
         address_n: Vec<u32>,
         message: Vec<u8>,
@@ -64,6 +66,7 @@ enum State {
     AwaitFeatures,
     AwaitPublicKey(PublicKeyKind),
     AwaitAddress,
+    AwaitMultisigAddress(Box<MultisigCtx>),
     AwaitMessageSignature,
     AwaitSuccess,
     AwaitPassphraseCancel,
@@ -83,6 +86,13 @@ struct SetupCtx {
     label: Option<String>,
     passphrase_protection: bool,
     host_entropy: [u8; 32],
+}
+
+struct MultisigCtx {
+    multisig: btc::MultisigRedeemScriptType,
+    script_type: btc::InputScriptType,
+    paths: Vec<Vec<u32>>,
+    next: usize,
 }
 
 struct SignCtx {
@@ -176,7 +186,25 @@ where
                 script_type,
             } => {
                 self.state = State::AwaitAddress;
-                api::get_address(address_n, display, script_type, coin)
+                api::get_address(address_n, display, script_type, coin, None)
+            }
+            TrezorCommand::GetMultisigAddress(address) => {
+                let script_type = multisig_script_type(address.address_type);
+                let (multisig, paths) = multisig_script(&address)?;
+                let bytes = api::get_address(
+                    paths[0].clone(),
+                    true,
+                    script_type,
+                    coin,
+                    Some(multisig.clone()),
+                );
+                self.state = State::AwaitMultisigAddress(Box::new(MultisigCtx {
+                    multisig,
+                    script_type,
+                    paths,
+                    next: 1,
+                }));
+                bytes
             }
             TrezorCommand::SignMessage { address_n, message } => {
                 self.state = State::AwaitMessageSignature;
@@ -255,7 +283,25 @@ where
             return Ok(Some(T::from(api::passphrase_ack_from_host(passphrase))));
         }
         if msg_type == MessageType::Failure as u16 && !matches!(self.state, State::AwaitPinResult) {
+            if let State::AwaitMultisigAddress(ctx) = &mut self.state
+                && ctx.next < ctx.paths.len()
+            {
+                let bytes = api::get_address(
+                    ctx.paths[ctx.next].clone(),
+                    true,
+                    ctx.script_type,
+                    coin_name(self.network),
+                    Some(ctx.multisig.clone()),
+                );
+                ctx.next += 1;
+                return Ok(Some(T::from(bytes)));
+            }
             let failure: pb::Failure = api::decode(&payload).map_err(E::from)?;
+            if matches!(self.state, State::AwaitMultisigAddress(_)) {
+                return Err(E::from(TrezorError::InvalidInput(
+                    "No path supplied matched device keys".into(),
+                )));
+            }
             return Err(E::from(failure_error(failure)));
         }
         if msg_type == MessageType::PinMatrixRequest as u16
@@ -301,6 +347,12 @@ where
                 }
             }
             State::AwaitAddress => {
+                let address: btc::Address =
+                    expect(msg_type, MessageType::Address, &payload, "reading address")
+                        .map_err(E::from)?;
+                TrezorResponse::Address(address.address)
+            }
+            State::AwaitMultisigAddress(_) => {
                 let address: btc::Address =
                     expect(msg_type, MessageType::Address, &payload, "reading address")
                         .map_err(E::from)?;
@@ -535,10 +587,8 @@ impl TryFrom<common::Command> for TrezorCommand {
                     "descriptor address display is not yet supported",
                 ));
             }
-            Command::DisplayAddress(common::DisplayAddress::ByMultisig(_), _) => {
-                return Err(TrezorError::UnsupportedDisplayAddress(
-                    "multisig address display is not yet supported",
-                ));
+            Command::DisplayAddress(common::DisplayAddress::ByMultisig(address), _) => {
+                TrezorCommand::GetMultisigAddress(address)
             }
             Command::SignTx(psbt, context) => {
                 if context.is_some() {
@@ -741,6 +791,118 @@ fn prev_output(tx: &Transaction, index: usize) -> Result<TxType, TrezorError> {
         }],
         ..Default::default()
     })
+}
+
+fn multisig_script_type(address_type: common::MultisigAddressType) -> btc::InputScriptType {
+    match address_type {
+        common::MultisigAddressType::Legacy => btc::InputScriptType::Spendmultisig,
+        common::MultisigAddressType::ShWit => btc::InputScriptType::Spendp2shwitness,
+        common::MultisigAddressType::Wit => btc::InputScriptType::Spendwitness,
+    }
+}
+
+struct MultisigKey {
+    pubkey: Vec<u8>,
+    path: Vec<u32>,
+    node: btc::multisig_redeem_script_type::HdNodePathType,
+}
+
+fn origin_path(origin: Option<&(Fingerprint, DerivationPath)>) -> Vec<u32> {
+    origin.map_or_else(Vec::new, |(_, path)| path.to_u32_vec())
+}
+
+fn multisig_script(
+    address: &common::MultisigDisplayAddress,
+) -> Result<(btc::MultisigRedeemScriptType, Vec<Vec<u32>>), TrezorError> {
+    let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+    let mut keys = address
+        .keys
+        .iter()
+        .map(|key| multisig_key(&secp, key))
+        .collect::<Result<Vec<_>, _>>()?;
+    let threshold = usize::from(address.threshold);
+    if keys.is_empty() || threshold == 0 || threshold > keys.len() {
+        return Err(TrezorError::InvalidInput(format!(
+            "multisig address display needs a threshold of 1 to {}, got {}",
+            keys.len(),
+            address.threshold
+        )));
+    }
+    let paths = keys.iter().map(|key| key.path.clone()).collect();
+    if address.sorted {
+        keys.sort_by(|left, right| left.pubkey.cmp(&right.pubkey));
+    }
+    Ok((
+        btc::MultisigRedeemScriptType {
+            signatures: vec![Vec::new(); keys.len()],
+            m: u32::from(address.threshold),
+            pubkeys: keys.into_iter().map(|key| key.node).collect(),
+            ..Default::default()
+        },
+        paths,
+    ))
+}
+
+fn multisig_key(
+    secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::VerifyOnly>,
+    key: &DescriptorPublicKey,
+) -> Result<MultisigKey, TrezorError> {
+    match key {
+        DescriptorPublicKey::XPub(key) => {
+            if key.wildcard != Wildcard::None {
+                return Err(TrezorError::InvalidInput(
+                    "multisig address display requires concrete key derivation paths".into(),
+                ));
+            }
+            let derived = key
+                .xkey
+                .derive_pub(secp, &key.derivation_path)
+                .map_err(|e| TrezorError::InvalidInput(e.to_string()))?;
+            let mut path = origin_path(key.origin.as_ref());
+            path.extend(key.derivation_path.to_u32_vec());
+            Ok(MultisigKey {
+                pubkey: derived.public_key.serialize().to_vec(),
+                path,
+                node: btc::multisig_redeem_script_type::HdNodePathType {
+                    node: pb::HdNodeType {
+                        depth: u32::from(key.xkey.depth),
+                        fingerprint: u32::from_be_bytes(key.xkey.parent_fingerprint.to_bytes()),
+                        child_num: u32::from(key.xkey.child_number),
+                        chain_code: key.xkey.chain_code.to_bytes().to_vec(),
+                        private_key: None,
+                        public_key: key.xkey.public_key.serialize().to_vec(),
+                    },
+                    address_n: key.derivation_path.to_u32_vec(),
+                },
+            })
+        }
+        DescriptorPublicKey::Single(key) => {
+            let SinglePubKey::FullKey(pubkey) = key.key else {
+                return Err(TrezorError::InvalidInput(
+                    "multisig address display does not support x-only public keys".into(),
+                ));
+            };
+            let pubkey = pubkey.to_bytes();
+            Ok(MultisigKey {
+                pubkey: pubkey.clone(),
+                path: origin_path(key.origin.as_ref()),
+                node: btc::multisig_redeem_script_type::HdNodePathType {
+                    node: pb::HdNodeType {
+                        depth: 0,
+                        fingerprint: 0,
+                        child_num: 0,
+                        chain_code: vec![0; 32],
+                        private_key: None,
+                        public_key: pubkey,
+                    },
+                    address_n: Vec::new(),
+                },
+            })
+        }
+        DescriptorPublicKey::MultiXPub(_) => Err(TrezorError::InvalidInput(
+            "multisig address display does not support multipath keys".into(),
+        )),
+    }
 }
 
 fn our_derivation(
@@ -1411,6 +1573,234 @@ mod tests {
             Response::Address(address) => assert_eq!(address, "tb1pexampleaddress"),
             _ => panic!("expected address response"),
         }
+    }
+
+    const COSIGNER_A: &str = "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+    const COSIGNER_B: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const OUR_COSIGNER: &str = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+
+    fn multisig_keys() -> Vec<DescriptorPublicKey> {
+        [
+            format!("[11111111/48h/1h/0h/2h/0/0]{COSIGNER_A}"),
+            format!("[22222222/48h/1h/0h/2h/0/1]{COSIGNER_B}"),
+            format!("[33333333/48h/1h/0h/2h/0/2]{OUR_COSIGNER}"),
+        ]
+        .iter()
+        .map(|key| key.parse().unwrap())
+        .collect()
+    }
+
+    fn multisig_address(sorted: bool) -> DisplayAddress {
+        DisplayAddress::ByMultisig(common::MultisigDisplayAddress {
+            threshold: 2,
+            address_type: common::MultisigAddressType::Wit,
+            sorted,
+            keys: multisig_keys(),
+        })
+    }
+
+    fn start_multisig(interp: &mut Interp, address: DisplayAddress) -> btc::GetAddress {
+        let transmit = interp
+            .start(Command::DisplayAddress(address, None))
+            .unwrap();
+        let (msg_type, msg): (u16, btc::GetAddress) = decode_transmit(transmit);
+        assert_eq!(msg_type, MessageType::GetAddress as u16);
+        msg
+    }
+
+    fn refuse_path(interp: &mut Interp) -> Option<btc::GetAddress> {
+        let failure = pb::Failure {
+            code: Some(pb::failure::FailureType::FailureProcessError as i32),
+            message: Some("Failed to derive scriptPubKey".to_string()),
+        };
+        interp
+            .exchange(framed(MessageType::Failure, &failure))
+            .expect("probe the next path")
+            .map(|transmit| decode_transmit::<btc::GetAddress>(transmit).1)
+    }
+
+    fn path_of(key: &DescriptorPublicKey) -> Vec<u32> {
+        let DescriptorPublicKey::Single(key) = key else {
+            panic!("multisig test keys are bare public keys")
+        };
+        key.origin.as_ref().expect("test key origin").1.to_u32_vec()
+    }
+
+    fn cosigner_pubkeys(msg: &btc::GetAddress) -> Vec<String> {
+        msg.multisig
+            .as_ref()
+            .expect("multisig script")
+            .pubkeys
+            .iter()
+            .map(|key| hex::encode(&key.node.public_key))
+            .collect()
+    }
+
+    #[test]
+    fn display_address_by_multisig_sends_the_cosigner_set() {
+        let mut interp = Interp::default().with_network(Network::Testnet);
+        let msg = start_multisig(&mut interp, multisig_address(false));
+
+        let multisig = msg.multisig.as_ref().expect("multisig script");
+        assert_eq!(multisig.m, 2);
+        assert_eq!(multisig.signatures.len(), 3);
+        assert!(multisig.signatures.iter().all(|sig| sig.is_empty()));
+        assert_eq!(
+            msg.script_type,
+            Some(btc::InputScriptType::Spendwitness as i32)
+        );
+        assert_eq!(msg.show_display, Some(true));
+        assert_eq!(msg.coin_name.as_deref(), Some("Testnet"));
+        assert_eq!(
+            msg.address_n,
+            vec![0x8000_0030, 0x8000_0001, 0x8000_0000, 0x8000_0002, 0, 0]
+        );
+        assert_eq!(
+            cosigner_pubkeys(&msg),
+            vec![COSIGNER_A, COSIGNER_B, OUR_COSIGNER]
+        );
+
+        let address = framed(
+            MessageType::Address,
+            &btc::Address {
+                address: "tb1qmultisig".to_string(),
+                mac: None,
+            },
+        );
+        assert!(interp.exchange(address).unwrap().is_none());
+        match interp.end().unwrap() {
+            Response::Address(address) => assert_eq!(address, "tb1qmultisig"),
+            _ => panic!("expected address response"),
+        }
+    }
+
+    #[test]
+    fn display_address_by_multisig_sorts_keys_for_sortedmulti() {
+        let mut interp = Interp::default().with_network(Network::Testnet);
+        let msg = start_multisig(&mut interp, multisig_address(true));
+
+        assert_eq!(
+            cosigner_pubkeys(&msg),
+            vec![COSIGNER_B, OUR_COSIGNER, COSIGNER_A]
+        );
+        assert_eq!(
+            msg.address_n,
+            vec![0x8000_0030, 0x8000_0001, 0x8000_0000, 0x8000_0002, 0, 0]
+        );
+    }
+
+    const UNCOMPRESSED_COSIGNER: &str = "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8";
+
+    #[test]
+    fn display_address_by_multisig_keeps_the_descriptor_key_encoding() {
+        let mut interp = Interp::default().with_network(Network::Testnet);
+        let address = DisplayAddress::ByMultisig(common::MultisigDisplayAddress {
+            threshold: 2,
+            address_type: common::MultisigAddressType::Legacy,
+            sorted: false,
+            keys: [
+                format!("[11111111/45h/0/0]{UNCOMPRESSED_COSIGNER}"),
+                format!("[33333333/45h/0/0]{OUR_COSIGNER}"),
+            ]
+            .iter()
+            .map(|key| key.parse().unwrap())
+            .collect(),
+        });
+        let msg = start_multisig(&mut interp, address);
+
+        assert_eq!(
+            cosigner_pubkeys(&msg),
+            vec![UNCOMPRESSED_COSIGNER, OUR_COSIGNER]
+        );
+        assert_eq!(
+            msg.script_type,
+            Some(btc::InputScriptType::Spendmultisig as i32)
+        );
+    }
+
+    const XPUB_COSIGNER: &str = "tpubDCHRnuvE95JrpEVTUmr36sK3K9ADf3s3aztpXzL8coBeCTE8cHV8PjxS6SjWJM3GfPn798gyEa3dRPgjoUDSuNfuC9xz4PHznwKEk2XL7X1";
+    const XPUB_OURS: &str = "tpubDCZB6sR48s4T5Cr8qHUYSZEFCQMMHRg8AoVKVmvcAP5bRw7ArDKeoNwKAJujV3xCPkBvXH5ejSgbgyN6kREmF7sMd41NdbuHa8n1DZNxSMg";
+
+    #[test]
+    fn display_address_by_multisig_builds_hd_nodes_from_extended_keys() {
+        let mut interp = Interp::default().with_network(Network::Testnet);
+        let address = DisplayAddress::ByMultisig(common::MultisigDisplayAddress {
+            threshold: 2,
+            address_type: common::MultisigAddressType::Wit,
+            sorted: false,
+            keys: [
+                format!("[f5acc2fd/49h/1h/0h]{XPUB_COSIGNER}/0/7"),
+                format!("[00000000/84h/1h/0h]{XPUB_OURS}/0/7"),
+            ]
+            .iter()
+            .map(|key| key.parse().unwrap())
+            .collect(),
+        });
+        let msg = start_multisig(&mut interp, address);
+
+        let xpub = Xpub::from_str(XPUB_COSIGNER).unwrap();
+        let entry = &msg.multisig.as_ref().expect("multisig script").pubkeys[0];
+        assert_eq!(entry.node.depth, 3);
+        assert_eq!(entry.node.child_num, 0x8000_0000);
+        assert_eq!(
+            entry.node.fingerprint,
+            u32::from_be_bytes(xpub.parent_fingerprint.to_bytes())
+        );
+        assert_ne!(
+            entry.node.fingerprint,
+            u32::from_be_bytes(xpub.fingerprint().to_bytes())
+        );
+        assert_eq!(entry.node.chain_code, xpub.chain_code.to_bytes());
+        assert_eq!(entry.node.public_key, xpub.public_key.serialize());
+        assert_eq!(entry.address_n, vec![0, 7]);
+        assert_eq!(
+            msg.address_n,
+            vec![0x8000_0031, 0x8000_0001, 0x8000_0000, 0, 7]
+        );
+    }
+
+    #[test]
+    fn display_address_by_multisig_probes_each_cosigner_path() {
+        let mut interp = Interp::default().with_network(Network::Testnet);
+        let first = start_multisig(&mut interp, multisig_address(false));
+        assert_eq!(first.address_n, path_of(&multisig_keys()[0]));
+
+        let second = refuse_path(&mut interp).expect("second candidate");
+        assert_eq!(second.address_n, path_of(&multisig_keys()[1]));
+        assert_eq!(second.multisig, first.multisig);
+
+        let third = refuse_path(&mut interp).expect("third candidate");
+        assert_eq!(third.address_n, path_of(&multisig_keys()[2]));
+
+        let address = framed(
+            MessageType::Address,
+            &btc::Address {
+                address: "tb1qmultisig".to_string(),
+                mac: None,
+            },
+        );
+        assert!(interp.exchange(address).unwrap().is_none());
+        match interp.end().unwrap() {
+            Response::Address(address) => assert_eq!(address, "tb1qmultisig"),
+            _ => panic!("expected address response"),
+        }
+    }
+
+    #[test]
+    fn display_address_by_multisig_reports_when_no_path_matches() {
+        let mut interp = Interp::default().with_network(Network::Testnet);
+        start_multisig(&mut interp, multisig_address(false));
+        assert!(refuse_path(&mut interp).is_some());
+        assert!(refuse_path(&mut interp).is_some());
+
+        let failure = pb::Failure {
+            code: Some(pb::failure::FailureType::FailureProcessError as i32),
+            message: Some("Failed to derive scriptPubKey".to_string()),
+        };
+        assert!(matches!(
+            interp.exchange(framed(MessageType::Failure, &failure)),
+            Err(Error::InvalidInput(_))
+        ));
     }
 
     #[test]
