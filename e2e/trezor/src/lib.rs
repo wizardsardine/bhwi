@@ -4,15 +4,17 @@ mod debuglink;
 #[cfg(test)]
 mod tests {
     use bhwi::bitcoin::Network;
-    use bhwi_async::{HWI, Trezor, transport::trezor::TrezorTransport};
+    use bhwi::common::{MultisigAddressType, MultisigDisplayAddress};
+    use bhwi_async::{DisplayAddress, HWI, Trezor, transport::trezor::TrezorTransport};
     use bhwi_cli::trezor::emulator::{DEFAULT_EMULATOR_ADDR, EmulatorClient};
 
     use crate::debuglink::{DEFAULT_DEBUGLINK_ADDR, DebugLink};
     use bhwi::bitcoin::{
-        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+        Amount, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
         absolute::LockTime,
         address::Address,
-        bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
+        bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub},
+        blockdata::{opcodes::all::OP_CHECKMULTISIG, script::Builder},
         psbt::{Input, Output, Psbt},
         secp256k1::Secp256k1,
         transaction::Version as TxVersion,
@@ -159,6 +161,145 @@ mod tests {
         };
         assert_eq!(header, 0x1f);
         assert_eq!(signature.to_string(), MESSAGE_SIGNATURE);
+    }
+
+    #[tokio::test]
+    async fn can_display_multisig_address() {
+        let secp = Secp256k1::new();
+        let mut dev = device().await;
+        let device_fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let cosigner_master = Xpriv::new_master(Network::Testnet, &[9u8; 32]).unwrap();
+        let cosigner_fingerprint = cosigner_master.fingerprint(&secp);
+        let child_path: DerivationPath = "0/0".parse().unwrap();
+
+        for (account_path, address_type) in [
+            ("48'/1'/0'/0'", MultisigAddressType::Legacy),
+            ("48'/1'/0'/1'", MultisigAddressType::ShWit),
+            ("48'/1'/0'/2'", MultisigAddressType::Wit),
+        ] {
+            let account_path: DerivationPath = account_path.parse().unwrap();
+            let device_xpub = dev
+                .get_extended_pubkey(account_path.clone(), false)
+                .await
+                .unwrap();
+            let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path).unwrap();
+            let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
+            let device_child = device_xpub.derive_pub(&secp, &child_path).unwrap();
+            let cosigner_child = cosigner_xpub.derive_pub(&secp, &child_path).unwrap();
+
+            let mut public_keys = [
+                PublicKey::new(device_child.public_key),
+                PublicKey::new(cosigner_child.public_key),
+            ];
+            public_keys.sort_by_key(|key| key.inner.serialize());
+            let redeem_script = Builder::new()
+                .push_int(2)
+                .push_key(&public_keys[0])
+                .push_key(&public_keys[1])
+                .push_int(2)
+                .push_opcode(OP_CHECKMULTISIG)
+                .into_script();
+            let expected_script = match address_type {
+                MultisigAddressType::Legacy => redeem_script.to_p2sh(),
+                MultisigAddressType::ShWit => redeem_script.to_p2wsh().to_p2sh(),
+                MultisigAddressType::Wit => redeem_script.to_p2wsh(),
+            };
+            let expected = Address::from_script(&expected_script, Network::Testnet)
+                .unwrap()
+                .to_string();
+
+            let display = DisplayAddress::ByMultisig(MultisigDisplayAddress {
+                threshold: 2,
+                address_type,
+                sorted: true,
+                keys: vec![
+                    format!(
+                        "[{cosigner_fingerprint}/{account_path}/1/0]{}",
+                        cosigner_child.public_key
+                    )
+                    .parse()
+                    .unwrap(),
+                    format!(
+                        "[{device_fingerprint}/{account_path}/0/0]{}",
+                        device_child.public_key
+                    )
+                    .parse()
+                    .unwrap(),
+                ],
+            });
+
+            let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+                .await
+                .expect("connect to debuglink");
+            let address = tokio::select! {
+                shown = dev.display_address(display, None) => {
+                    shown.expect("display multisig address")
+                }
+                _ = debug.confirm_until_done(Duration::from_millis(300)) => unreachable!(),
+            };
+            assert_eq!(address, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn can_display_multisig_address_from_extended_keys() {
+        let secp = Secp256k1::new();
+        let mut dev = device().await;
+        let device_fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let cosigner_master = Xpriv::new_master(Network::Testnet, &[9u8; 32]).unwrap();
+        let cosigner_fingerprint = cosigner_master.fingerprint(&secp);
+        let account_path: DerivationPath = "48'/1'/0'/2'".parse().unwrap();
+        let child_path: DerivationPath = "0/0".parse().unwrap();
+
+        let device_xpub = dev
+            .get_extended_pubkey(account_path.clone(), false)
+            .await
+            .unwrap();
+        let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path).unwrap();
+        let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
+        let device_child = device_xpub.derive_pub(&secp, &child_path).unwrap();
+        let cosigner_child = cosigner_xpub.derive_pub(&secp, &child_path).unwrap();
+
+        let mut public_keys = [
+            PublicKey::new(device_child.public_key),
+            PublicKey::new(cosigner_child.public_key),
+        ];
+        public_keys.sort_by_key(|key| key.inner.serialize());
+        let redeem_script = Builder::new()
+            .push_int(2)
+            .push_key(&public_keys[0])
+            .push_key(&public_keys[1])
+            .push_int(2)
+            .push_opcode(OP_CHECKMULTISIG)
+            .into_script();
+        let expected = Address::from_script(&redeem_script.to_p2wsh(), Network::Testnet)
+            .unwrap()
+            .to_string();
+
+        let display = DisplayAddress::ByMultisig(MultisigDisplayAddress {
+            threshold: 2,
+            address_type: MultisigAddressType::Wit,
+            sorted: true,
+            keys: vec![
+                format!("[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/0/0")
+                    .parse()
+                    .unwrap(),
+                format!("[{device_fingerprint}/{account_path}]{device_xpub}/0/0")
+                    .parse()
+                    .unwrap(),
+            ],
+        });
+
+        let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+            .await
+            .expect("connect to debuglink");
+        let address = tokio::select! {
+            shown = dev.display_address(display, None) => {
+                shown.expect("display multisig address")
+            }
+            _ = debug.confirm_until_done(Duration::from_millis(300)) => unreachable!(),
+        };
+        assert_eq!(address, expected);
     }
 
     #[tokio::test]
