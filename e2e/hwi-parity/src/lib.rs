@@ -506,13 +506,17 @@ mod tests {
             return Ok(());
         };
 
-        for (message, path) in signmessage_arg_cases(&device_type)? {
-            assert_signmessage_parity(signmessage_args(&device_type, message, path))
-                .with_context(|| {
-                    format!(
-                        "signmessage parity failed for {device_type}, message {message:?}, path {path}"
-                    )
-                })?;
+        for case in signmessage_arg_cases(&device_type)? {
+            assert_signmessage_parity(
+                signmessage_args(&device_type, case.message, case.path),
+                &case,
+            )
+            .with_context(|| {
+                format!(
+                    "signmessage parity failed for {device_type}, message {:?}, path {}",
+                    case.message, case.path
+                )
+            })?;
         }
 
         Ok(())
@@ -895,18 +899,25 @@ mod tests {
         Ok(())
     }
 
-    fn assert_signmessage_parity(args: Vec<String>) -> Result<()> {
+    fn assert_signmessage_parity(args: Vec<String>, case: &SignMessageCase) -> Result<()> {
         let device_type = arg_value(&args, "--device-type").map(str::to_owned);
         prepare_signmessage_run(&args)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
         assert_success("reference", &reference)?;
         assert_signmessage_shape("reference", &reference.json)?;
+        let reference_payload = signmessage_payload("reference", &reference.json)?;
+        signature::verify_message_signature(&case.pubkey, case.message, &reference_payload)
+            .context("reference hwi signmessage signature failed cryptographic verification")?;
 
         prepare_signmessage_run(&args)?;
         let candidate = HwiBinary::candidate()?.run(args)?;
         assert_success("candidate", &candidate)?;
         assert_signmessage_shape("candidate", &candidate.json)?;
+        let candidate_payload = signmessage_payload("candidate", &candidate.json)?;
+        signature::verify_message_signature(&case.pubkey, case.message, &candidate_payload)
+            .context("candidate hwi signmessage signature failed cryptographic verification")?;
 
+        // BitBox02 signatures are nondeterministic, so both sides only have to verify.
         if device_type.as_deref() == Some("bitbox02") {
             return Ok(());
         }
@@ -1628,6 +1639,12 @@ mod tests {
         const ALL: [Self; 3] = [Self::Legacy, Self::ShWit, Self::Wit];
     }
 
+    struct SignMessageCase {
+        message: &'static str,
+        path: &'static str,
+        pubkey: PublicKey,
+    }
+
     fn build_singlesig_signtx_case(
         device_type: &str,
         wrapper: LedgerSinglesigWrapper,
@@ -2071,14 +2088,22 @@ mod tests {
         ])
     }
 
-    fn signmessage_arg_cases(device_type: &str) -> Result<Vec<(&'static str, &'static str)>> {
+    fn signmessage_arg_cases(device_type: &str) -> Result<Vec<SignMessageCase>> {
         let path = match device_type {
             "bitbox02" => "m/49'/1'/0'/0/10",
             "ledger" => "m/44'/1'/0'/0",
             "jade" | "coldcard" => "m/44'/1'/0'",
             _ => bail!("unsupported signmessage device type {device_type:?}"),
         };
-        Ok(vec![("hello", path), ("hello world", path)])
+        let pubkey = PublicKey::new(reference_xpub(device_type, path)?.public_key);
+        Ok(["hello", "hello world"]
+            .into_iter()
+            .map(|message| SignMessageCase {
+                message,
+                path,
+                pubkey,
+            })
+            .collect())
     }
 
     fn displayaddress_arg_cases(device_type: &str) -> Result<Vec<DisplayAddressCase>> {
