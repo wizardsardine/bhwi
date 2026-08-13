@@ -10,6 +10,10 @@ enumeration, command parsing, command output, or HWI status docs.
   shapes, error codes, and base64 formats where parity is claimed.
 - Parse unsupported Python HWI commands and return Python-HWI-shaped unsupported
   errors instead of clap parse errors.
+- Match Python HWI's exit statuses: `0` for success, `--help`, `--version`, and
+  every runtime `{"error", "code"}` JSON response; `2` for usage errors, which
+  print code `-2` JSON on stdout and usage text on stderr; `1` is reserved for
+  internal crashes. The harness asserts process status, not just JSON.
 - Record every intentional divergence in `docs/HWI_PARITY.md`.
 - Treat the unmodified upstream HWI device suite as the final acceptance gate.
   Do not patch upstream tests or add BHWI-owned skips.
