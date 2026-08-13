@@ -15,6 +15,13 @@ commands and devices where parity is claimed.
   `hwi` for the emulated device.
 - The suite asserts parity for the implemented HWI command set with the
   intended emulator family active.
+- `signmessage` payloads are verified cryptographically on both sides: the
+  BIP-137 signature must recover the public key the reference device reports at
+  the requested derivation path over `signed_msg_hash(message)`.
+- `signtx` results are verified against the recomputed sighash (BIP143 for
+  segwit v0, legacy otherwise) for the expected device key, and the reference
+  and candidate PSBTs are then compared field for field with only the signature
+  values excluded. Per-input signature key sets must still match exactly.
 - Emulator CI (`.github/workflows/emulators.yml`) runs the matching
   `hwi-parity-<device>` app inside each device job, then stops the shared
   emulator and runs the pinned upstream HWI suite as that job's final test
@@ -116,6 +123,11 @@ device-management commands `setup`, `wipe`, `restore`, and
 passphrase setting through both implementations, returning it to its original
 state. Dedicated CLI lifecycle tests start fresh uninitialized simulators to
 exercise successful setup, wipe, and restore flows.
+
+Known divergence: BitBox02 produces nondeterministic signatures, so the
+`signmessage` suite skips byte-exact JSON equality for `bitbox02` only. Both
+sides must still recover the same public key from their own signature, so the
+weaker comparison is limited to the signature encoding itself.
 
 The simulator deliberately stops replying after a successful factory reset.
 CI therefore treats only a read-side disconnect after the reset request as
