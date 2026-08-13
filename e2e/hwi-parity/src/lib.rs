@@ -981,10 +981,8 @@ mod tests {
         let candidate_psbt = assert_signed_psbt("candidate", &candidate.json, case)?;
 
         assert_eq!(reference.json["signed"], candidate.json["signed"]);
-        assert_eq!(
-            reference_psbt.unsigned_tx, candidate_psbt.unsigned_tx,
-            "reference and candidate signed different transactions"
-        );
+        signature::assert_psbt_parity(&reference_psbt, &candidate_psbt)
+            .context("reference and candidate signed PSBTs diverged")?;
 
         Ok(())
     }
@@ -1724,7 +1722,7 @@ mod tests {
                 },
             }],
             ledger_registers_wallet: false,
-            verify_signatures: device_type == "ledger",
+            verify_signatures: true,
         })
     }
 
