@@ -558,6 +558,8 @@ mod tests {
         fs::create_dir_all(&reference_dir)?;
         fs::create_dir_all(&candidate_dir)?;
 
+        store_coldcard_backup_password()?;
+
         let reference_approval = ColdcardBackupApproval::spawn();
         let reference = HwiBinary::reference()?.run_in_dir(args.clone(), &reference_dir);
         reference_approval.finish();
@@ -2165,7 +2167,7 @@ mod tests {
                     if approving.load(Ordering::Relaxed) {
                         break;
                     }
-                    let _ = send_coldcard_backup_approval(&approving);
+                    let _ = send_coldcard_backup_approval();
                 }
             });
             Self { done, handle }
@@ -2182,24 +2184,19 @@ mod tests {
         Ok(())
     }
 
-    fn send_coldcard_backup_approval(done: &AtomicBool) -> Result<()> {
-        let client_socket = format!(
-            "/tmp/bhwi-hwi-parity-ckcc-backup-{}.sock",
-            std::process::id()
-        );
-        let _ = std::fs::remove_file(&client_socket);
-        let socket = UnixDatagram::bind(&client_socket)?;
-        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-        socket.connect("/tmp/ckcc-simulator.sock")?;
-        coldcard_hid_exchange(&socket, b"XKEYy")?;
-        for _ in 0..20 {
-            if done.load(Ordering::Relaxed) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-            coldcard_hid_exchange(&socket, b"XKEY1")?;
-        }
-        let _ = std::fs::remove_file(client_socket);
+    /// Stores a backup password on the simulator so `backup` offers "use the
+    /// same password as last time" instead of generating fresh words and
+    /// quizzing them back (firmware shared/backups.py: a stored `bkpw` sets
+    /// `skip_quiz`). The quiz shuffles three choices per question, so without
+    /// this the harness can only guess, and a wrong guess costs a two second
+    /// penalty pause before the question is asked again.
+    fn store_coldcard_backup_password() -> Result<()> {
+        coldcard_control_exchange(b"EXECsettings.set('bkpw','a'*32);settings.save()")?;
+        Ok(())
+    }
+
+    fn send_coldcard_backup_approval() -> Result<()> {
+        coldcard_control_exchange(b"XKEYy")?;
         Ok(())
     }
 
