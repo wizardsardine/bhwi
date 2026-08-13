@@ -322,7 +322,7 @@
 
                 set -euo pipefail
                 export REFERENCE_HWI_BIN="${pkgs.lib.getExe hwiReferenceBhwi}"
-                export HWI_BIN="''${HWI_BIN:-$PWD/target/debug/hwi}"
+                export HWI_BIN="''${HWI_BIN:-''${CARGO_TARGET_DIR:-$PWD/target}/debug/hwi}"
                 export HWI_PARITY_DEVICE_TYPE="${device}"
 
                 cargo build -p bhwi-cli --bins
@@ -623,7 +623,7 @@
               export GIT_CONFIG_SYSTEM="$IDF_PATH/etc/gitconfig"
             fi
             export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
-            export HWI_BIN="''${HWI_BIN:-$PWD/target/debug/hwi}"
+            export HWI_BIN="''${HWI_BIN:-''${CARGO_TARGET_DIR:-$PWD/target}/debug/hwi}"
 
             cargo build -p bhwi-cli --bin hwi
             exec ${pkgs.bash}/bin/bash ${./nix/scripts/run-hwi-upstream-suite.sh} "$@"
@@ -641,7 +641,7 @@
                 export HWI_UPSTREAM_SRC="${python-hwi}"
                 export HWI_BITCOIND="''${HWI_BITCOIND:-${pkgs.bitcoin}/bin/bitcoind}"
                 export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
-                export HWI_BIN="''${HWI_BIN:-$PWD/target/debug/hwi}"
+                export HWI_BIN="''${HWI_BIN:-''${CARGO_TARGET_DIR:-$PWD/target}/debug/hwi}"
 
                 cargo build -p bhwi-cli --bin hwi
                 exec ${pkgs.bash}/bin/bash ${./nix/scripts/run-hwi-upstream-suite.sh} ${device} "$@"
