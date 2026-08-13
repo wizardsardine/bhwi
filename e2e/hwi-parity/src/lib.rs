@@ -11,6 +11,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+pub mod signature;
+
 #[derive(Clone, Debug)]
 pub struct HwiBinary {
     label: &'static str,
