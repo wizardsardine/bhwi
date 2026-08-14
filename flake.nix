@@ -685,6 +685,14 @@
             export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
             export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
           '';
+        hwiUpstreamTrezor =
+          mkHwiUpstreamDevice "hwi-upstream-trezor" "trezor" (inputs ++ [hwiPython pkgs.bitcoin]) ''
+            export HWI_TREZOR_PREPARE_SCRIPT="${trezorOneRunner}/bin/bhwi-start-trezor-one"
+          '';
+        hwiUpstreamTrezorT =
+          mkHwiUpstreamDevice "hwi-upstream-trezor-t" "trezor-t" (inputs ++ [hwiPython pkgs.bitcoin]) ''
+            export HWI_TREZOR_PREPARE_SCRIPT="${trezorTRunner}/bin/bhwi-start-trezor-t"
+          '';
         hwiUpstreamJade =
           mkHwiUpstreamDevice "hwi-upstream-jade" "jade" (inputs ++ jadeQemuInputs ++ [hwiPython pkgs.bitcoin]) ''
             export HWI_JADE_PREPARE_SCRIPT="${./nix/scripts/start-jade.sh}"
@@ -741,6 +749,8 @@
             hwi-upstream-coldcard = mkApp hwiUpstreamColdcard;
             hwi-upstream-ledger = mkApp hwiUpstreamLedger;
             hwi-upstream-jade = mkApp hwiUpstreamJade;
+            hwi-upstream-trezor = mkApp hwiUpstreamTrezor;
+            hwi-upstream-trezor-t = mkApp hwiUpstreamTrezorT;
             hwi-parity-bitbox = mkApp hwiParityBitbox;
             hwi-parity-coldcard = mkApp hwiParityColdcard;
             hwi-parity-ledger = mkApp hwiParityLedger;
@@ -811,6 +821,8 @@
             hwi-upstream-coldcard = hwiUpstreamColdcard;
             hwi-upstream-ledger = hwiUpstreamLedger;
             hwi-upstream-jade = hwiUpstreamJade;
+            hwi-upstream-trezor = hwiUpstreamTrezor;
+            hwi-upstream-trezor-t = hwiUpstreamTrezorT;
           }
           // linuxPackages;
 

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+prepare_only=0
+if [[ "${1:-}" == "--prepare-hwi" ]]; then
+  prepare_only=1
+  shift
+fi
+
 variant="${TREZOR_VARIANT:?TREZOR_VARIANT must be legacy or core}"
 case "$variant" in
   legacy | core) ;;
@@ -18,6 +24,10 @@ export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}"
 export TREZOR_PROFILE_DIR="$profile"
 
 if [[ -n "${TREZOR_EMULATOR_BIN:-}" ]]; then
+  if [[ "$prepare_only" == 1 ]]; then
+    printf '%s\n' "$TREZOR_EMULATOR_BIN"
+    exit 0
+  fi
   exec "$TREZOR_EMULATOR_BIN" "$@"
 fi
 
@@ -68,6 +78,11 @@ if [[ ! -x "$emulator" ]] ||
   echo "Building Trezor $variant emulator in $work" >&2
   (cd "$work" && nix-shell "$work/shell.nix" --run "$build_cmd")
   printf '%s\n' "$build_key" > "$build_key_file"
+fi
+
+if [[ "$prepare_only" == 1 ]]; then
+  printf '%s\n' "$emulator"
+  exit 0
 fi
 
 cd "$run_dir"
