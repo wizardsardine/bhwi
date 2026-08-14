@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 use core::str::FromStr;
 
 use bitcoin::address::AddressType;
-use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
+use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub};
 use bitcoin::hashes::Hash;
 use bitcoin::psbt::Psbt;
 use bitcoin::{Network, NetworkKind, Transaction};
@@ -102,7 +102,11 @@ struct SignCtx {
     coin: String,
     master_fp: Fingerprint,
     signatures: Vec<(u32, Vec<u8>)>,
+    passes: usize,
+    ignored: std::collections::BTreeSet<usize>,
 }
+
+const MAX_SIGN_PASSES: usize = 15;
 
 pub struct TrezorInterpreter<C, T, R, E> {
     state: State,
@@ -514,6 +518,8 @@ where
                     coin: coin_name(self.network),
                     master_fp,
                     signatures: Vec::new(),
+                    passes: 1,
+                    ignored: std::collections::BTreeSet::new(),
                 }));
                 return Ok(Some(T::from(bytes)));
             }
@@ -801,6 +807,119 @@ fn prev_output(tx: &Transaction, index: usize) -> Result<TxType, TrezorError> {
     })
 }
 
+fn placeholder_hd_node(public_key: Vec<u8>) -> pb::HdNodeType {
+    pb::HdNodeType {
+        depth: 0,
+        fingerprint: 0,
+        child_num: 0,
+        chain_code: vec![0; 32],
+        private_key: None,
+        public_key,
+    }
+}
+
+type Bip32Derivations =
+    std::collections::BTreeMap<bitcoin::secp256k1::PublicKey, (Fingerprint, DerivationPath)>;
+
+fn parse_multisig(
+    script: &bitcoin::Script,
+    derivations: &Bip32Derivations,
+    xpubs: &std::collections::BTreeMap<Xpub, (Fingerprint, DerivationPath)>,
+) -> Option<btc::MultisigRedeemScriptType> {
+    let mut instructions = script.instructions();
+    let threshold = match instructions.next()?.ok()? {
+        bitcoin::script::Instruction::Op(op) => op.to_u8().checked_sub(0x50)?,
+        _ => return None,
+    };
+    if !(1..=15).contains(&threshold) {
+        return None;
+    }
+
+    let mut keys = Vec::new();
+    let mut trailer = None;
+    for instruction in instructions.by_ref() {
+        match instruction.ok()? {
+            bitcoin::script::Instruction::PushBytes(bytes) if bytes.len() == 33 => {
+                keys.push(bytes.as_bytes().to_vec());
+            }
+            bitcoin::script::Instruction::Op(op) => {
+                trailer = Some(op);
+                break;
+            }
+            _ => return None,
+        }
+    }
+    let count = trailer?.to_u8().checked_sub(0x50)?;
+    if usize::from(count) != keys.len() || keys.is_empty() || usize::from(threshold) > keys.len() {
+        return None;
+    }
+    if instructions.next()?.ok()?
+        != bitcoin::script::Instruction::Op(bitcoin::opcodes::all::OP_CHECKMULTISIG)
+    {
+        return None;
+    }
+    if instructions.next().is_some() {
+        return None;
+    }
+
+    let pubkeys = keys
+        .into_iter()
+        .map(|key| {
+            let node = multisig_node_from_xpubs(&key, derivations, xpubs)
+                .unwrap_or_else(|| (placeholder_hd_node(key.clone()), Vec::new()));
+            btc::multisig_redeem_script_type::HdNodePathType {
+                node: node.0,
+                address_n: node.1,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Some(btc::MultisigRedeemScriptType {
+        signatures: vec![Vec::new(); pubkeys.len()],
+        m: u32::from(threshold),
+        pubkeys,
+        ..Default::default()
+    })
+}
+
+fn multisig_node_from_xpubs(
+    key: &[u8],
+    derivations: &Bip32Derivations,
+    xpubs: &std::collections::BTreeMap<Xpub, (Fingerprint, DerivationPath)>,
+) -> Option<(pb::HdNodeType, Vec<u32>)> {
+    let pubkey = bitcoin::secp256k1::PublicKey::from_slice(key).ok()?;
+    let (fingerprint, path) = derivations.get(&pubkey)?;
+    let path = path.to_u32_vec();
+    let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+    xpubs.iter().find_map(|(xpub, (origin_fp, origin_path))| {
+        let origin = origin_path.to_u32_vec();
+        if origin_fp != fingerprint || !path.starts_with(&origin) {
+            return None;
+        }
+        let remainder = DerivationPath::from(
+            path[origin.len()..]
+                .iter()
+                .copied()
+                .map(ChildNumber::from)
+                .collect::<Vec<_>>(),
+        );
+        if xpub.derive_pub(&secp, &remainder).ok()?.public_key != pubkey {
+            return None;
+        }
+        Some((
+            pb::HdNodeType {
+                depth: u32::from(xpub.depth),
+                fingerprint: u32::from_be_bytes(xpub.parent_fingerprint.to_bytes()),
+                child_num: u32::from(xpub.child_number),
+                chain_code: xpub.chain_code.to_bytes().to_vec(),
+                private_key: None,
+                public_key: xpub.public_key.serialize().to_vec(),
+            },
+            path[origin.len()..].to_vec(),
+        ))
+    })
+}
+
 fn multisig_script_type(address_type: common::MultisigAddressType) -> btc::InputScriptType {
     match address_type {
         common::MultisigAddressType::Legacy => btc::InputScriptType::Spendmultisig,
@@ -895,14 +1014,7 @@ fn multisig_key(
                 pubkey: pubkey.clone(),
                 path: origin_path(key.origin.as_ref()),
                 node: btc::multisig_redeem_script_type::HdNodePathType {
-                    node: pb::HdNodeType {
-                        depth: 0,
-                        fingerprint: 0,
-                        child_num: 0,
-                        chain_code: vec![0; 32],
-                        private_key: None,
-                        public_key: pubkey,
-                    },
+                    node: placeholder_hd_node(pubkey),
                     address_n: Vec::new(),
                 },
             })
@@ -957,21 +1069,59 @@ fn taproot_derivation(
 fn spend_script_type(
     input: &bitcoin::psbt::Input,
     script_pubkey: &bitcoin::Script,
+    xpubs: &std::collections::BTreeMap<Xpub, (Fingerprint, DerivationPath)>,
 ) -> Result<btc::InputScriptType, TrezorError> {
     let p2sh = script_pubkey.is_p2sh();
     let script = if p2sh {
-        input
+        let redeem_script = input
             .redeem_script
             .clone()
             .ok_or(TrezorError::InvalidInput(
                 "p2sh input has no redeem script".into(),
-            ))?
+            ))?;
+        if redeem_script.to_p2sh().as_script() != script_pubkey {
+            return Err(TrezorError::InvalidInput(
+                "p2sh input redeem script does not hash to the prevout script pubkey".into(),
+            ));
+        }
+        redeem_script
     } else {
         script_pubkey.to_owned()
     };
+    if script.is_p2wsh() {
+        let witness_script = input
+            .witness_script
+            .clone()
+            .ok_or(TrezorError::InvalidInput(
+                "p2wsh input has no witness script".into(),
+            ))?;
+        if witness_script.to_p2wsh() != script {
+            return Err(TrezorError::InvalidInput(
+                "p2wsh input witness script does not hash to the prevout witness program".into(),
+            ));
+        }
+        if parse_multisig(&witness_script, &input.bip32_derivation, xpubs).is_none() {
+            return Err(TrezorError::Unsupported(
+                "only multisig witness scripts are supported",
+            ));
+        }
+        return Ok(if p2sh {
+            btc::InputScriptType::Spendp2shwitness
+        } else {
+            btc::InputScriptType::Spendwitness
+        });
+    }
+    if parse_multisig(&script, &input.bip32_derivation, xpubs).is_some() {
+        if !p2sh {
+            return Err(TrezorError::Unsupported(
+                "bare multisig inputs cannot be signed",
+            ));
+        }
+        return Ok(btc::InputScriptType::Spendmultisig);
+    }
     if input.witness_script.is_some() {
         return Err(TrezorError::Unsupported(
-            "multisig and script path signing are not yet supported",
+            "script path signing is not yet supported",
         ));
     }
     match script.witness_version() {
@@ -993,7 +1143,7 @@ fn spend_script_type(
     }
 }
 
-fn our_input(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
+fn our_input(ctx: &SignCtx, index: usize) -> Result<(TxType, bool), TrezorError> {
     let txin = ctx
         .tx
         .input
@@ -1017,15 +1167,38 @@ fn our_input(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
         .ok_or(TrezorError::InvalidInput(
             "psbt input has no utxo to sign".into(),
         ))?;
-    let script_type = spend_script_type(psbt_input, &utxo.script_pubkey)?;
+    let script_type = spend_script_type(psbt_input, &utxo.script_pubkey, &ctx.psbt.xpub)?;
+    let multisig = match script_type {
+        btc::InputScriptType::Spendmultisig => {
+            psbt_input.redeem_script.as_ref().and_then(|script| {
+                parse_multisig(script, &psbt_input.bip32_derivation, &ctx.psbt.xpub)
+            })
+        }
+        btc::InputScriptType::Spendwitness | btc::InputScriptType::Spendp2shwitness => {
+            psbt_input.witness_script.as_ref().and_then(|script| {
+                parse_multisig(script, &psbt_input.bip32_derivation, &ctx.psbt.xpub)
+            })
+        }
+        _ => None,
+    };
+    let mut ignore = false;
     let path = match script_type {
-        btc::InputScriptType::Spendtaproot => taproot_derivation(psbt_input, ctx.master_fp),
-        _ => unsigned_derivation(psbt_input, ctx.master_fp).map(|(_, path)| path),
+        btc::InputScriptType::Spendtaproot => {
+            ignore = psbt_input.tap_key_sig.is_some();
+            taproot_derivation(psbt_input, ctx.master_fp)
+        }
+        _ => match unsigned_derivation(psbt_input, ctx.master_fp) {
+            Some((_, path)) => Some(path),
+            None => {
+                ignore = true;
+                our_derivation(&psbt_input.bip32_derivation, ctx.master_fp).map(|(_, path)| path)
+            }
+        },
     }
     .ok_or(TrezorError::InvalidInput(
         "psbt input has no unsigned key derivation for this device".into(),
     ))?;
-    Ok(TxType {
+    let acked = TxType {
         inputs: vec![AckInput {
             address_n: address_n(&path),
             prev_hash: prev_hash_bytes(txin.previous_output.txid),
@@ -1033,10 +1206,12 @@ fn our_input(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
             sequence: Some(txin.sequence.to_consensus_u32()),
             script_type: Some(script_type as i32),
             amount: Some(utxo.value.to_sat()),
+            multisig,
             ..Default::default()
         }],
         ..Default::default()
-    })
+    };
+    Ok((acked, ignore))
 }
 
 fn our_output(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
@@ -1071,6 +1246,68 @@ fn our_output(ctx: &SignCtx, index: usize) -> Result<TxType, TrezorError> {
         ack.script_type = Some(change_script_type(&txout.script_pubkey) as i32);
         ack.address_n = address_n(&path);
         ack.address = None;
+
+        let p2sh = txout.script_pubkey.is_p2sh();
+        let redeem = psbt_output.redeem_script.as_ref();
+        if let Some(redeem) = redeem {
+            if !p2sh {
+                return Err(TrezorError::InvalidInput(
+                    "change output has a redeem script but is not p2sh".into(),
+                ));
+            }
+            if redeem.to_p2sh() != txout.script_pubkey {
+                return Err(TrezorError::InvalidInput(
+                    "change output redeem script does not hash to its script pubkey".into(),
+                ));
+            }
+        }
+
+        let nested = redeem.is_some_and(|redeem| redeem.is_p2wsh());
+        let witness = txout.script_pubkey.is_p2wsh() || nested;
+        if let Some(witness_script) = psbt_output.witness_script.as_ref() {
+            if !witness {
+                return Err(TrezorError::InvalidInput(
+                    "change output has a witness script but is not p2wsh".into(),
+                ));
+            }
+            let program = if nested {
+                redeem.expect("nested implies a redeem script")
+            } else {
+                &txout.script_pubkey
+            };
+            if witness_script.to_p2wsh() != *program {
+                return Err(TrezorError::InvalidInput(
+                    "change output witness script does not hash to its witness program".into(),
+                ));
+            }
+        }
+
+        let script = if witness {
+            psbt_output.witness_script.as_ref()
+        } else {
+            redeem
+        };
+        match script.and_then(|script| {
+            parse_multisig(script, &psbt_output.bip32_derivation, &ctx.psbt.xpub)
+        }) {
+            Some(multisig) => {
+                ack.multisig = Some(multisig);
+                if !witness {
+                    ack.script_type = Some(btc::OutputScriptType::Paytomultisig as i32);
+                }
+            }
+            None if witness => {
+                return Err(TrezorError::InvalidInput(
+                    "p2wsh change output has no multisig witness script".into(),
+                ));
+            }
+            None if p2sh && !redeem.is_some_and(|redeem| redeem.is_p2wpkh()) => {
+                return Err(TrezorError::InvalidInput(
+                    "p2sh change output is neither multisig nor p2sh-wrapped segwit".into(),
+                ));
+            }
+            None => {}
+        }
     }
     Ok(TxType {
         outputs: vec![ack],
@@ -1111,7 +1348,7 @@ fn change_derivation(
 fn change_script_type(script_pubkey: &bitcoin::Script) -> btc::OutputScriptType {
     if script_pubkey.is_p2tr() {
         btc::OutputScriptType::Paytotaproot
-    } else if script_pubkey.is_p2wpkh() {
+    } else if script_pubkey.is_p2wpkh() || script_pubkey.is_p2wsh() {
         btc::OutputScriptType::Paytowitness
     } else if script_pubkey.is_p2sh() {
         btc::OutputScriptType::Paytop2shwitness
@@ -1130,7 +1367,11 @@ fn network_of(coin: &str) -> Network {
 
 fn finish_sign(ctx: &mut SignCtx) -> Result<Box<Psbt>, TrezorError> {
     let master_fp = ctx.master_fp;
+    let ignored = core::mem::take(&mut ctx.ignored);
     for (index, signature) in core::mem::take(&mut ctx.signatures) {
+        if ignored.contains(&(index as usize)) {
+            continue;
+        }
         let input = ctx
             .psbt
             .inputs
@@ -1168,6 +1409,12 @@ enum SignStep {
     Done(Box<Psbt>),
 }
 
+fn has_unsigned_key(ctx: &SignCtx) -> bool {
+    ctx.psbt.inputs.iter().any(|input| {
+        input.tap_internal_key.is_none() && unsigned_derivation(input, ctx.master_fp).is_some()
+    })
+}
+
 fn drive_sign(ctx: &mut SignCtx, request: btc::TxRequest) -> Result<SignStep, TrezorError> {
     if let Some(serialized) = request.serialized.as_ref()
         && let (Some(index), Some(signature)) =
@@ -1191,12 +1438,33 @@ fn drive_sign(ctx: &mut SignCtx, request: btc::TxRequest) -> Result<SignStep, Tr
     let ack = match (request_type, tx) {
         (btc::tx_request::RequestType::Txfinished, _) => {
             let psbt = finish_sign(ctx)?;
+            if has_unsigned_key(ctx) {
+                ctx.passes += 1;
+                if ctx.passes > MAX_SIGN_PASSES {
+                    return Err(TrezorError::InvalidInput(
+                        "multisig signing did not converge".into(),
+                    ));
+                }
+                return Ok(SignStep::Continue(api::sign_tx(
+                    ctx.tx.input.len() as u32,
+                    ctx.tx.output.len() as u32,
+                    ctx.tx.version.0 as u32,
+                    ctx.tx.lock_time.to_consensus_u32(),
+                    &ctx.coin,
+                )));
+            }
             return Ok(SignStep::Done(psbt));
         }
         (btc::tx_request::RequestType::Txmeta, Some(prev)) => prev_meta(&prev),
         (btc::tx_request::RequestType::Txmeta, None) => tx_meta(&ctx.tx),
         (btc::tx_request::RequestType::Txinput, Some(prev)) => prev_input(&prev, index)?,
-        (btc::tx_request::RequestType::Txinput, None) => our_input(ctx, index)?,
+        (btc::tx_request::RequestType::Txinput, None) => {
+            let (acked, ignore) = our_input(ctx, index)?;
+            if ignore {
+                ctx.ignored.insert(index);
+            }
+            acked
+        }
         (btc::tx_request::RequestType::Txoutput, Some(prev)) => prev_output(&prev, index)?,
         (btc::tx_request::RequestType::Txoutput, None) => our_output(ctx, index)?,
         (ty, _) => {
@@ -1317,20 +1585,183 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            spend_script_type(&input, &p2pkh_script(key)).unwrap(),
+            spend_script_type(&input, &p2pkh_script(key), &Default::default()).unwrap(),
             btc::InputScriptType::Spendaddress
         );
     }
 
+    fn multisig_script_of(
+        threshold: i64,
+        keys: &[bitcoin::secp256k1::PublicKey],
+    ) -> bitcoin::ScriptBuf {
+        let mut builder = bitcoin::script::Builder::new().push_int(threshold);
+        for key in keys {
+            builder = builder.push_key(&bitcoin::PublicKey::new(*key));
+        }
+        builder
+            .push_int(keys.len() as i64)
+            .push_opcode(bitcoin::opcodes::all::OP_CHECKMULTISIG)
+            .into_script()
+    }
+
     #[test]
-    fn spend_script_type_rejects_witness_script() {
+    fn parse_multisig_reads_threshold_and_keys_in_script_order() {
+        let keys = [test_key(0), test_key(1), test_key(2)];
+        let script = multisig_script_of(2, &keys);
+        let parsed = parse_multisig(&script, &Default::default(), &Default::default())
+            .expect("multisig script");
+
+        assert_eq!(parsed.m, 2);
+        assert_eq!(parsed.signatures.len(), 3);
+        assert!(parsed.signatures.iter().all(|sig| sig.is_empty()));
+        assert_eq!(
+            parsed
+                .pubkeys
+                .iter()
+                .map(|entry| entry.node.public_key.clone())
+                .collect::<Vec<_>>(),
+            keys.iter()
+                .map(|key| key.serialize().to_vec())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            parsed
+                .pubkeys
+                .iter()
+                .all(|entry| entry.address_n.is_empty())
+        );
+    }
+
+    #[test]
+    fn parse_multisig_rejects_non_multisig_scripts() {
+        let key = test_key(0);
+        assert!(
+            parse_multisig(&p2pkh_script(key), &Default::default(), &Default::default()).is_none()
+        );
+        assert!(
+            parse_multisig(
+                &bitcoin::ScriptBuf::new(),
+                &Default::default(),
+                &Default::default()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_multisig_upgrades_nodes_from_global_xpubs() {
+        let xpub = Xpub::from_str(XPUB_OURS).unwrap();
+        let derived = xpub
+            .derive_pub(
+                &bitcoin::secp256k1::Secp256k1::verification_only(),
+                &"0/7".parse::<DerivationPath>().unwrap(),
+            )
+            .unwrap();
+        let script = multisig_script_of(1, &[derived.public_key]);
+        let full_path: DerivationPath = "m/84'/1'/0'/0/7".parse().unwrap();
+        let input = bitcoin::psbt::Input {
+            bip32_derivation: [(derived.public_key, (ours(), full_path))].into(),
+            ..Default::default()
+        };
+        let xpubs = [(xpub, (ours(), "m/84'/1'/0'".parse().unwrap()))].into();
+
+        let parsed =
+            parse_multisig(&script, &input.bip32_derivation, &xpubs).expect("multisig script");
+        let entry = &parsed.pubkeys[0];
+        assert_eq!(entry.address_n, vec![0, 7]);
+        assert_eq!(entry.node.chain_code, xpub.chain_code.to_bytes());
+        assert_eq!(entry.node.depth, 3);
+    }
+
+    fn sign_ctx_with(signed: &[bitcoin::secp256k1::PublicKey]) -> SignCtx {
+        let ours_a = test_key(0);
+        let ours_b = test_key(1);
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn::default()],
+            output: vec![],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(tx.clone()).unwrap();
+        psbt.inputs[0].bip32_derivation = [
+            (ours_a, (ours(), "m/48'/1'/0'/2'/0/0".parse().unwrap())),
+            (ours_b, (ours(), "m/48'/1'/1'/2'/0/0".parse().unwrap())),
+        ]
+        .into();
+        for key in signed {
+            psbt.inputs[0].partial_sigs.insert(
+                bitcoin::PublicKey::new(*key),
+                bitcoin::ecdsa::Signature {
+                    signature: bitcoin::secp256k1::ecdsa::Signature::from_compact(&[0x01; 64])
+                        .unwrap(),
+                    sighash_type: bitcoin::sighash::EcdsaSighashType::All,
+                },
+            );
+        }
+        SignCtx {
+            psbt: Box::new(psbt),
+            tx,
+            coin: "Testnet".to_string(),
+            master_fp: ours(),
+            signatures: Vec::new(),
+            passes: 1,
+            ignored: std::collections::BTreeSet::new(),
+        }
+    }
+
+    fn tx_finished() -> btc::TxRequest {
+        btc::TxRequest {
+            request_type: Some(btc::tx_request::RequestType::Txfinished as i32),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn signing_starts_another_pass_while_one_of_our_keys_is_unsigned() {
+        let mut ctx = sign_ctx_with(&[test_key(0)]);
+        let step = drive_sign(&mut ctx, tx_finished()).expect("drive sign");
+        assert!(matches!(step, SignStep::Continue(_)));
+        assert_eq!(ctx.passes, 2);
+    }
+
+    #[test]
+    fn signing_finishes_once_every_key_of_ours_is_signed() {
+        let mut ctx = sign_ctx_with(&[test_key(0), test_key(1)]);
+        let step = drive_sign(&mut ctx, tx_finished()).expect("drive sign");
+        assert!(matches!(step, SignStep::Done(_)));
+        assert_eq!(ctx.passes, 1);
+    }
+
+    #[test]
+    fn signing_ignores_foreign_keys_when_deciding_to_repeat() {
+        let mut ctx = sign_ctx_with(&[test_key(0)]);
+        ctx.psbt.inputs[0].bip32_derivation.insert(
+            test_key(2),
+            (theirs(), "m/48'/1'/2'/2'/0/0".parse().unwrap()),
+        );
+        ctx.psbt.inputs[0]
+            .partial_sigs
+            .remove(&bitcoin::PublicKey::new(test_key(1)));
+        ctx.psbt.inputs[0].partial_sigs.insert(
+            bitcoin::PublicKey::new(test_key(1)),
+            bitcoin::ecdsa::Signature {
+                signature: bitcoin::secp256k1::ecdsa::Signature::from_compact(&[0x01; 64]).unwrap(),
+                sighash_type: bitcoin::sighash::EcdsaSighashType::All,
+            },
+        );
+        let step = drive_sign(&mut ctx, tx_finished()).expect("drive sign");
+        assert!(matches!(step, SignStep::Done(_)));
+    }
+
+    #[test]
+    fn spend_script_type_rejects_non_multisig_witness_script() {
         let key = test_key(0);
         let input = bitcoin::psbt::Input {
             witness_script: Some(bitcoin::ScriptBuf::new()),
             ..Default::default()
         };
         assert!(matches!(
-            spend_script_type(&input, &p2pkh_script(key)),
+            spend_script_type(&input, &p2pkh_script(key), &Default::default()),
             Err(TrezorError::Unsupported(_))
         ));
     }
