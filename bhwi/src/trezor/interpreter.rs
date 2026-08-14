@@ -70,6 +70,7 @@ enum State {
     AwaitMessageSignature,
     AwaitSuccess,
     AwaitPassphraseCancel,
+    AwaitLockedCancel,
     AwaitPassphraseSetting,
     AwaitPinPromptFeatures,
     AwaitPinMatrix,
@@ -261,6 +262,9 @@ where
         if matches!(self.state, State::AwaitPassphraseCancel) {
             return Err(E::from(TrezorError::PassphraseTooLong));
         }
+        if matches!(self.state, State::AwaitLockedCancel) {
+            return Err(E::from(TrezorError::Locked(TrezorError::LOCKED)));
+        }
         if msg_type == MessageType::ButtonRequest as u16 {
             return Ok(Some(T::from(api::button_ack())));
         }
@@ -307,7 +311,8 @@ where
         if msg_type == MessageType::PinMatrixRequest as u16
             && !matches!(self.state, State::AwaitPinMatrix)
         {
-            return Err(E::from(TrezorError::Locked(TrezorError::LOCKED)));
+            self.state = State::AwaitLockedCancel;
+            return Ok(Some(T::from(api::cancel())));
         }
 
         let response = match &self.state {
@@ -535,6 +540,9 @@ where
             }
             State::AwaitPassphraseCancel => {
                 return Err(E::from(TrezorError::PassphraseTooLong));
+            }
+            State::AwaitLockedCancel => {
+                return Err(E::from(TrezorError::Locked(TrezorError::LOCKED)));
             }
             State::New | State::Finished(_) => {
                 return Err(E::from(TrezorError::UnexpectedMessage(
@@ -1978,14 +1986,25 @@ mod tests {
     }
 
     #[test]
-    fn a_keypad_request_outside_prompt_pin_points_at_the_pin_commands() {
+    fn a_keypad_request_outside_prompt_pin_cancels_then_points_at_the_pin_commands() {
         let mut interp = Interp::default();
         interp.start(Command::GetMasterFingerprint).unwrap();
         let frame = framed(
             MessageType::PinMatrixRequest,
             &pb::PinMatrixRequest::default(),
         );
-        let Err(Error::Device(message)) = interp.exchange(frame) else {
+        let transmit = interp.exchange(frame).unwrap().expect("cancel");
+        let (msg_type, _) = decode_transmit::<mgmt::Cancel>(transmit);
+        assert_eq!(msg_type, MessageType::Cancel as u16);
+
+        let failure = framed(
+            MessageType::Failure,
+            &pb::Failure {
+                code: Some(pb::failure::FailureType::FailureActionCancelled as i32),
+                message: None,
+            },
+        );
+        let Err(Error::Device(message)) = interp.exchange(failure) else {
             panic!("expected a locked-device error");
         };
         assert_eq!(
