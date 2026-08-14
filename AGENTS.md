@@ -160,6 +160,12 @@
 - Do not mix formatting-only churn into feature commits. Use a separate `style:` commit if needed.
 - Keep commit messages brief and direct. Avoid ticket references unless asked.
 
+## Pull Requests
+
+- Follow [`.agents/templates/pr-description.md`](.agents/templates/pr-description.md). Read it before opening a PR.
+- Descriptions are facts for a reviewer: what changed, what behavior changed, what was run. No prose narration of the work.
+- Call out blockers, public API changes, CLI output changes, and new dependencies explicitly.
+
 ## Definition Of Done
 
 - The requested behavior or documentation change is complete and scoped to the task.
