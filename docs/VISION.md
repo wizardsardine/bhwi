@@ -361,7 +361,7 @@ while let Some(t) = &transmit {
             transmit = intpr.exchange(res)?;
         }
         Recipient::Device => {
-            let exchange = transport.senf(&t.payload).await?;
+            let exchange = transport.send(&t.payload).await?;
             transmit = intpr.exchange(exchange)?;
         }
     }
