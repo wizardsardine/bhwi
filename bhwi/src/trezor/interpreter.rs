@@ -225,7 +225,7 @@ where
             }
             TrezorCommand::PromptPin => {
                 self.state = State::AwaitPinPromptFeatures;
-                api::get_features()
+                api::initialize()
             }
             TrezorCommand::SendPin(pin) => {
                 // Nothing may be sent before the ack, so the features exchange that reports
@@ -2271,11 +2271,11 @@ mod tests {
     }
 
     #[test]
-    fn prompt_pin_reads_features_then_raises_the_keypad() {
+    fn prompt_pin_opens_a_session_then_raises_the_keypad() {
         let mut interp = Interp::default();
         let transmit = interp.start(Command::PromptPin).unwrap();
-        let (msg_type, _) = decode_transmit::<mgmt::GetFeatures>(transmit);
-        assert_eq!(msg_type, MessageType::GetFeatures as u16);
+        let (msg_type, _) = decode_transmit::<mgmt::Initialize>(transmit);
+        assert_eq!(msg_type, MessageType::Initialize as u16);
 
         let transmit = interp
             .exchange(framed(MessageType::Features, &locked_features()))
