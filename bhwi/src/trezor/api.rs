@@ -11,6 +11,7 @@ pub enum MessageType {
     Success = 2,
     WipeDevice = 5,
     ResetDevice = 14,
+    RecoveryDevice = 45,
     ApplySettings = 25,
     EntropyRequest = 35,
     EntropyAck = 36,
@@ -89,6 +90,26 @@ pub fn reset_device(strength: u32, passphrase_protection: bool, label: Option<St
             skip_backup: Some(false),
             no_backup: Some(false),
             backup_type: Some(mgmt::BackupType::Bip39 as i32),
+            ..Default::default()
+        },
+    )
+}
+
+pub fn recovery_device(
+    word_count: u32,
+    passphrase_protection: bool,
+    label: Option<String>,
+    u2f_counter: u32,
+) -> Vec<u8> {
+    encode(
+        MessageType::RecoveryDevice,
+        &mgmt::RecoveryDevice {
+            word_count: Some(word_count),
+            passphrase_protection: Some(passphrase_protection),
+            pin_protection: Some(true),
+            label,
+            enforce_wordlist: Some(true),
+            u2f_counter: Some(u2f_counter),
             ..Default::default()
         },
     )

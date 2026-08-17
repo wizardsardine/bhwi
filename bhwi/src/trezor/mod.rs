@@ -62,6 +62,7 @@ pub use interpreter::{TrezorCommand, TrezorInterpreter, TrezorResponse};
 #[derive(Clone, Debug)]
 pub enum ManagementContext {
     Setup { host_entropy: [u8; 32] },
+    Restore { u2f_counter: u32 },
     Pin(HostPin),
 }
 

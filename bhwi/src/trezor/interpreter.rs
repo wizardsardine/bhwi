@@ -39,6 +39,11 @@ pub enum TrezorCommand {
         label: Option<String>,
         host_entropy: [u8; 32],
     },
+    Restore {
+        label: Option<String>,
+        word_count: u32,
+        u2f_counter: u32,
+    },
     PromptPin,
     SendPin(crate::trezor::HostPin),
 }
@@ -77,6 +82,7 @@ enum State {
     AwaitPinResult,
     AwaitPinFailureFeatures,
     AwaitSetupFeatures(Box<SetupCtx>),
+    AwaitRestoreFeatures(Box<RestoreCtx>),
     AwaitEntropyRequest([u8; 32]),
     AwaitSignKey(Box<Psbt>),
     AwaitTxRequest(Box<SignCtx>),
@@ -87,6 +93,13 @@ struct SetupCtx {
     label: Option<String>,
     passphrase_protection: bool,
     host_entropy: [u8; 32],
+}
+
+struct RestoreCtx {
+    label: Option<String>,
+    passphrase_protection: bool,
+    word_count: u32,
+    u2f_counter: u32,
 }
 
 struct MultisigCtx {
@@ -242,6 +255,19 @@ where
                     label,
                     passphrase_protection: self.wants_passphrase_protection(),
                     host_entropy,
+                }));
+                api::get_features()
+            }
+            TrezorCommand::Restore {
+                label,
+                word_count,
+                u2f_counter,
+            } => {
+                self.state = State::AwaitRestoreFeatures(Box::new(RestoreCtx {
+                    label,
+                    passphrase_protection: self.wants_passphrase_protection(),
+                    word_count,
+                    u2f_counter,
                 }));
                 api::get_features()
             }
@@ -416,6 +442,35 @@ where
                     strength,
                     ctx.passphrase_protection,
                     ctx.label,
+                ))));
+            }
+            State::AwaitRestoreFeatures(_) => {
+                let State::AwaitRestoreFeatures(ctx) =
+                    core::mem::replace(&mut self.state, State::New)
+                else {
+                    unreachable!("state checked above")
+                };
+                let features: mgmt::Features = expect(
+                    msg_type,
+                    MessageType::Features,
+                    &payload,
+                    "reading features before restore",
+                )
+                .map_err(E::from)?;
+                if features.initialized.unwrap_or(false) {
+                    return Err(E::from(TrezorError::AlreadyInitialized));
+                }
+                if features.model.as_deref().unwrap_or("1") == "1" {
+                    return Err(E::from(TrezorError::Unsupported(
+                        "Trezor One restore needs host word entry, which is not supported in this build",
+                    )));
+                }
+                self.state = State::AwaitSuccess;
+                return Ok(Some(T::from(api::recovery_device(
+                    ctx.word_count,
+                    ctx.passphrase_protection,
+                    ctx.label,
+                    ctx.u2f_counter,
                 ))));
             }
             State::AwaitEntropyRequest(host_entropy) => {
@@ -637,8 +692,28 @@ impl TryFrom<common::Command> for TrezorCommand {
                 }
             }
             Command::Wipe => TrezorCommand::Wipe,
-            Command::Restore(..) => {
-                return Err(TrezorError::Unsupported("restore is not yet supported"));
+            Command::Restore(options, context) => {
+                let Some(common::DeviceContext::TrezorManagement(
+                    crate::trezor::ManagementContext::Restore { u2f_counter },
+                )) = context
+                else {
+                    return Err(TrezorError::Unsupported(
+                        "Trezor restore requires a U2F counter in the device context",
+                    ));
+                };
+                let word_count = u32::try_from(options.word_count).map_err(|_| {
+                    TrezorError::InvalidInput("restore word count must be positive".into())
+                })?;
+                if !matches!(word_count, 12 | 18 | 24) {
+                    return Err(TrezorError::InvalidInput(
+                        "restore word count must be 12, 18, or 24".into(),
+                    ));
+                }
+                TrezorCommand::Restore {
+                    label: (!options.label.is_empty()).then_some(options.label),
+                    word_count,
+                    u2f_counter,
+                }
             }
             Command::TogglePassphrase => TrezorCommand::TogglePassphrase,
             Command::PromptPin => TrezorCommand::PromptPin,
@@ -2731,5 +2806,44 @@ mod tests {
     fn host_passphrase_is_redacted_when_formatted() {
         let passphrase = crate::trezor::HostPassphrase::new("secret".into());
         assert!(!format!("{passphrase:?}").contains("secret"));
+    }
+
+    #[test]
+    fn restore_without_a_device_context_is_rejected() {
+        let mut interp = Interp::default();
+        assert!(matches!(
+            interp.start(Command::Restore(
+                crate::common::RestoreOptions::default(),
+                None
+            )),
+            Err(Error::MissingCommandInfo(_))
+        ));
+    }
+
+    #[test]
+    fn restore_encodes_the_host_supplied_u2f_counter() {
+        let mut interp = Interp::default();
+        interp
+            .start(Command::Restore(
+                crate::common::RestoreOptions::default(),
+                Some(common::DeviceContext::TrezorManagement(
+                    crate::trezor::ManagementContext::Restore {
+                        u2f_counter: 1_763_000_000,
+                    },
+                )),
+            ))
+            .unwrap();
+        let features = mgmt::Features {
+            initialized: Some(false),
+            model: Some("T".into()),
+            ..Default::default()
+        };
+        let transmit = interp
+            .exchange(framed(MessageType::Features, &features))
+            .unwrap()
+            .expect("recovery device");
+        let (msg_type, recovery) = decode_transmit::<mgmt::RecoveryDevice>(transmit);
+        assert_eq!(msg_type, MessageType::RecoveryDevice as u16);
+        assert_eq!(recovery.u2f_counter, Some(1_763_000_000));
     }
 }
