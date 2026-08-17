@@ -186,8 +186,15 @@ PY
 
     cat > "$work/bin/hwi" <<EOF
 #!/usr/bin/env bash
+press=0
 case " \$* " in
-  *" wipe "* | *" signtx "* | *" signmessage "* | *" displayaddress "* | *" togglepassphrase "* | *" setup "* | *" restore "*)
+  *" wipe "* | *" signtx "* | *" signmessage "* | *" displayaddress "* | *" togglepassphrase "* | *" setup "* | *" restore "*) press=1 ;;
+esac
+case " \$* " in
+  *" sendpin "*) case " \$* " in *" -p "*) press=1 ;; esac ;;
+esac
+case "\$press" in
+  1)
     "$python" "$work/trezor-press.py" &
     presser=\$!
     trap 'kill "\$presser" 2>/dev/null || true' EXIT HUP INT TERM
