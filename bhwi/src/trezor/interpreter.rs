@@ -400,7 +400,7 @@ where
                 if features.initialized.unwrap_or(false) {
                     return Err(E::from(TrezorError::AlreadyInitialized));
                 }
-                if features.model.as_deref() == Some("1") {
+                if features.model.as_deref().unwrap_or("1") == "1" {
                     return Err(E::from(TrezorError::Unsupported(
                         "Trezor One setup needs host PIN entry, which is not supported in this build",
                     )));
