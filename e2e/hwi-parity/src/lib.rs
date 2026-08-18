@@ -1068,12 +1068,14 @@ mod tests {
     }
 
     fn assert_displayaddress_parity(case: &DisplayAddressCase) -> Result<()> {
-        prepare_displayaddress_case_run(case)?;
+        let approval = prepare_displayaddress_case_run(case)?;
         let reference = HwiBinary::reference()?.run(case.args.clone())?;
+        drop(approval);
         assert_displayaddress_result("reference", &reference, case.expect)?;
 
-        prepare_displayaddress_case_run(case)?;
+        let approval = prepare_displayaddress_case_run(case)?;
         let candidate = HwiBinary::candidate()?.run(case.args.clone())?;
+        drop(approval);
         assert_displayaddress_result("candidate", &candidate, case.expect)?;
 
         if reference.json != candidate.json {
@@ -2245,9 +2247,6 @@ mod tests {
     }
 
     fn displayaddress_arg_cases(device_type: &str) -> Result<Vec<DisplayAddressCase>> {
-        if skipped_for_trezor(device_type) {
-            return Ok(Vec::new());
-        }
         let fingerprint = reference_fingerprint(device_type)?;
         let wit_xpub = reference_xpub(device_type, "m/84'/1'/0'")?;
         let sh_wit_xpub = reference_xpub(device_type, "m/49'/1'/0'")?;
@@ -2299,7 +2298,7 @@ mod tests {
 
         cases.push(DisplayAddressCase::new(
             displayaddress_path_args(device_type, "tap", "m/86h/1h/0h/0/0"),
-            if device_type == "bitbox02" || device_type == "ledger" {
+            if matches!(device_type, "bitbox02" | "ledger" | "trezor") {
                 ExpectedResult::Success
             } else {
                 ExpectedResult::Error
@@ -2434,30 +2433,33 @@ mod tests {
         }
     }
 
-    fn prepare_displayaddress_run(args: &[String]) -> Result<()> {
+    fn prepare_displayaddress_run(args: &[String]) -> Result<Option<TrezorApproval>> {
         let Some(device_type) = arg_value(args, "--device-type") else {
-            return Ok(());
+            return Ok(None);
         };
         match device_type {
-            "ledger" => set_ledger_displayaddress_automation(),
+            "ledger" => set_ledger_displayaddress_automation().map(|()| None),
             "coldcard" => {
                 spawn_coldcard_approval();
-                Ok(())
+                Ok(None)
             }
-            _ => Ok(()),
+            "trezor" => Ok(Some(spawn_trezor_approval())),
+            _ => Ok(None),
         }
     }
 
-    fn prepare_displayaddress_case_run(case: &DisplayAddressCase) -> Result<()> {
+    fn prepare_displayaddress_case_run(
+        case: &DisplayAddressCase,
+    ) -> Result<Option<TrezorApproval>> {
         match &case.coldcard_setup {
             ColdcardDisplaySetup::None => {}
             ColdcardDisplaySetup::Registered(wallet) => register_coldcard_wallet(wallet)?,
             ColdcardDisplaySetup::Unregistered => reset_coldcard_multisig()?,
         }
         if matches!(case.expect, ExpectedResult::Success) {
-            prepare_displayaddress_run(&case.args)?;
+            return prepare_displayaddress_run(&case.args);
         }
-        Ok(())
+        Ok(None)
     }
 
     fn register_coldcard_wallet(wallet: &ColdcardDisplayWallet) -> Result<()> {
@@ -3516,10 +3518,6 @@ mod tests {
                 Ok(entry.file_name().to_string_lossy().into_owned())
             })
             .collect()
-    }
-
-    fn skipped_for_trezor(device_type: &str) -> bool {
-        device_type == "trezor"
     }
 
     fn normalize_device_type(device_type: &str) -> Result<String> {
