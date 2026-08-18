@@ -29,21 +29,21 @@ errors exit `0`, and argparse-style usage errors exit `2` with
 
 |Command           |Ledger|Jade |Coldcard|Trezor|KeepKey|BitBox01|BitBox02|Notes                                                                 |
 |------------------|------|-----|--------|------|-------|--------|--------|----------------------------------------------------------------------|
-|`enumerate`       |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for expected Python HWI fields and global selection arguments.|
-|`getmasterxpub`   |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for supported address types.                                  |
-|`getxpub`         |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for normal and expert output shape.                           |
-|`getdescriptors`  |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for account descriptors.                                      |
-|`getkeypool`      |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for receive/change ranges and address types.                  |
-|`signtx`          |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Ledger covers default BIP44/49/84/86 wallets and classic registered sorted multisig. |
-|`signmessage`     |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for emulator-supported paths.                                 |
-|`displayaddress`  |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Registered Coldcard multisig display is covered for all script wrappers.|
-|`setup`           |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Physical setup uses fresh entropy and backup; simulator setup is covered end to end.|
-|`wipe`            |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |BitBox02 reset-disconnect behavior is covered by a stateful lifecycle.|
-|`restore`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI support excludes Ledger, Jade, Coldcard, and BitBox01.     |
+|`enumerate`       |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for expected Python HWI fields and global selection arguments.|
+|`getmasterxpub`   |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for supported address types.                                  |
+|`getxpub`         |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for normal and expert output shape.                           |
+|`getdescriptors`  |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for account descriptors.                                      |
+|`getkeypool`      |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for receive/change ranges and address types.                  |
+|`signtx`          |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Ledger covers default BIP44/49/84/86 wallets and classic registered sorted multisig. Trezor covers single-sig, taproot, op_return, and multisig.|
+|`signmessage`     |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for emulator-supported paths.                                 |
+|`displayaddress`  |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`n/a`   |`[x]`   |Registered Coldcard multisig display is covered for all script wrappers. Trezor covers descriptor and multisig display.|
+|`setup`           |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Physical setup uses fresh entropy and backup; simulator setup is covered end to end.|
+|`wipe`            |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |BitBox02 reset-disconnect behavior is covered by a stateful lifecycle.|
+|`restore`         |`n/a` |`n/a`|`n/a`   |`[~]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI support excludes Ledger, Jade, Coldcard, and BitBox01. Trezor restore is supported on the Model T, which takes the recovery phrase on its own screen. The Trezor One requires host word entry and is unsupported.|
 |`backup`          |`n/a` |`n/a`|`[x]`   |`n/a` |`n/a`  |`[ ]`   |`[x]`   |Coldcard file backup and BitBox02 mnemonic-export backup are covered. BitBox01 remains open.|
-|`promptpin`       |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN prompting for Trezor-class devices.      |
-|`sendpin`         |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN entry for Trezor-class devices.          |
-|`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
+|`promptpin`       |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN prompting for Trezor-class devices.      |
+|`sendpin`         |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN entry for Trezor-class devices.          |
+|`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[~]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
 |`installudevrules`|`n/a` |`n/a`|`n/a`   |`n/a` |`n/a`  |`n/a`   |`n/a`   |Host-side Python HWI command covered by the shared udev installer. Registered on Linux only.|
 
 ## Running Parity Tests
@@ -57,6 +57,7 @@ nix run .#hwi-parity-ledger
 nix run .#hwi-parity-jade
 nix run .#hwi-parity-coldcard
 nix run .#hwi-parity-bitbox
+nix run .#hwi-parity-trezor
 ```
 
 To pass additional Cargo test filters or flags, append them after `--`:

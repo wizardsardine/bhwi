@@ -64,6 +64,8 @@ nix run .#hwi-upstream-bitbox
 nix run .#hwi-upstream-coldcard
 nix run .#hwi-upstream-ledger
 nix run .#hwi-upstream-jade
+nix run .#hwi-upstream-trezor
+nix run .#hwi-upstream-trezor-t
 ```
 
 Each app builds `target/debug/hwi`, prepares the pinned simulator in the layout
@@ -93,6 +95,7 @@ starts the emulator on the exact transport that backend already probes:
 | Ledger   | Speculos APDU server over TCP `localhost:9999`     | `nix run .#ledger` |
 | Jade     | QEMU serial over TCP `localhost:30121`             | `nix run .#jade` + `jade-init` |
 | BitBox02 | Firmware simulator TCP `localhost:15423`           | `nix run .#bitbox` |
+| Trezor   | Emulator UDP `127.0.0.1:21324`                     | `nix run .#trezor-one` or `.#trezor-t`, + `trezor-init` |
 
 The flake env blocks only supply build/runtime libraries; they do not tell HWI
 where the emulator is — the backend already knows. Our candidate `bhwi hwi`
@@ -106,6 +109,7 @@ mirrors each with its own `--emulators` enumerate.
 | Coldcard  | `hwi-parity-coldcard`, including file-producing `backup` | `hwi-upstream-coldcard` |
 | Jade      | `hwi-parity-jade` | `hwi-upstream-jade` |
 | BitBox02  | `hwi-parity-bitbox` | `hwi-upstream-bitbox` |
+| Trezor    | `hwi-parity-trezor` | `hwi-upstream-trezor`, `hwi-upstream-trezor-t` |
 
 Coldcard multisig display cases reset simulator state and register the same
 deterministic wallet through the native `bhwi` binary before each reference
@@ -159,3 +163,25 @@ The simulator deliberately stops replying after a successful factory reset.
 CI therefore treats only a read-side disconnect after the reset request as
 success, stops that simulator process, waits for its fixed TCP port to become
 reusable, and starts a fresh process for the restore lifecycle.
+
+## Trezor parity notes
+
+Trezor parity runs against the emulator's UDP transport on `127.0.0.1:21324`.
+Start `trezor-one` (or `trezor-t`) and `trezor-init` before `hwi-parity-trezor`.
+
+The differential suite covers the read, sign, and display command set, including
+multisig `signtx` and multisig `displayaddress`. Commands needing an on-device
+confirmation are driven by a debuglink button presser.
+
+The management commands are covered by the upstream gate rather than the
+differential suite, and upstream runs `TestTrezorManCommands` on the Trezor One
+only, because the Model T takes its PIN and passphrase on its own screen.
+
+`restore` is the exception: upstream has no Trezor restore test, so it is
+covered by `bhwi-e2e-trezor` and `bhwi-e2e-cli` instead. It is supported on the
+Model T, which takes the recovery phrase on its own screen; the Trezor One
+requires host word entry and is unsupported.
+
+`togglepassphrase` runs but is not at parity. Python HWI's enumerate emits a
+`warnings` field for a Trezor One with passphrase protection enabled and no
+passphrase supplied; BHWI emits no `warnings` key for any device.
