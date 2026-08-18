@@ -307,6 +307,8 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use bhwi_e2e_trezor::debuglink::{DEFAULT_DEBUGLINK_ADDR, DebugButton, button_reports};
+
     use bitcoin::{
         Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
         Witness,
@@ -2679,23 +2681,11 @@ mod tests {
 
     fn send_trezor_approval() -> Result<()> {
         let socket = UdpSocket::bind("127.0.0.1:0")?;
-        socket.connect("127.0.0.1:21325")?;
-        socket.send(&trezor_confirm_report())?;
+        socket.connect(DEFAULT_DEBUGLINK_ADDR)?;
+        for report in button_reports(DebugButton::Yes) {
+            socket.send(&report)?;
+        }
         Ok(())
-    }
-
-    fn trezor_confirm_report() -> [u8; 64] {
-        const DEBUGLINK_DECISION: u16 = 100;
-        const DEBUG_BUTTON_YES: [u8; 2] = [0x08, 0x01];
-
-        let mut report = [0u8; 64];
-        report[0] = 0x3f;
-        report[1] = b'#';
-        report[2] = b'#';
-        report[3..5].copy_from_slice(&DEBUGLINK_DECISION.to_be_bytes());
-        report[5..9].copy_from_slice(&(DEBUG_BUTTON_YES.len() as u32).to_be_bytes());
-        report[9..9 + DEBUG_BUTTON_YES.len()].copy_from_slice(&DEBUG_BUTTON_YES);
-        report
     }
 
     fn send_coldcard_approval() -> Result<()> {

@@ -363,6 +363,7 @@ name = "bhwi-e2e-hwi-parity"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bhwi-e2e-trezor",
  "bitcoin",
  "serde_json",
 ]

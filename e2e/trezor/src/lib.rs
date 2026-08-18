@@ -1,5 +1,4 @@
-#[cfg(test)]
-mod debuglink;
+pub mod debuglink;
 
 #[cfg(test)]
 mod tests {
