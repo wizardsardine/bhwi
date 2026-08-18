@@ -1005,8 +1005,8 @@ async fn restore_device(
         && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
     {
         return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceFailure,
-            "Device already initialized. Call device.wipe() and try again.",
+            HwiErrorCode::DeviceAlreadyInitialized,
+            "Device is already initialized. Use wipe first and try again",
         ));
     }
     if !matches!(
