@@ -3,7 +3,10 @@ pub mod debuglink;
 #[cfg(test)]
 mod tests {
     use bhwi::bitcoin::Network;
-    use bhwi::common::{MultisigAddressType, MultisigDisplayAddress};
+    use bhwi::common::{
+        DeviceContext, MultisigAddressType, MultisigDisplayAddress, RestoreOptions,
+    };
+    use bhwi::trezor::ManagementContext;
     use bhwi_async::{DisplayAddress, HWI, Trezor, transport::trezor::TrezorTransport};
     use bhwi_cli::trezor::emulator::{DEFAULT_EMULATOR_ADDR, EmulatorClient};
 
@@ -27,6 +30,12 @@ mod tests {
     const XPUB_86: &str = "tpubDC88gkaZi5HvJGxGDNLADkvtdpni3mLmx6vr2KnXmWMG8zfkBRggsxHVBkUpgcwPe2KKpkyvTJCdXHb1UHEWE64vczyyPQfHr1skBcsRedN";
     const XPUB_84: &str = "tpubDCZB6sR48s4T5Cr8qHUYSZEFCQMMHRg8AoVKVmvcAP5bRw7ArDKeoNwKAJujV3xCPkBvXH5ejSgbgyN6kREmF7sMd41NdbuHa8n1DZNxSMg";
     const MESSAGE_SIGNATURE: &str = "3045022100ffb95fe6080ad50300854f87aef68238e83cda4f81a52dc84ffdf15cb07d53e1022052709e68e1786ece3ff1408c74f1cb39ca176a0ec88f44a52d55e9b45628dfed";
+
+    const RESTORE_MNEMONIC: &str =
+        "alcohol woman abuse must during monitor noble actual mixed trade anger aisle";
+    const RESTORE_FINGERPRINT: &str = "95d8f670";
+    const RESTORE_PIN: &str = "1234";
+    const RESTORE_U2F_COUNTER: u32 = 1;
 
     async fn device() -> Trezor<TrezorTransport<EmulatorClient>> {
         let client = EmulatorClient::new(DEFAULT_EMULATOR_ADDR)
@@ -530,5 +539,68 @@ mod tests {
             _ => "1.13.1",
         };
         assert_eq!(info.version, expected);
+    }
+
+    async fn drive_recovery(debug: &DebugLink) {
+        let screen = Duration::from_millis(1200);
+        let key = Duration::from_millis(350);
+
+        tokio::time::sleep(screen).await;
+        let _ = debug.confirm().await;
+        tokio::time::sleep(screen).await;
+        let _ = debug.input(RESTORE_PIN).await;
+        tokio::time::sleep(screen).await;
+        let _ = debug.input(RESTORE_PIN).await;
+        tokio::time::sleep(screen).await;
+        let _ = debug.input("12").await;
+        tokio::time::sleep(screen).await;
+        let _ = debug.confirm().await;
+        tokio::time::sleep(screen).await;
+        for word in RESTORE_MNEMONIC.split_whitespace() {
+            let _ = debug.input(word).await;
+            tokio::time::sleep(key).await;
+        }
+        loop {
+            tokio::time::sleep(key).await;
+            let _ = debug.confirm().await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a fresh uninitialized Model T and leaves it initialized"]
+    async fn can_restore_from_a_recovery_phrase() {
+        assert_eq!(
+            std::env::var("TREZOR_MODEL").as_deref(),
+            Ok("trezor-t"),
+            "restore takes the recovery phrase on the device screen, which only the Model T has"
+        );
+
+        let client = EmulatorClient::new(DEFAULT_EMULATOR_ADDR)
+            .await
+            .expect("connect to the Trezor emulator");
+        let mut dev = Trezor::new(TrezorTransport::new(client)).with_network(Network::Testnet);
+        let debug = DebugLink::new(DEFAULT_DEBUGLINK_ADDR)
+            .await
+            .expect("connect to debuglink");
+
+        let restored = tokio::select! {
+            done = dev.restore_device(
+                RestoreOptions { label: String::new(), word_count: 12 },
+                Some(DeviceContext::TrezorManagement(ManagementContext::Restore {
+                    u2f_counter: RESTORE_U2F_COUNTER,
+                })),
+            ) => done.expect("restore device"),
+            _ = drive_recovery(&debug) => unreachable!(),
+        };
+        assert!(restored);
+
+        dev.unlock(Network::Testnet)
+            .await
+            .expect("reopen a session after restore");
+        let fingerprint = dev
+            .get_master_fingerprint()
+            .await
+            .expect("get master fingerprint after restore");
+        assert_eq!(fingerprint.to_string(), RESTORE_FINGERPRINT);
     }
 }
