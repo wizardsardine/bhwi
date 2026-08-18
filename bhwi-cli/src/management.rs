@@ -19,6 +19,17 @@ pub fn trezor_pin_context(positions: String) -> Result<DeviceContext> {
     ))
 }
 
+pub fn trezor_restore_context() -> Result<DeviceContext> {
+    let u2f_counter = u2f_counter_from(Local::now().timestamp())?;
+    Ok(DeviceContext::TrezorManagement(
+        bhwi::trezor::ManagementContext::Restore { u2f_counter },
+    ))
+}
+
+fn u2f_counter_from(timestamp: i64) -> Result<u32> {
+    u32::try_from(timestamp).context("current timestamp does not fit in u32")
+}
+
 pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
     let mode = if is_emulated {

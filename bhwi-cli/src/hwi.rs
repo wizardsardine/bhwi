@@ -37,7 +37,9 @@ use crate::{
     Device, DeviceManager, DeviceType,
     config::DeviceSelector,
     get_descriptors::GetDescriptorOptions,
-    management::{bitbox_restore_context, bitbox_setup_context, trezor_setup_context},
+    management::{
+        bitbox_restore_context, bitbox_setup_context, trezor_restore_context, trezor_setup_context,
+    },
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -1007,7 +1009,10 @@ async fn restore_device(
             "Device already initialized. Call device.wipe() and try again.",
         ));
     }
-    if device.device_type() != DeviceType::BitBox02 {
+    if !matches!(
+        device.device_type(),
+        DeviceType::BitBox02 | DeviceType::Trezor
+    ) {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             hwi_unavailable_action_message(
@@ -1020,22 +1025,36 @@ async fn restore_device(
             ),
         ));
     }
-    if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::UnsupportedCommand,
-            "The BitBox02 must be wiped before setup.",
-        ));
-    }
-
-    let context = match bitbox_restore_context() {
-        Ok(context) => context,
-        Err(err) => {
-            return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, err.to_string()));
+    let context = if device.device_type() == DeviceType::BitBox02 {
+        if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::UnsupportedCommand,
+                "The BitBox02 must be wiped before setup.",
+            ));
+        }
+        match bitbox_restore_context() {
+            Ok(context) => Some(context),
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
+        }
+    } else {
+        match trezor_restore_context() {
+            Ok(context) => Some(context),
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
         }
     };
     match device
         .device()
-        .restore_device(RestoreOptions { label, word_count }, Some(context))
+        .restore_device(RestoreOptions { label, word_count }, context)
         .await
     {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),

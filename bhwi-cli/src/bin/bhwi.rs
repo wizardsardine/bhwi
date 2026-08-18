@@ -9,7 +9,8 @@ use bhwi_cli::{
     get_descriptors::GetKeypoolOptions,
     hwi::PIN_MATRIX_DESCRIPTION,
     management::{
-        bitbox_restore_context, bitbox_setup_context, trezor_pin_context, trezor_setup_context,
+        bitbox_restore_context, bitbox_setup_context, trezor_pin_context, trezor_restore_context,
+        trezor_setup_context,
     },
     udev::{UdevRuleSelection, install_udev_rules},
 };
@@ -174,11 +175,14 @@ enum DeviceCommands {
     },
     /// Erase wallet material from the selected device
     Wipe,
-    /// Restore an unseeded BitBox02 using its on-device mnemonic flow
+    /// Restore an unseeded device using its on-device mnemonic flow
     Restore {
         /// User-visible device name
         #[arg(long, short, default_value = "")]
         label: String,
+        /// Number of words in the recovery phrase
+        #[arg(long, short, default_value_t = 24)]
+        word_count: i32,
     },
     /// Toggle mnemonic-passphrase use on the selected device
     TogglePassphrase,
@@ -430,24 +434,21 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Device(DeviceCommands::Restore { label }) => {
+        Commands::Device(DeviceCommands::Restore { label, word_count }) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
-                if device.device_type() != DeviceType::BitBox02 {
-                    anyhow::bail!("device restore is currently supported only for BitBox02");
-                }
-                let context = bitbox_restore_context()?;
+                let context = match device.device_type() {
+                    DeviceType::BitBox02 => bitbox_restore_context()?,
+                    DeviceType::Trezor => trezor_restore_context()?,
+                    device_type => {
+                        anyhow::bail!("device restore is not supported for {device_type}")
+                    }
+                };
                 if !device
                     .device()
-                    .restore_device(
-                        RestoreOptions {
-                            label,
-                            word_count: 24,
-                        },
-                        Some(context),
-                    )
+                    .restore_device(RestoreOptions { label, word_count }, Some(context))
                     .await?
                 {
-                    anyhow::bail!("BitBox02 restore was not completed");
+                    anyhow::bail!("device restore was not completed");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
@@ -744,7 +745,18 @@ mod tests {
             .expect("parse device restore");
         assert!(matches!(
             args.command,
-            Commands::Device(DeviceCommands::Restore { label }) if label == "Recovered"
+            Commands::Device(DeviceCommands::Restore { label, word_count })
+                if label == "Recovered" && word_count == 24
+        ));
+    }
+
+    #[test]
+    fn parses_device_restore_word_count() {
+        let args = Args::try_parse_from(["bhwi", "device", "restore", "--word-count", "12"])
+            .expect("parse device restore word count");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Restore { word_count, .. }) if word_count == 12
         ));
     }
 
