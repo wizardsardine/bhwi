@@ -336,6 +336,7 @@ dependencies = [
  "anyhow",
  "bhwi-async",
  "bhwi-cli",
+ "bhwi-e2e-trezor",
  "bitcoin",
  "hex",
  "reqwest",
