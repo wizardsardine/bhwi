@@ -502,6 +502,14 @@ jobs:
             cat trezor-cli-e2e.log || true
             exit 1
           }
+      - name: Run HWI parity tests
+        run: |
+          set -o pipefail
+          nix run .#hwi-parity-trezor -- -- --test-threads=1 2>&1 | tee trezor-hwi-parity.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Trezor HWI parity log" trezor-hwi-parity.log
+            cat trezor-hwi-parity.log || true
+            exit 1
+          }
       - name: Stop Trezor emulator
         if: always()
         run: bash nix/scripts/stop-emulator.sh trezor.pid
