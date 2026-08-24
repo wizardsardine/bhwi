@@ -62,10 +62,17 @@ via `sim_keypress`, so its refusal path cannot be exercised there and its codes
 are pinned from upstream source); Jade and BitBox refusals are covered by
 protocol unit tests only.
 
-Known divergence: values rejected by a type or value parser rather than by
-argument structure, such as `getkeypool notanum 5` or an invalid derivation
-path, stay on the runtime path and exit `0` with code `-7` where upstream exits
-`2` with code `-2`. That ordering difference is tracked separately.
+Argument validation follows upstream's ordering: device lookup runs first, so
+an invalid derivation path, PSBT, or unknown `-t` value reports `-3` when no
+device matches. With a device attached an invalid path is `-7` (except BitBox
+`getxpub`, whose upstream handler reports `-13`) and an invalid PSBT is `-5`;
+an unknown `-t` with `-d` (and no fingerprint) is `-4` from the `get_client`
+path. `enumerate` ignores an unrecognized `-t`, like upstream.
+
+Known divergence: values rejected by a numeric value parser, such as
+`getkeypool notanum 5`, stay on the runtime path and exit `0` with code `-7`
+where upstream exits `2` with code `-2`. That difference is tracked
+separately.
 
 ## Final acceptance gate
 

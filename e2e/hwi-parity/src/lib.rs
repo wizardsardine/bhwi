@@ -382,6 +382,61 @@ mod tests {
     }
 
     #[test]
+    fn candidate_validation_order_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        // Unknown device type: the lookup decides. Without -d nothing can
+        // match (-3); with -d upstream's get_client rejects the type (-4).
+        // These hold whether or not an emulator is attached.
+        let mut cases: Vec<(Vec<String>, i64)> = vec![
+            (args(["-t", "bogus", "getxpub", "m/44h/1h/0h"]), -3),
+            (args(["-t", "bogus", "signtx", "notapsbt"]), -3),
+            (
+                args(["-t", "bogus", "signmessage", "hello", "bad/path"]),
+                -3,
+            ),
+            (
+                args(["-t", "bogus", "-d", "/dev/bogus", "getxpub", "m/44h/1h/0h"]),
+                -4,
+            ),
+        ];
+
+        // With a device attached, argument validation runs after lookup:
+        // invalid PSBTs are INVALID_TX (-5) and invalid paths BAD_ARGUMENT (-7).
+        if let Some(device_type) = expected_device_type_from_env()? {
+            let with_device = |rest: &[&str]| {
+                let mut argv = args(["--emulators", "--chain", "test", "-t", &device_type]);
+                argv.extend(rest.iter().map(|arg| (*arg).to_owned()));
+                argv
+            };
+            cases.push((with_device(&["signtx", "notapsbt"]), -5));
+            let bad_xpub_path_code = if device_type == "bitbox02" { -13 } else { -7 };
+            cases.push((with_device(&["getxpub", "not_a_path"]), bad_xpub_path_code));
+            cases.push((with_device(&["signmessage", "hello", "bad/path"]), -7));
+            cases.push((with_device(&["displayaddress", "--path", "bad/path"]), -7));
+        }
+
+        for (case, expected_code) in cases {
+            let reference = HwiBinary::reference()?.run(case.clone())?;
+            let candidate = HwiBinary::candidate()?.run(case.clone())?;
+            for (label, output) in [("reference", &reference), ("candidate", &candidate)] {
+                assert_success(label, output)?;
+                let code = output.json.get("code").and_then(Value::as_i64);
+                if code != Some(expected_code) {
+                    bail!(
+                        "{label} hwi {case:?} expected code {expected_code}, got {code:?}\nstdout:\n{}",
+                        output.stdout
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn candidate_help_and_version_status_matches_reference() -> Result<()> {
         if env::var("HWI_BIN").is_err() {
             return Ok(());
