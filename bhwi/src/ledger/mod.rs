@@ -56,6 +56,18 @@ pub enum LedgerError {
 
     #[error("invalid psbt: {0}")]
     InvalidPsbt(String),
+
+    #[error("action canceled by the user")]
+    UserCancelled,
+}
+
+/// Upstream HWI's Ledger `cancels` list: 0x6982 and 0x6985 are user
+/// cancellations rather than protocol failures.
+fn is_cancel(status_word: StatusWord) -> bool {
+    matches!(
+        status_word,
+        StatusWord::Deny | StatusWord::SecurityStatusNotSatisfied
+    )
 }
 
 impl LedgerError {
@@ -548,8 +560,8 @@ where
                 )
             }
             State::GetWalletAddress(GetWalletAddressStep::WalletAddress { mut store }) => {
-                if res.status_word == StatusWord::Deny {
-                    (State::Finished(LedgerResponse::TaskDone), None)
+                if is_cancel(res.status_word) {
+                    return Err(LedgerError::UserCancelled.into());
                 } else if res.status_word == StatusWord::InterruptedExecution {
                     if let Some(ref mut s) = store {
                         let transmit = s.execute(res.data).map_err(LedgerError::from)?;
@@ -658,9 +670,10 @@ where
                         }
                     }
                     LedgerCommand::SignMessage { .. } => match res.status_word {
-                        StatusWord::Deny
-                        | StatusWord::ClaNotSupported
-                        | StatusWord::SignatureFail => {
+                        status if is_cancel(status) => {
+                            return Err(LedgerError::UserCancelled.into());
+                        }
+                        StatusWord::ClaNotSupported | StatusWord::SignatureFail => {
                             (State::Finished(LedgerResponse::TaskDone), None)
                         }
                         StatusWord::OK => {
@@ -682,8 +695,8 @@ where
                         }
                     },
                     LedgerCommand::GetWalletAddress { .. } => {
-                        if res.status_word == StatusWord::Deny {
-                            (State::Finished(LedgerResponse::TaskDone), None)
+                        if is_cancel(res.status_word) {
+                            return Err(LedgerError::UserCancelled.into());
                         } else if res.status_word == StatusWord::OK {
                             let address = String::from_utf8(res.data).map_err(|e| {
                                 LedgerError::unexpected_result(vec![], e.to_string())
@@ -698,6 +711,9 @@ where
                         }
                     }
                     LedgerCommand::RegisterWallet { .. } => {
+                        if is_cancel(res.status_word) {
+                            return Err(LedgerError::UserCancelled.into());
+                        }
                         if res.status_word != StatusWord::OK {
                             return Err(LedgerError::unexpected_result(
                                 res.data,
@@ -717,9 +733,10 @@ where
                         (State::Finished(LedgerResponse::WalletHmac(hmac)), None)
                     }
                     LedgerCommand::SignPsbt { mut psbt, .. } => match res.status_word {
-                        StatusWord::Deny
-                        | StatusWord::ClaNotSupported
-                        | StatusWord::SignatureFail => {
+                        status if is_cancel(status) => {
+                            return Err(LedgerError::UserCancelled.into());
+                        }
+                        StatusWord::ClaNotSupported | StatusWord::SignatureFail => {
                             (State::Finished(LedgerResponse::TaskDone), None)
                         }
                         StatusWord::OK => {

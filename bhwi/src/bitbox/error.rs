@@ -76,6 +76,8 @@ pub enum BitBoxError {
     BtcSign(String),
     #[error("invalid input: {0}")]
     InvalidInput(&'static str),
+    #[error("unsupported display address: {0}")]
+    UnsupportedDisplayAddress(&'static str),
     #[error("communication framing error: {0}")]
     Framing(&'static str),
     #[error("transport error: {0}")]

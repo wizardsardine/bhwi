@@ -60,6 +60,9 @@ impl TryFrom<u8> for ClientCommandCode {
 pub enum StatusWord {
     /// Rejected by user
     Deny = 0x6985,
+    /// Security status not satisfied; also user rejection (upstream HWI
+    /// treats 0x6982 and 0x6985 as cancellations)
+    SecurityStatusNotSatisfied = 0x6982,
     /// Incorrect Data
     IncorrectData = 0x6A80,
     /// Not Supported
@@ -90,6 +93,7 @@ impl TryFrom<u16> for StatusWord {
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
             0x6985 => Ok(StatusWord::Deny),
+            0x6982 => Ok(StatusWord::SecurityStatusNotSatisfied),
             0x6901 => Ok(StatusWord::CommandNotAllowed),
             0x6A80 => Ok(StatusWord::IncorrectData),
             0x6A82 => Ok(StatusWord::NotSupported),

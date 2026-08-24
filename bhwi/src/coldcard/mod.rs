@@ -41,6 +41,10 @@ pub enum ColdcardError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
+    /// User refused the action on the device (`refu` frame)
+    #[error("action canceled by the user")]
+    UserCancelled,
+
     /// Unexpected response message from device
     #[error("unexpected response message: got {got:?}, expected {expected:?}")]
     UnexpectedResponseMessage {
