@@ -8,7 +8,6 @@ use bitcoin::psbt::Psbt;
 use bitcoin::{Network, NetworkKind, Transaction};
 
 use crate::Interpreter;
-use crate::common;
 use crate::miniscript::descriptor::{DescriptorPublicKey, SinglePubKey, Wildcard};
 use crate::trezor::api::{self, MessageType};
 use crate::trezor::error::TrezorError;
@@ -27,7 +26,7 @@ pub enum TrezorCommand {
         display: bool,
         script_type: btc::InputScriptType,
     },
-    GetMultisigAddress(common::MultisigDisplayAddress),
+    GetMultisigAddress(TrezorMultisigAddress),
     SignMessage {
         address_n: Vec<u32>,
         message: Vec<u8>,
@@ -51,14 +50,39 @@ pub enum TrezorCommand {
 /// m/44'/1'/0', the key asked for to raise the keypad. The reply is never read.
 const PIN_PROMPT_PATH: [u32; 3] = [0x8000_002c, 0x8000_0001, 0x8000_0000];
 
+pub struct TrezorMultisigAddress {
+    pub threshold: u8,
+    pub address_type: TrezorMultisigAddressType,
+    pub sorted: bool,
+    pub keys: Vec<DescriptorPublicKey>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TrezorMultisigAddressType {
+    Legacy,
+    ShWit,
+    Wit,
+}
+
 pub enum TrezorResponse {
     DeviceAction(bool),
     SignedPsbt(Box<Psbt>),
-    Info(common::Info),
+    Info(TrezorDeviceInfo),
     MasterFingerprint(Fingerprint),
     Xpub(Xpub),
     Address(String),
     Signature(u8, bitcoin::secp256k1::ecdsa::Signature),
+}
+
+pub struct TrezorDeviceInfo {
+    pub version: String,
+    /// The network the session was opened for; Features does not report one.
+    pub network: Network,
+    pub model: Option<String>,
+    pub initialized: Option<bool>,
+    pub label: Option<String>,
+    pub on_device_passphrase_entry: bool,
+    pub needs_pin_sent: bool,
 }
 
 enum PublicKeyKind {
@@ -626,130 +650,6 @@ where
     }
 }
 
-impl TryFrom<common::Command> for TrezorCommand {
-    type Error = TrezorError;
-
-    fn try_from(command: common::Command) -> Result<Self, TrezorError> {
-        use common::Command;
-        Ok(match command {
-            Command::Unlock { options } => TrezorCommand::Initialize(options.network),
-            Command::GetVersion => TrezorCommand::GetFeatures,
-            Command::GetMasterFingerprint => TrezorCommand::GetMasterFingerprint,
-            Command::GetXpub { path, display } => TrezorCommand::GetXpub {
-                address_n: address_n(&path),
-                display,
-            },
-            Command::DisplayAddress(
-                common::DisplayAddress::ByPath {
-                    path,
-                    display,
-                    address_format,
-                },
-                _,
-            ) => TrezorCommand::GetAddress {
-                address_n: address_n(&path),
-                display,
-                script_type: script_type(address_format, &path),
-            },
-            Command::DisplayAddress(common::DisplayAddress::ByDescriptor { .. }, _) => {
-                return Err(TrezorError::UnsupportedDisplayAddress(
-                    "descriptor address display is not yet supported",
-                ));
-            }
-            Command::DisplayAddress(common::DisplayAddress::ByMultisig(address), _) => {
-                TrezorCommand::GetMultisigAddress(address)
-            }
-            Command::SignTx(psbt, context) => {
-                if context.is_some() {
-                    return Err(TrezorError::Unsupported(
-                        "Trezor SignTx does not support device context",
-                    ));
-                }
-                TrezorCommand::SignTx(Box::new(psbt))
-            }
-            Command::SignMessage { message, path } => TrezorCommand::SignMessage {
-                address_n: address_n(&path),
-                message,
-            },
-            Command::RegisterWallet { .. } => {
-                return Err(TrezorError::Unsupported("register_wallet is not supported"));
-            }
-            Command::Backup => {
-                return Err(TrezorError::Unsupported("backup is not yet supported"));
-            }
-            Command::Setup(options, context) => {
-                let Some(common::DeviceContext::TrezorManagement(
-                    crate::trezor::ManagementContext::Setup { host_entropy },
-                )) = context
-                else {
-                    return Err(TrezorError::Unsupported(
-                        "Trezor setup requires host entropy in the device context",
-                    ));
-                };
-                TrezorCommand::Setup {
-                    label: (!options.label.is_empty()).then_some(options.label),
-                    host_entropy,
-                }
-            }
-            Command::Wipe => TrezorCommand::Wipe,
-            Command::Restore(options, context) => {
-                let Some(common::DeviceContext::TrezorManagement(
-                    crate::trezor::ManagementContext::Restore { u2f_counter },
-                )) = context
-                else {
-                    return Err(TrezorError::Unsupported(
-                        "Trezor restore requires a U2F counter in the device context",
-                    ));
-                };
-                let word_count = u32::try_from(options.word_count).map_err(|_| {
-                    TrezorError::InvalidInput("restore word count must be positive".into())
-                })?;
-                if !matches!(word_count, 12 | 18 | 24) {
-                    return Err(TrezorError::InvalidInput(
-                        "restore word count must be 12, 18, or 24".into(),
-                    ));
-                }
-                TrezorCommand::Restore {
-                    label: (!options.label.is_empty()).then_some(options.label),
-                    word_count,
-                    u2f_counter,
-                }
-            }
-            Command::TogglePassphrase => TrezorCommand::TogglePassphrase,
-            Command::PromptPin => TrezorCommand::PromptPin,
-            Command::SendPin(context) => {
-                let Some(common::DeviceContext::TrezorManagement(
-                    crate::trezor::ManagementContext::Pin(pin),
-                )) = context
-                else {
-                    return Err(TrezorError::Unsupported(
-                        "Trezor sendpin requires the PIN positions in the device context",
-                    ));
-                };
-                TrezorCommand::SendPin(pin)
-            }
-        })
-    }
-}
-
-impl From<TrezorResponse> for common::Response {
-    fn from(response: TrezorResponse) -> Self {
-        match response {
-            TrezorResponse::Info(info) => common::Response::Info(info),
-            TrezorResponse::MasterFingerprint(fingerprint) => {
-                common::Response::MasterFingerprint(fingerprint)
-            }
-            TrezorResponse::Xpub(xpub) => common::Response::Xpub(xpub),
-            TrezorResponse::Address(address) => common::Response::Address(address),
-            TrezorResponse::Signature(header, signature) => {
-                common::Response::Signature(header, signature)
-            }
-            TrezorResponse::SignedPsbt(psbt) => common::Response::SignedPsbt(*psbt),
-            TrezorResponse::DeviceAction(success) => common::Response::DeviceAction(success),
-        }
-    }
-}
-
 fn check_pin_needed(features: &mgmt::Features) -> Result<(), TrezorError> {
     if !features.pin_protection.unwrap_or(false) {
         return Err(TrezorError::AlreadyUnlocked(TrezorError::NO_PIN_NEEDED));
@@ -791,21 +691,20 @@ fn failure_error(failure: pb::Failure) -> TrezorError {
     }
 }
 
-fn features_info(features: mgmt::Features, network: Network) -> common::Info {
+fn features_info(features: mgmt::Features, network: Network) -> TrezorDeviceInfo {
     let on_device = on_device_passphrase_entry(&features);
-    common::Info {
+    TrezorDeviceInfo {
         version: format!(
             "{}.{}.{}",
             features.major_version, features.minor_version, features.patch_version
         ),
-        networks: vec![network],
-        firmware: features.model,
+        network,
+        model: features.model,
         initialized: features.initialized,
         label: features.label,
-        on_device_passphrase_entry: Some(on_device),
-        needs_pin_sent: Some(
-            features.pin_protection.unwrap_or(false) && !features.unlocked.unwrap_or(false),
-        ),
+        on_device_passphrase_entry: on_device,
+        needs_pin_sent: features.pin_protection.unwrap_or(false)
+            && !features.unlocked.unwrap_or(false),
     }
 }
 
@@ -995,11 +894,11 @@ fn multisig_node_from_xpubs(
     })
 }
 
-fn multisig_script_type(address_type: common::MultisigAddressType) -> btc::InputScriptType {
+fn multisig_script_type(address_type: TrezorMultisigAddressType) -> btc::InputScriptType {
     match address_type {
-        common::MultisigAddressType::Legacy => btc::InputScriptType::Spendmultisig,
-        common::MultisigAddressType::ShWit => btc::InputScriptType::Spendp2shwitness,
-        common::MultisigAddressType::Wit => btc::InputScriptType::Spendwitness,
+        TrezorMultisigAddressType::Legacy => btc::InputScriptType::Spendmultisig,
+        TrezorMultisigAddressType::ShWit => btc::InputScriptType::Spendp2shwitness,
+        TrezorMultisigAddressType::Wit => btc::InputScriptType::Spendwitness,
     }
 }
 
@@ -1014,7 +913,7 @@ fn origin_path(origin: Option<&(Fingerprint, DerivationPath)>) -> Vec<u32> {
 }
 
 fn multisig_script(
-    address: &common::MultisigDisplayAddress,
+    address: &TrezorMultisigAddress,
 ) -> Result<(btc::MultisigRedeemScriptType, Vec<Vec<u32>>), TrezorError> {
     let secp = bitcoin::secp256k1::Secp256k1::verification_only();
     let mut keys = address
@@ -1553,7 +1452,7 @@ fn drive_sign(ctx: &mut SignCtx, request: btc::TxRequest) -> Result<SignStep, Tr
     Ok(SignStep::Continue(api::tx_ack(ack)))
 }
 
-fn address_n(path: &DerivationPath) -> Vec<u32> {
+pub(crate) fn address_n(path: &DerivationPath) -> Vec<u32> {
     path.into_iter().map(|child| u32::from(*child)).collect()
 }
 
@@ -1561,7 +1460,10 @@ fn parse_xpub(xpub: &str) -> Result<Xpub, TrezorError> {
     Xpub::from_str(xpub).map_err(|e| TrezorError::InvalidInput(e.to_string()))
 }
 
-fn script_type(format: Option<AddressType>, path: &DerivationPath) -> btc::InputScriptType {
+pub(crate) fn script_type(
+    format: Option<AddressType>,
+    path: &DerivationPath,
+) -> btc::InputScriptType {
     match format {
         Some(AddressType::P2pkh) => btc::InputScriptType::Spendaddress,
         Some(AddressType::P2sh) => btc::InputScriptType::Spendp2shwitness,
@@ -1596,6 +1498,7 @@ fn coin_name(network: Network) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common;
     use crate::common::{Command, DisplayAddress, Error, Response, Transmit};
     use prost::Message;
 
@@ -1923,20 +1826,14 @@ mod tests {
             capabilities: vec![mgmt::features::Capability::PassphraseEntry as i32],
             ..Default::default()
         };
-        assert_eq!(
-            features_info(one, Network::Testnet).on_device_passphrase_entry,
-            Some(true)
-        );
+        assert!(features_info(one, Network::Testnet).on_device_passphrase_entry);
 
         let model_t = mgmt::Features {
             model: Some("T".into()),
             capabilities: Vec::new(),
             ..Default::default()
         };
-        assert_eq!(
-            features_info(model_t, Network::Testnet).on_device_passphrase_entry,
-            Some(false)
-        );
+        assert!(!features_info(model_t, Network::Testnet).on_device_passphrase_entry);
     }
 
     #[test]
@@ -2548,27 +2445,18 @@ mod tests {
 
     #[test]
     fn features_report_whether_a_pin_is_still_needed() {
-        assert_eq!(
-            features_info(locked_features(), Network::Testnet).needs_pin_sent,
-            Some(true)
-        );
+        assert!(features_info(locked_features(), Network::Testnet).needs_pin_sent);
         let unlocked = mgmt::Features {
             pin_protection: Some(true),
             unlocked: Some(true),
             ..Default::default()
         };
-        assert_eq!(
-            features_info(unlocked, Network::Testnet).needs_pin_sent,
-            Some(false)
-        );
+        assert!(!features_info(unlocked, Network::Testnet).needs_pin_sent);
         let no_pin = mgmt::Features {
             pin_protection: Some(false),
             ..Default::default()
         };
-        assert_eq!(
-            features_info(no_pin, Network::Testnet).needs_pin_sent,
-            Some(false)
-        );
+        assert!(!features_info(no_pin, Network::Testnet).needs_pin_sent);
     }
 
     #[test]

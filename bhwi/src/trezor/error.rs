@@ -1,5 +1,3 @@
-use crate::common;
-
 #[derive(Debug, thiserror::Error)]
 pub enum TrezorError {
     #[error("protobuf decode error: {0}")]
@@ -37,39 +35,4 @@ impl TrezorError {
     pub const PIN_ALREADY_SENT: &'static str = "The PIN has already been sent to this device";
     pub const LOCKED: &'static str =
         "Trezor is locked. Unlock by using 'promptpin' and then 'sendpin'.";
-}
-
-impl From<TrezorError> for common::Error {
-    fn from(e: TrezorError) -> Self {
-        match e {
-            TrezorError::Decode(err) => common::Error::Serialization(err.to_string()),
-            TrezorError::MalformedFrame => {
-                common::Error::Serialization("malformed trezor message frame".into())
-            }
-            TrezorError::UnexpectedMessage(t, ctx) => {
-                common::Error::unexpected_result(t.to_be_bytes().to_vec(), format!("trezor: {ctx}"))
-            }
-            TrezorError::Failure(code, msg) => common::Error::Rpc(code, Some(msg)),
-            TrezorError::Locked(ctx) => common::Error::Device(ctx.into()),
-            TrezorError::NetworkMismatch => {
-                common::Error::InvalidInput("device returned a key for the wrong network".into())
-            }
-            TrezorError::ActionCancelled => common::Error::AuthenticationRefused,
-            TrezorError::AlreadyInitialized => common::Error::Device(
-                "Device is already initialized. Use wipe first and try again".into(),
-            ),
-            TrezorError::Unsupported(s) => common::Error::MissingCommandInfo(s),
-            TrezorError::UnsupportedDisplayAddress(s) => {
-                common::Error::UnsupportedDisplayAddress(s.into())
-            }
-            TrezorError::PassphraseTooLong => {
-                common::Error::InvalidInput("Passphrase too long".into())
-            }
-            TrezorError::NonNumericPin => {
-                common::Error::InvalidInput("Non-numeric PIN provided".into())
-            }
-            TrezorError::AlreadyUnlocked(s) => common::Error::DeviceAlreadyUnlocked(s),
-            TrezorError::InvalidInput(s) => common::Error::InvalidInput(s),
-        }
-    }
 }

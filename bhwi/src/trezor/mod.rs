@@ -56,7 +56,10 @@ impl core::fmt::Debug for HostPin {
     }
 }
 
-pub use interpreter::{TrezorCommand, TrezorInterpreter, TrezorResponse};
+pub use interpreter::{
+    TrezorCommand, TrezorDeviceInfo, TrezorInterpreter, TrezorMultisigAddress,
+    TrezorMultisigAddressType, TrezorResponse,
+};
 
 /// External data needed by Trezor management commands while keeping the interpreter sans-I/O.
 #[derive(Clone, Debug)]
