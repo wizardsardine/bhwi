@@ -288,8 +288,10 @@ mod tests {
         base64::prelude::{BASE64_STANDARD, Engine as _},
         bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub},
         blockdata::{opcodes::all::OP_CHECKMULTISIG, script::Builder},
+        key::TapTweak,
         psbt::{Input, Output as PsbtOutput, Psbt},
-        secp256k1::Secp256k1,
+        secp256k1::{Message, Secp256k1},
+        sighash::{Prevouts, SighashCache},
         transaction::Version as TxVersion,
     };
 
@@ -467,14 +469,26 @@ mod tests {
             return Ok(());
         };
 
-        let singlesig = build_singlesig_signtx_case(&device_type)?;
-        assert_signtx_parity(signtx_args(&device_type, &singlesig.psbt), &singlesig)
-            .with_context(|| format!("signtx singlesig parity failed for {device_type}"))?;
-
         if device_type == "ledger" {
-            let multisig = build_ledger_multisig_signtx_case(&device_type)?;
-            assert_signtx_parity(signtx_args(&device_type, &multisig.psbt), &multisig)
-                .context("signtx Ledger multisig parity failed")?;
+            for wrapper in LedgerSinglesigWrapper::ALL {
+                let case = build_singlesig_signtx_case(&device_type, wrapper)?;
+                assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case).with_context(
+                    || format!("signtx Ledger {wrapper:?} singlesig parity failed"),
+                )?;
+            }
+            for wrapper in LedgerMultisigWrapper::ALL {
+                let case = build_ledger_multisig_signtx_case(&device_type, wrapper)?;
+                assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case)
+                    .with_context(|| format!("signtx Ledger {wrapper:?} multisig parity failed"))?;
+            }
+
+            let mixed = build_ledger_mixed_policy_signtx_case(&device_type)?;
+            assert_signtx_parity(signtx_args(&device_type, &mixed.psbt), &mixed)
+                .context("signtx Ledger mixed-policy parity failed")?;
+        } else {
+            let singlesig = build_singlesig_signtx_case(&device_type, LedgerSinglesigWrapper::Wit)?;
+            assert_signtx_parity(signtx_args(&device_type, &singlesig.psbt), &singlesig)
+                .with_context(|| format!("signtx singlesig parity failed for {device_type}"))?;
         }
 
         Ok(())
@@ -1152,13 +1166,92 @@ mod tests {
         if signed_psbt.inputs.len() != case.original.inputs.len() {
             bail!("{label} hwi signtx changed the input count");
         }
-        if !signed_psbt.inputs[0]
-            .partial_sigs
-            .contains_key(&case.expected_pubkey)
-        {
-            bail!("{label} hwi signtx did not add the expected device signature");
+        for expected in &case.expected_signatures {
+            assert_expected_signature(label, &signed_psbt, case, *expected)?;
         }
         Ok(signed_psbt)
+    }
+
+    fn assert_expected_signature(
+        label: &str,
+        signed: &Psbt,
+        case: &SigntxCase,
+        expected: ExpectedSignature,
+    ) -> Result<()> {
+        let input = &signed.inputs[expected.input_index];
+        match expected.kind {
+            ExpectedSignatureKind::Ecdsa => {
+                let signature = input.partial_sigs.get(&expected.pubkey).with_context(|| {
+                    format!(
+                        "{label} hwi signtx did not add the expected device signature to input {}",
+                        expected.input_index
+                    )
+                })?;
+                if case.verify_signatures {
+                    let mut cache = SighashCache::new(&case.original.unsigned_tx);
+                    let (message, sighash_type) = case
+                        .original
+                        .sighash_ecdsa(expected.input_index, &mut cache)
+                        .with_context(|| {
+                            format!("calculate input {} sighash", expected.input_index)
+                        })?;
+                    if signature.sighash_type != sighash_type {
+                        bail!(
+                            "{label} hwi signtx used an unexpected sighash type on input {}",
+                            expected.input_index
+                        );
+                    }
+                    Secp256k1::verification_only()
+                        .verify_ecdsa(&message, &signature.signature, &expected.pubkey.inner)
+                        .with_context(|| {
+                            format!(
+                                "{label} hwi signtx returned an invalid signature on input {}",
+                                expected.input_index
+                            )
+                        })?;
+                }
+            }
+            ExpectedSignatureKind::TapKey => {
+                let signature = input.tap_key_sig.as_ref().with_context(|| {
+                    format!(
+                        "{label} hwi signtx did not add the expected taproot signature to input {}",
+                        expected.input_index
+                    )
+                })?;
+                if case.verify_signatures {
+                    let prevouts = case
+                        .original
+                        .inputs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| case.original.spend_utxo(index).cloned())
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    let sighash = SighashCache::new(&case.original.unsigned_tx)
+                        .taproot_key_spend_signature_hash(
+                            expected.input_index,
+                            &Prevouts::All(&prevouts),
+                            signature.sighash_type,
+                        )?;
+                    let internal_key = expected.pubkey.inner.x_only_public_key().0;
+                    let tweaked = internal_key
+                        .tap_tweak(
+                            &Secp256k1::verification_only(),
+                            case.original.inputs[expected.input_index].tap_merkle_root,
+                        )
+                        .0
+                        .to_x_only_public_key();
+                    Secp256k1::verification_only()
+                        .verify_schnorr(&signature.signature, &Message::from(sighash), &tweaked)
+                        .with_context(|| {
+                            format!(
+                                "{label} hwi signtx returned an invalid taproot signature on input {}",
+                                expected.input_index
+                            )
+                        })?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn assert_getxpub_shape(label: &str, json: &Value, expert: bool) -> Result<()> {
@@ -1483,16 +1576,65 @@ mod tests {
     struct SigntxCase {
         psbt: String,
         original: Psbt,
-        expected_pubkey: PublicKey,
+        expected_signatures: Vec<ExpectedSignature>,
         ledger_registers_wallet: bool,
+        verify_signatures: bool,
     }
 
-    fn build_singlesig_signtx_case(device_type: &str) -> Result<SigntxCase> {
+    #[derive(Clone, Copy)]
+    struct ExpectedSignature {
+        input_index: usize,
+        pubkey: PublicKey,
+        kind: ExpectedSignatureKind,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ExpectedSignatureKind {
+        Ecdsa,
+        TapKey,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum LedgerSinglesigWrapper {
+        Legacy,
+        ShWit,
+        Wit,
+        Tap,
+    }
+
+    impl LedgerSinglesigWrapper {
+        const ALL: [Self; 4] = [Self::Legacy, Self::ShWit, Self::Wit, Self::Tap];
+
+        fn purpose(self) -> u32 {
+            match self {
+                Self::Legacy => 44,
+                Self::ShWit => 49,
+                Self::Wit => 84,
+                Self::Tap => 86,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum LedgerMultisigWrapper {
+        Legacy,
+        ShWit,
+        Wit,
+    }
+
+    impl LedgerMultisigWrapper {
+        const ALL: [Self; 3] = [Self::Legacy, Self::ShWit, Self::Wit];
+    }
+
+    fn build_singlesig_signtx_case(
+        device_type: &str,
+        wrapper: LedgerSinglesigWrapper,
+    ) -> Result<SigntxCase> {
         let fingerprint = reference_fingerprint(device_type)?;
-        let account_xpub = reference_xpub(device_type, "m/84'/1'/0'")?;
+        let purpose = wrapper.purpose();
+        let account_path = DerivationPath::from_str(&format!("m/{purpose}'/1'/0'"))?;
+        let account_xpub = reference_xpub(device_type, &format!("m/{purpose}'/1'/0'"))?;
         let secp = Secp256k1::verification_only();
-        let input_path = DerivationPath::from_str("m/84'/1'/0'/0/0")?;
-        let change_path = DerivationPath::from_str("m/84'/1'/0'/1/0")?;
         let input_child_path = DerivationPath::from(vec![
             ChildNumber::from_normal_idx(0)?,
             ChildNumber::from_normal_idx(0)?,
@@ -1505,36 +1647,110 @@ mod tests {
         let change_xpub = account_xpub.derive_pub(&secp, &change_child_path)?;
         let input_pubkey = PublicKey::new(input_xpub.public_key);
         let change_pubkey = PublicKey::new(change_xpub.public_key);
-        let input_script = Address::p2wpkh(&input_xpub.to_pub(), Network::Testnet).script_pubkey();
-        let change_script =
-            Address::p2wpkh(&change_xpub.to_pub(), Network::Testnet).script_pubkey();
+        let input_path = join_derivation_path(&account_path, &input_child_path);
+        let change_path = join_derivation_path(&account_path, &change_child_path);
+        let input_script = singlesig_script(wrapper, input_pubkey, &secp);
+        let change_script = singlesig_script(wrapper, change_pubkey, &secp);
         let mut psbt = spending_psbt(input_script.clone(), change_script);
-        psbt.inputs[0] = Input {
-            non_witness_utxo: Some(previous_tx(input_script.clone())),
-            witness_utxo: Some(TxOut {
-                value: Amount::from_sat(50_000),
-                script_pubkey: input_script,
-            }),
-            bip32_derivation: [(input_pubkey.inner, (fingerprint, input_path))].into(),
-            ..Default::default()
+        let prev_tx = previous_tx(input_script.clone());
+        let input_txout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: input_script,
         };
-        psbt.outputs[0] = PsbtOutput {
-            bip32_derivation: [(change_pubkey.inner, (fingerprint, change_path))].into(),
-            ..Default::default()
-        };
+        if matches!(wrapper, LedgerSinglesigWrapper::Tap) {
+            let input_xonly = input_pubkey.inner.x_only_public_key().0;
+            let change_xonly = change_pubkey.inner.x_only_public_key().0;
+            psbt.inputs[0] = Input {
+                non_witness_utxo: Some(prev_tx),
+                witness_utxo: Some(input_txout),
+                tap_internal_key: Some(input_xonly),
+                tap_key_origins: [(input_xonly, (Vec::new(), (fingerprint, input_path)))].into(),
+                ..Default::default()
+            };
+            psbt.outputs[0] = PsbtOutput {
+                tap_internal_key: Some(change_xonly),
+                tap_key_origins: [(change_xonly, (Vec::new(), (fingerprint, change_path)))].into(),
+                ..Default::default()
+            };
+        } else {
+            let redeem_script = matches!(wrapper, LedgerSinglesigWrapper::ShWit)
+                .then(|| Address::p2wpkh(&input_xpub.to_pub(), Network::Testnet).script_pubkey());
+            let change_redeem_script = matches!(wrapper, LedgerSinglesigWrapper::ShWit)
+                .then(|| Address::p2wpkh(&change_xpub.to_pub(), Network::Testnet).script_pubkey());
+            psbt.inputs[0] = Input {
+                non_witness_utxo: Some(prev_tx),
+                witness_utxo: (!matches!(wrapper, LedgerSinglesigWrapper::Legacy))
+                    .then_some(input_txout),
+                redeem_script,
+                bip32_derivation: [(input_pubkey.inner, (fingerprint, input_path))].into(),
+                ..Default::default()
+            };
+            psbt.outputs[0] = PsbtOutput {
+                redeem_script: change_redeem_script,
+                bip32_derivation: [(change_pubkey.inner, (fingerprint, change_path))].into(),
+                ..Default::default()
+            };
+        }
 
         Ok(SigntxCase {
             psbt: psbt.to_string(),
             original: psbt,
-            expected_pubkey: input_pubkey,
+            expected_signatures: vec![ExpectedSignature {
+                input_index: 0,
+                pubkey: input_pubkey,
+                kind: if matches!(wrapper, LedgerSinglesigWrapper::Tap) {
+                    ExpectedSignatureKind::TapKey
+                } else {
+                    ExpectedSignatureKind::Ecdsa
+                },
+            }],
             ledger_registers_wallet: false,
+            verify_signatures: device_type == "ledger",
         })
     }
 
-    fn build_ledger_multisig_signtx_case(device_type: &str) -> Result<SigntxCase> {
+    fn singlesig_script(
+        wrapper: LedgerSinglesigWrapper,
+        pubkey: PublicKey,
+        secp: &Secp256k1<bitcoin::secp256k1::VerifyOnly>,
+    ) -> ScriptBuf {
+        match wrapper {
+            LedgerSinglesigWrapper::Legacy => {
+                Address::p2pkh(pubkey, Network::Testnet).script_pubkey()
+            }
+            LedgerSinglesigWrapper::ShWit => Address::p2wpkh(
+                &pubkey.try_into().expect("compressed key"),
+                Network::Testnet,
+            )
+            .script_pubkey()
+            .to_p2sh(),
+            LedgerSinglesigWrapper::Wit => Address::p2wpkh(
+                &pubkey.try_into().expect("compressed key"),
+                Network::Testnet,
+            )
+            .script_pubkey(),
+            LedgerSinglesigWrapper::Tap => Address::p2tr(
+                secp,
+                pubkey.inner.x_only_public_key().0,
+                None,
+                Network::Testnet,
+            )
+            .script_pubkey(),
+        }
+    }
+
+    fn build_ledger_multisig_signtx_case(
+        device_type: &str,
+        wrapper: LedgerMultisigWrapper,
+    ) -> Result<SigntxCase> {
         let fingerprint = reference_fingerprint(device_type)?;
-        let device_xpub = reference_xpub(device_type, "m/48'/1'/0'/2'")?;
-        let device_path = DerivationPath::from_str("m/48'/1'/0'/2'")?;
+        let account_path = match wrapper {
+            LedgerMultisigWrapper::Legacy => "m/48'/1'/0'/0'",
+            LedgerMultisigWrapper::ShWit => "m/48'/1'/0'/1'",
+            LedgerMultisigWrapper::Wit => "m/48'/1'/0'/2'",
+        };
+        let device_xpub = reference_xpub(device_type, account_path)?;
+        let device_path = DerivationPath::from_str(account_path)?;
         let secp = Secp256k1::new();
         let change_suffix = DerivationPath::from(vec![
             ChildNumber::from_normal_idx(1)?,
@@ -1548,19 +1764,28 @@ mod tests {
             fingerprint,
             cosigner_xpub,
             cosigner_fingerprint,
+            &device_path,
             &change_suffix,
         )?;
         let input_script = multisig_script(2, &receive);
         let change_script = multisig_script(2, &change);
-        let mut psbt = spending_psbt(input_script.to_p2wsh(), change_script.to_p2wsh());
+        let input_script_pubkey = multisig_script_pubkey(wrapper, &input_script);
+        let change_script_pubkey = multisig_script_pubkey(wrapper, &change_script);
+        let mut psbt = spending_psbt(input_script_pubkey.clone(), change_script_pubkey);
 
         psbt.inputs[0] = Input {
-            non_witness_utxo: Some(previous_tx(input_script.to_p2wsh())),
-            witness_utxo: Some(TxOut {
+            non_witness_utxo: Some(previous_tx(input_script_pubkey.clone())),
+            witness_utxo: (!matches!(wrapper, LedgerMultisigWrapper::Legacy)).then_some(TxOut {
                 value: Amount::from_sat(50_000),
-                script_pubkey: input_script.to_p2wsh(),
+                script_pubkey: input_script_pubkey,
             }),
-            witness_script: Some(input_script),
+            redeem_script: match wrapper {
+                LedgerMultisigWrapper::Legacy => Some(input_script.clone()),
+                LedgerMultisigWrapper::ShWit => Some(input_script.to_p2wsh()),
+                LedgerMultisigWrapper::Wit => None,
+            },
+            witness_script: (!matches!(wrapper, LedgerMultisigWrapper::Legacy))
+                .then_some(input_script),
             bip32_derivation: [
                 (
                     receive[0].inner,
@@ -1575,7 +1800,13 @@ mod tests {
             ..Default::default()
         };
         psbt.outputs[0] = PsbtOutput {
-            witness_script: Some(change_script),
+            redeem_script: match wrapper {
+                LedgerMultisigWrapper::Legacy => Some(change_script.clone()),
+                LedgerMultisigWrapper::ShWit => Some(change_script.to_p2wsh()),
+                LedgerMultisigWrapper::Wit => None,
+            },
+            witness_script: (!matches!(wrapper, LedgerMultisigWrapper::Legacy))
+                .then_some(change_script),
             bip32_derivation: [
                 (
                     change[0].inner,
@@ -1603,8 +1834,66 @@ mod tests {
         Ok(SigntxCase {
             psbt: psbt.to_string(),
             original: psbt,
-            expected_pubkey,
+            expected_signatures: vec![ExpectedSignature {
+                input_index: 0,
+                pubkey: expected_pubkey,
+                kind: ExpectedSignatureKind::Ecdsa,
+            }],
             ledger_registers_wallet: true,
+            verify_signatures: true,
+        })
+    }
+
+    fn multisig_script_pubkey(wrapper: LedgerMultisigWrapper, script: &ScriptBuf) -> ScriptBuf {
+        match wrapper {
+            LedgerMultisigWrapper::Legacy => script.to_p2sh(),
+            LedgerMultisigWrapper::ShWit => script.to_p2wsh().to_p2sh(),
+            LedgerMultisigWrapper::Wit => script.to_p2wsh(),
+        }
+    }
+
+    fn build_ledger_mixed_policy_signtx_case(device_type: &str) -> Result<SigntxCase> {
+        let singlesig = build_singlesig_signtx_case(device_type, LedgerSinglesigWrapper::Wit)?;
+        let multisig = build_ledger_multisig_signtx_case(device_type, LedgerMultisigWrapper::Wit)?;
+        let mut single_input = singlesig.original.unsigned_tx.input[0].clone();
+        let multi_input = multisig.original.unsigned_tx.input[0].clone();
+        single_input.sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+
+        let unsigned_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![single_input, multi_input],
+            output: vec![TxOut {
+                value: Amount::from_sat(99_000),
+                script_pubkey: singlesig.original.unsigned_tx.output[0]
+                    .script_pubkey
+                    .clone(),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)?;
+        psbt.inputs = vec![
+            singlesig.original.inputs[0].clone(),
+            multisig.original.inputs[0].clone(),
+        ];
+        psbt.outputs = vec![singlesig.original.outputs[0].clone()];
+        psbt.xpub = multisig.original.xpub.clone();
+
+        let expected_signatures = vec![
+            ExpectedSignature {
+                input_index: 0,
+                ..singlesig.expected_signatures[0]
+            },
+            ExpectedSignature {
+                input_index: 1,
+                ..multisig.expected_signatures[0]
+            },
+        ];
+        Ok(SigntxCase {
+            psbt: psbt.to_string(),
+            original: psbt,
+            expected_signatures,
+            ledger_registers_wallet: true,
+            verify_signatures: true,
         })
     }
 
@@ -1631,6 +1920,7 @@ mod tests {
                 device_fingerprint,
                 cosigner_xpub,
                 cosigner_fingerprint,
+                device_path,
                 &receive_suffix,
             )?;
             if receive
@@ -1656,21 +1946,21 @@ mod tests {
         device_fingerprint: Fingerprint,
         cosigner_xpub: Xpub,
         cosigner_fingerprint: Fingerprint,
+        account_path: &DerivationPath,
         suffix: &DerivationPath,
     ) -> Result<Vec<DerivedKey>> {
         let device = device_xpub.derive_pub(secp, suffix)?;
         let cosigner = cosigner_xpub.derive_pub(secp, suffix)?;
-        let account_path = DerivationPath::from_str("m/48'/1'/0'/2'")?;
         let mut keys = vec![
             DerivedKey {
                 inner: device.public_key,
                 fingerprint: device_fingerprint,
-                derivation_path: join_derivation_path(&account_path, suffix),
+                derivation_path: join_derivation_path(account_path, suffix),
             },
             DerivedKey {
                 inner: cosigner.public_key,
                 fingerprint: cosigner_fingerprint,
-                derivation_path: join_derivation_path(&account_path, suffix),
+                derivation_path: join_derivation_path(account_path, suffix),
             },
         ];
         keys.sort_by_key(|key| key.inner.serialize());
@@ -1748,6 +2038,11 @@ mod tests {
     }
 
     fn reference_xpub(device_type: &str, path: &str) -> Result<Xpub> {
+        if device_type == "ledger" {
+            // Ledger asks for confirmation before exporting non-standard paths,
+            // including the BIP-48 legacy and nested multisig branches.
+            set_ledger_automation(true)?;
+        }
         let output = HwiBinary::reference()?.run(args([
             "--emulators",
             "--chain",

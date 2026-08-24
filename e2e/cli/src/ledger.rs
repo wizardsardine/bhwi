@@ -13,6 +13,7 @@ use bitcoin::{
     bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
     psbt::{Input, Output as PsbtOutput, Psbt},
     secp256k1::Secp256k1,
+    sighash::SighashCache,
     transaction::Version as TxVersion,
 };
 
@@ -188,11 +189,42 @@ fn ledger_sign_psbt() -> Result<()> {
         "--hmac",
         &hmac,
     ])?;
-    fs::remove_file(psbt_file)?;
-
     let signed = Psbt::from_str(signed.trim())?;
+    assert_ledger_psbt_signature(&psbt, &signed)?;
+
+    // A fresh CLI process can reuse the caller-retained policy and HMAC. No
+    // registration call is required because Ledger itself stores no registry.
+    set_ledger_automation(&automation(include_str!(
+        "../../ledger/automations/sign_psbt.json"
+    )))?;
+    let signed_again = Cli::for_device(LEDGER_FINGERPRINT).run_ok([
+        "sign-psbt",
+        "--psbt",
+        psbt_file.to_str().context("utf-8 temp path")?,
+        "--name",
+        "clipsbttest",
+        "--descriptor",
+        &policy,
+        "--hmac",
+        &hmac,
+    ])?;
+    fs::remove_file(psbt_file)?;
+    assert_ledger_psbt_signature(&psbt, &Psbt::from_str(signed_again.trim())?)?;
+    Ok(())
+}
+
+fn assert_ledger_psbt_signature(original: &Psbt, signed: &Psbt) -> Result<()> {
     assert_eq!(signed.inputs.len(), 1);
     assert_eq!(signed.inputs[0].partial_sigs.len(), 1);
+    let (pubkey, signature) = signed.inputs[0]
+        .partial_sigs
+        .iter()
+        .next()
+        .context("missing Ledger signature")?;
+    let mut cache = SighashCache::new(&original.unsigned_tx);
+    let (message, sighash_type) = original.sighash_ecdsa(0, &mut cache)?;
+    assert_eq!(signature.sighash_type, sighash_type);
+    Secp256k1::verification_only().verify_ecdsa(&message, &signature.signature, &pubkey.inner)?;
     Ok(())
 }
 

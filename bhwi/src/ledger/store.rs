@@ -182,7 +182,7 @@ fn get_merkle_leaf_proof(
     let tree = trees
         .iter()
         .find(|tree| tree.root_hash() == root)
-        .ok_or(StoreError::UnknownHash)?;
+        .ok_or(StoreError::UnknownMerkleRoot)?;
 
     if leaf_index >= tree_size || tree_size.0 != tree.size() as u64 {
         return Err(StoreError::InvalidIndexOrSize);
@@ -226,11 +226,13 @@ fn get_merkle_leaf_index(trees: &[MerkleTree], request: &[u8]) -> Result<Vec<u8>
     let tree = trees
         .iter()
         .find(|tree| tree.root_hash() == root)
-        .ok_or(StoreError::UnknownHash)?;
+        .ok_or(StoreError::UnknownMerkleRoot)?;
 
-    let leaf_index = tree.get_leaf_index(hash).ok_or(StoreError::UnknownHash)?;
+    let (found, leaf_index) = tree
+        .get_leaf_index(hash)
+        .map_or((0_u8, 0_usize), |index| (1, index));
 
-    let mut response = 1_u8.to_be_bytes().to_vec();
+    let mut response = found.to_be_bytes().to_vec();
     response.extend(encode::serialize(&VarInt(leaf_index as u64)));
     Ok(response)
 }
@@ -314,4 +316,21 @@ pub enum StoreError {
 
     #[error("unexpected queue state")]
     UnexpectedQueue,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_merkle_leaf_returns_not_found() {
+        let mut store = DelegatedStore::new();
+        let root = store.add_known_list(&[b"known"]);
+        let missing = sha256::Hash::hash(b"\0missing").to_byte_array();
+        let mut command = vec![ClientCommandCode::GetMerkleLeafIndex as u8];
+        command.extend(root);
+        command.extend(missing);
+
+        assert_eq!(store.execute(command).unwrap(), vec![0, 0]);
+    }
 }

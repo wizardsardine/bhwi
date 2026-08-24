@@ -29,7 +29,7 @@ Coldcard, BHWI still tests Python HWI-compatible unsupported-action errors.
 |`getxpub`         |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for normal and expert output shape.                           |
 |`getdescriptors`  |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for account descriptors.                                      |
 |`getkeypool`      |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for receive/change ranges and address types.                  |
-|`signtx`          |`[~]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Ledger registered-wallet and non-default policy signing remains open. |
+|`signtx`          |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Ledger covers default BIP44/49/84/86 wallets and classic registered sorted multisig. |
 |`signmessage`     |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for emulator-supported paths.                                 |
 |`displayaddress`  |`[x]` |`[x]`|`[x]`   |`[ ]` |`[ ]`  |`n/a`   |`[x]`   |Registered Coldcard multisig display is covered for all script wrappers.|
 |`setup`           |`n/a` |`n/a`|`n/a`   |`[ ]` |`[ ]`  |`[ ]`   |`[x]`   |Physical setup uses fresh entropy and backup; simulator setup is covered end to end.|

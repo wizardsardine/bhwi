@@ -3,6 +3,7 @@ use crate::common::{
     WalletRegistration,
 };
 use crate::ledger::apdu::ApduCommand;
+use crate::ledger::store::StoreError;
 use crate::ledger::{
     LedgerCommand, LedgerDisplayAddress, LedgerError, LedgerResponse, LedgerWalletPolicy, Version,
 };
@@ -125,7 +126,17 @@ impl From<LedgerError> for Error {
             LedgerError::MissingCommandInfo(error) => Self::MissingCommandInfo(error),
             LedgerError::NoErrorOrResult => Self::NoErrorOrResult,
             LedgerError::Apdu(error) => Self::Serialization(format!("{error:?}")),
-            LedgerError::Store(_) => Self::Request("Store operation failed"),
+            LedgerError::Store(error) => Self::Request(match error {
+                StoreError::EmptyInput => "Store operation failed: empty request",
+                StoreError::UnknownCommand(_) => "Store operation failed: unknown command",
+                StoreError::UnsupportedRequest(_) => "Store operation failed: unsupported request",
+                StoreError::InvalidIndexOrSize => {
+                    "Store operation failed: invalid Merkle index or size"
+                }
+                StoreError::UnknownHash => "Store operation failed: unknown hash",
+                StoreError::UnknownMerkleRoot => "Store operation failed: unknown Merkle root",
+                StoreError::UnexpectedQueue => "Store operation failed: unexpected queue state",
+            }),
             LedgerError::Wallet(_) => Self::Request("Wallet operation failed"),
             LedgerError::Interrupted => Self::Request("Operation interrupted"),
             LedgerError::UnexpectedResult(data, context) => Self::unexpected_result(data, context),

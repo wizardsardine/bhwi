@@ -13,8 +13,9 @@ use bhwi::bitcoin::{
     Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
     absolute::LockTime,
     bip32::{ChainCode, ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub},
-    psbt::{Input, Psbt},
+    psbt::Psbt,
     secp256k1::{All, Secp256k1},
+    sighash::SighashCache,
     transaction::Version as TxVersion,
 };
 use bhwi::ledger::{LedgerWalletPolicy, Version};
@@ -26,7 +27,9 @@ use miniscript::psbt::{PsbtInputExt, PsbtOutputExt};
 
 use crate::tests::{SpeculosDevice, SpeculosReqwestClient, init};
 
-/// Account-level derivation path for BIP-48 native segwit / taproot multisig.
+/// Account-level derivation paths for Ledger's BIP-48 multisig policies.
+const LEGACY_MULTISIG_ACCOUNT_PATH: &str = "m/48'/1'/0'/0'";
+const NESTED_MULTISIG_ACCOUNT_PATH: &str = "m/48'/1'/0'/1'";
 const MULTISIG_ACCOUNT_PATH: &str = "m/48'/1'/0'/2'";
 
 /// BIP-341 NUMS point `H`, used as an unspendable taproot internal key so a
@@ -180,6 +183,7 @@ fn build_psbt(
     secp: &Secp256k1<All>,
     receive: &Descriptor<DefiniteDescriptorKey>,
     change: &Descriptor<DefiniteDescriptorKey>,
+    legacy: bool,
 ) -> Psbt {
     let input_script = receive.derived_descriptor(secp).script_pubkey();
     let change_script = change.derived_descriptor(secp).script_pubkey();
@@ -217,10 +221,12 @@ fn build_psbt(
     };
 
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
-    psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: INPUT_VALUE,
-        script_pubkey: input_script,
-    });
+    if !legacy {
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: INPUT_VALUE,
+            script_pubkey: input_script,
+        });
+    }
     psbt.inputs[0].non_witness_utxo = Some(prev_tx);
     psbt.inputs[0]
         .update_with_descriptor_unchecked(receive)
@@ -234,7 +240,8 @@ fn build_psbt(
 /// Asserts the signed input carries exactly one signature and it is the
 /// device's (ecdsa `partial_sigs` for wsh, schnorr `tap_script_sigs` for the
 /// taproot script path).
-fn assert_device_signed_once(input: &Input, device: PublicKey) {
+fn assert_device_signed_once(psbt: &Psbt, device: PublicKey) {
+    let input = &psbt.inputs[0];
     let total = input.partial_sigs.len()
         + input.tap_script_sigs.len()
         + usize::from(input.tap_key_sig.is_some());
@@ -247,15 +254,33 @@ fn assert_device_signed_once(input: &Input, device: PublicKey) {
             .keys()
             .any(|(xonly, _)| *xonly == device_xonly);
     assert!(signed, "device key signature missing");
+
+    if let Some(signature) = input.partial_sigs.get(&device) {
+        let mut cache = SighashCache::new(&psbt.unsigned_tx);
+        let (message, sighash_type) = psbt.sighash_ecdsa(0, &mut cache).unwrap();
+        assert_eq!(signature.sighash_type, sighash_type);
+        Secp256k1::verification_only()
+            .verify_ecdsa(&message, &signature.signature, &device.inner)
+            .expect("device ECDSA signature must verify");
+    }
 }
 
 /// Reads the device key, builds the descriptor via `build`, then runs the full
 /// register + display-address + sign flow over a single device connection.
 /// `build` receives the secp context and the device key (always `keys[0]`).
 async fn run_flow(name: &str, build: impl FnOnce(&Secp256k1<All>, &Key) -> String) {
+    run_flow_at_path(MULTISIG_ACCOUNT_PATH, name, build).await;
+}
+
+async fn run_flow_at_path(
+    account_path: &str,
+    name: &str,
+    build: impl FnOnce(&Secp256k1<All>, &Key) -> String,
+) {
     let secp = Secp256k1::new();
     let (mut dev, client) = init().await;
-    let device = Key::device(&mut dev, MULTISIG_ACCOUNT_PATH).await;
+    load_automation(&client, include_str!("../automations/hwi_speculos.json")).await;
+    let device = Key::device(&mut dev, account_path).await;
     let descriptor = build(&secp, &device);
 
     let ctx = register(&mut dev, &client, name, &descriptor).await;
@@ -287,14 +312,62 @@ async fn run_flow(name: &str, build: impl FnOnce(&Secp256k1<All>, &Key) -> Strin
         .expect("display multisig address");
     assert_eq!(address, expected_address);
 
-    let psbt = build_psbt(&secp, &receive, &change);
+    let psbt = build_psbt(
+        &secp,
+        &receive,
+        &change,
+        descriptor.starts_with("sh(sortedmulti("),
+    );
     load_automation(&client, include_str!("../automations/sign_psbt.json")).await;
     let signed = dev
-        .sign_tx(psbt, Some(ctx))
+        .sign_tx(psbt.clone(), Some(ctx.clone()))
         .await
         .expect("sign multisig psbt");
     assert_eq!(signed.inputs.len(), 1);
-    assert_device_signed_once(&signed.inputs[0], device.receive_pubkey(&secp));
+    assert_device_signed_once(&signed, device.receive_pubkey(&secp));
+
+    // Ledger stores no wallet registry. Reusing the caller-retained descriptor
+    // and HMAC must sign again without another registration round trip.
+    load_automation(&client, include_str!("../automations/sign_psbt.json")).await;
+    let signed_again = dev
+        .sign_tx(psbt, Some(ctx))
+        .await
+        .expect("sign previously registered multisig psbt");
+    assert_device_signed_once(&signed_again, device.receive_pubkey(&secp));
+}
+
+#[tokio::test]
+async fn sh_sortedmulti_2of2() {
+    run_flow_at_path(
+        LEGACY_MULTISIG_ACCOUNT_PATH,
+        "legacymulti",
+        |secp, device| {
+            let cosigner = Key::cosigner(secp, 0xa5, LEGACY_MULTISIG_ACCOUNT_PATH);
+            format!(
+                "sh(sortedmulti(2,{},{}))",
+                device.descriptor_key(),
+                cosigner.descriptor_key()
+            )
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sh_wsh_sortedmulti_2of2() {
+    run_flow_at_path(
+        NESTED_MULTISIG_ACCOUNT_PATH,
+        "nestedmulti",
+        |secp, device| {
+            let cosigner = Key::cosigner(secp, 0xa5, NESTED_MULTISIG_ACCOUNT_PATH);
+            format!(
+                "sh(wsh(sortedmulti(2,{},{})))",
+                device.descriptor_key(),
+                cosigner.descriptor_key()
+            )
+        },
+    )
+    .await;
 }
 
 #[tokio::test]

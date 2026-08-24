@@ -80,6 +80,29 @@ and candidate run. The harness also repeats each descriptor without
 registration to preserve error-response parity. Set `BHWI_BIN` when the native
 binary is not next to the candidate `HWI_BIN`.
 
+## Ledger signing policy scope
+
+Ledger `signtx` parity covers the wallet policies that Python HWI can derive
+unambiguously from PSBT metadata:
+
+- default single-key wallets using exact BIP44 `pkh`, BIP49 `sh(wpkh)`, BIP84
+  `wpkh`, or BIP86 key-path `tr` derivations;
+- registered `sh(sortedmulti)`, `sh(wsh(sortedmulti))`, and
+  `wsh(sortedmulti)` policies with complete account-level global xpubs; and
+- PSBTs containing inputs from more than one supported policy.
+
+The adapter validates derivation paths and script commitments before asking the
+device to sign. It rejects ambiguous or unsupported owned inputs, including
+unsorted multisig, arbitrary witness miniscript, and taproot script paths, with
+an input-indexed error directing callers to explicit descriptor and HMAC
+signing.
+
+Ledger does not persist a wallet registry. Registration authenticates a policy
+and returns an HMAC, so an "already registered" wallet means the caller retained
+the policy name, descriptor, and HMAC and supplies them again for later signing.
+The native `register-wallet` and `sign-psbt` commands expose that reusable flow;
+HWI `signtx` registers inferred non-default policies for the current invocation.
+
 ## BitBox02 parity notes
 
 BitBox02 parity is wired against Python HWI's built-in simulator transport. The
