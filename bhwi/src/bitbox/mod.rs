@@ -8,7 +8,9 @@ pub mod proto;
 pub mod sign;
 pub mod u2f;
 
-pub use interpreter::{BitBoxCommand, BitBoxInterpreter, BitBoxResponse};
+pub use interpreter::{
+    BitBoxCommand, BitBoxDeviceInfo, BitBoxInterpreter, BitBoxResponse, BitBoxTransmit,
+};
 
 use std::fmt;
 

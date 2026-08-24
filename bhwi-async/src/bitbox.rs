@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use bhwi::{
     Interpreter,
     bitbox::{
-        BitBoxCommand, BitBoxInterpreter, BitBoxResponse,
+        BitBoxCommand, BitBoxInterpreter, BitBoxResponse, BitBoxTransmit,
         error::BitBoxError,
         noise::{NoiseConfigData, NoiseState, PairingCodeHook},
     },
@@ -105,7 +105,7 @@ impl<T: Transport> BitBox<T> {
         use crate::CommonInterface;
         let (transport, _http, mut interpreter) = <BitBox<T> as CommonInterface<
             RawCommand,
-            common::Transmit,
+            BitBoxTransmit,
             BitBoxResponse,
             BitBoxError,
         >>::components(self);
@@ -130,7 +130,7 @@ impl<T: Transport> BitBox<T> {
 impl<C, T, R, E, F> crate::CommonInterface<C, T, R, E> for BitBox<F>
 where
     C: TryInto<BitBoxCommand, Error = BitBoxError>,
-    T: From<common::Transmit>,
+    T: From<BitBoxTransmit>,
     R: From<BitBoxResponse>,
     E: From<BitBoxError>,
     F: Transport,

@@ -19,7 +19,6 @@ use store::{DelegatedStore, StoreError};
 pub use wallet::{AddressType, LedgerWalletPolicy, Version, WalletError, singlesig_wallet_policy};
 
 use crate::Interpreter;
-use crate::common::{Command, DeviceContext, DisplayAddress, Error, Info, Response};
 use crate::device::DeviceId;
 
 pub const LEDGER_DEVICE_ID: DeviceId = DeviceId::new(0x2c97)
@@ -76,8 +75,7 @@ pub enum LedgerCommand {
         display: bool,
     },
     GetWalletAddress {
-        address: DisplayAddress,
-        context: Option<DeviceContext>,
+        address: LedgerDisplayAddress,
     },
     SignMessage {
         message: Vec<u8>,
@@ -90,6 +88,27 @@ pub enum LedgerCommand {
         psbt: Psbt,
         policy: LedgerWalletPolicy,
         hmac: Option<[u8; 32]>,
+    },
+}
+
+/// Ledger-native address request consumed by the interpreter.
+///
+/// A path request derives the corresponding singlesig wallet policy through
+/// Ledger API calls. A policy request carries the exact inputs required by the
+/// device's `GET_WALLET_ADDRESS` command.
+#[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum LedgerDisplayAddress {
+    ByPath {
+        path: DerivationPath,
+        display: bool,
+    },
+    ByWalletPolicy {
+        policy: LedgerWalletPolicy,
+        hmac: Option<[u8; 32]>,
+        change: bool,
+        address_index: u32,
+        display: bool,
     },
 }
 
@@ -167,14 +186,13 @@ enum State {
 
 enum GetWalletAddressStep {
     Fingerprint {
-        address: DisplayAddress,
-        context: Option<DeviceContext>,
+        path: DerivationPath,
+        display: bool,
     },
     Xpub {
-        address: DisplayAddress,
+        path: DerivationPath,
         fingerprint: Fingerprint,
         display: bool,
-        context: Option<DeviceContext>,
     },
     WalletAddress {
         store: Option<DelegatedStore>,
@@ -345,11 +363,34 @@ where
                     Some(store),
                 )
             }
-            LedgerCommand::GetWalletAddress { address, context } => {
-                self.state =
-                    State::GetWalletAddress(GetWalletAddressStep::Fingerprint { address, context });
-                return Ok(Self::Transmit::from(command::get_master_fingerprint()));
-            }
+            LedgerCommand::GetWalletAddress { ref address } => match address {
+                LedgerDisplayAddress::ByPath { path, display } => {
+                    self.state = State::GetWalletAddress(GetWalletAddressStep::Fingerprint {
+                        path: path.clone(),
+                        display: *display,
+                    });
+                    return Ok(Self::Transmit::from(command::get_master_fingerprint()));
+                }
+                LedgerDisplayAddress::ByWalletPolicy {
+                    policy,
+                    hmac,
+                    change,
+                    address_index,
+                    display,
+                } => (
+                    Self::Transmit::from(
+                        command::get_wallet_address(
+                            policy,
+                            hmac.as_ref(),
+                            *change,
+                            *address_index,
+                            *display,
+                        )
+                        .map_err(LedgerError::from)?,
+                    ),
+                    Some(policy.to_store().map_err(LedgerError::from)?),
+                ),
+            },
             LedgerCommand::RegisterWallet { ref policy } => (
                 Self::Transmit::from(command::register_wallet(policy).map_err(LedgerError::from)?),
                 Some(policy.to_store().map_err(LedgerError::from)?),
@@ -445,10 +486,7 @@ where
         let res = ApduResponse::try_from(data).map_err(LedgerError::from)?;
         let state = std::mem::take(&mut self.state);
         let (next_state, result) = match state {
-            State::GetWalletAddress(GetWalletAddressStep::Fingerprint {
-                mut address,
-                context,
-            }) => {
+            State::GetWalletAddress(GetWalletAddressStep::Fingerprint { path, display }) => {
                 if res.data.len() < 4 {
                     return Err(LedgerError::unexpected_result(
                         res.data,
@@ -459,124 +497,45 @@ where
                 let mut fg = [0x00; 4];
                 fg.copy_from_slice(&res.data[0..4]);
                 let fingerprint = Fingerprint::from(fg);
-                match &mut address {
-                    DisplayAddress::ByPath { path, display, .. } => {
-                        let children: Vec<_> = path.as_ref().to_vec();
-                        if children.len() < 5 {
-                            return Err(LedgerError::UnsupportedDisplayAddress(
-                                "Ledger requires a full 5-level derivation path (e.g. m/84'/0'/0'/0/0)".into(),
-                            )
-                            .into());
-                        }
-                        let account_path = DerivationPath::from(children[..3].to_vec());
-                        let display = *display;
-                        let cmd = Self::Transmit::from(command::get_extended_pubkey(
-                            &account_path,
-                            false,
-                        ));
-                        (
-                            State::GetWalletAddress(GetWalletAddressStep::Xpub {
-                                address,
-                                fingerprint,
-                                display,
-                                context,
-                            }),
-                            Some(cmd),
-                        )
-                    }
-                    DisplayAddress::ByDescriptor {
-                        index,
-                        change,
-                        display,
-                        ..
-                    } => {
-                        let (ledger_policy, wallet_hmac) = context
-                            .as_ref()
-                            .and_then(|ctx| match ctx {
-                                DeviceContext::Ledger { wallet_policy, wallet_hmac } => {
-                                    Some((wallet_policy.clone(), *wallet_hmac))
-                                }
-                                #[cfg(feature = "bitbox")]
-                                _ => None,
-                            })
-                            .ok_or(LedgerError::MissingCommandInfo(
-                                "Ledger requires DeviceContext::Ledger for descriptor-based address display",
-                            ))?;
-                        let store = Some(ledger_policy.to_store().map_err(LedgerError::from)?);
-                        let cmd = Self::Transmit::from(
-                            command::get_wallet_address(
-                                &ledger_policy,
-                                wallet_hmac.as_ref(),
-                                *change,
-                                *index,
-                                *display,
-                            )
-                            .map_err(LedgerError::from)?,
-                        );
-                        (
-                            State::GetWalletAddress(GetWalletAddressStep::WalletAddress { store }),
-                            Some(cmd),
-                        )
-                    }
-                    DisplayAddress::ByMultisig(_) => {
-                        return Err(LedgerError::UnsupportedDisplayAddress(
-                            "Ledger raw multisig display is not implemented".into(),
-                        )
-                        .into());
-                    }
+                let children: Vec<_> = path.as_ref().to_vec();
+                if children.len() < 5 {
+                    return Err(LedgerError::UnsupportedDisplayAddress(
+                        "Ledger requires a full 5-level derivation path (e.g. m/84'/0'/0'/0/0)"
+                            .into(),
+                    )
+                    .into());
                 }
+                let account_path = DerivationPath::from(children[..3].to_vec());
+                let cmd = Self::Transmit::from(command::get_extended_pubkey(&account_path, false));
+                (
+                    State::GetWalletAddress(GetWalletAddressStep::Xpub {
+                        path,
+                        fingerprint,
+                        display,
+                    }),
+                    Some(cmd),
+                )
             }
             State::GetWalletAddress(GetWalletAddressStep::Xpub {
-                address,
+                path,
                 fingerprint,
                 display,
-                context,
             }) => {
                 let xpub = Xpub::from_str(&String::from_utf8_lossy(&res.data)).map_err(|_| {
                     LedgerError::unexpected_result(res.data, "display address: xpub")
                 })?;
-                let (ledger_policy, wallet_hmac, change, address_index) = match address {
-                    DisplayAddress::ByPath { path, .. } => {
-                        let children: Vec<_> = path.as_ref().to_vec();
-                        let change =
-                            children[3] == bitcoin::bip32::ChildNumber::from_normal_idx(1).unwrap();
-                        let address_index = u32::from(children[4]);
-                        let policy = singlesig_wallet_policy(&path, fingerprint, xpub)
-                            .map_err(LedgerError::from)?;
-                        (
-                            LedgerWalletPolicy::new(String::new(), Version::V2, policy),
-                            None,
-                            change,
-                            address_index,
-                        )
-                    }
-                    DisplayAddress::ByDescriptor { index, change, .. } => {
-                        let (wallet_policy, wallet_hmac) = context
-                            .as_ref()
-                            .and_then(|ctx| match ctx {
-                                DeviceContext::Ledger { wallet_policy, wallet_hmac } => {
-                                    Some((wallet_policy.clone(), *wallet_hmac))
-                                }
-                                #[cfg(feature = "bitbox")]
-                                _ => None,
-                            })
-                            .ok_or(LedgerError::MissingCommandInfo(
-                                "Ledger requires DeviceContext::Ledger for descriptor-based address display",
-                            ))?;
-                        (wallet_policy, wallet_hmac, change, index)
-                    }
-                    DisplayAddress::ByMultisig(_) => {
-                        return Err(LedgerError::UnsupportedDisplayAddress(
-                            "Ledger raw multisig display is not implemented".into(),
-                        )
-                        .into());
-                    }
-                };
+                let children: Vec<_> = path.as_ref().to_vec();
+                let change =
+                    children[3] == bitcoin::bip32::ChildNumber::from_normal_idx(1).unwrap();
+                let address_index = u32::from(children[4]);
+                let policy =
+                    singlesig_wallet_policy(&path, fingerprint, xpub).map_err(LedgerError::from)?;
+                let ledger_policy = LedgerWalletPolicy::new(String::new(), Version::V2, policy);
                 let store = Some(ledger_policy.to_store().map_err(LedgerError::from)?);
                 let cmd = Self::Transmit::from(
                     command::get_wallet_address(
                         &ledger_policy,
-                        wallet_hmac.as_ref(),
+                        None,
                         change,
                         address_index,
                         display,
@@ -796,114 +755,9 @@ where
     }
 }
 
-impl TryFrom<Command> for LedgerCommand {
-    type Error = LedgerError;
-    fn try_from(cmd: Command) -> Result<Self, Self::Error> {
-        match cmd {
-            Command::Setup(..) => Err(LedgerError::MissingCommandInfo(
-                "Setup not supported by Ledger",
-            )),
-            Command::Wipe => Err(LedgerError::MissingCommandInfo(
-                "Wipe not supported by Ledger",
-            )),
-            Command::Restore(..) => Err(LedgerError::MissingCommandInfo(
-                "Restore not supported by Ledger",
-            )),
-            Command::TogglePassphrase => Err(LedgerError::MissingCommandInfo(
-                "Toggle passphrase not supported by Ledger",
-            )),
-            Command::Backup => Err(LedgerError::MissingCommandInfo(
-                "Backup not supported by Ledger",
-            )),
-            Command::Unlock { options } => options
-                .network
-                .map(Self::OpenApp)
-                .ok_or(LedgerError::MissingCommandInfo("network")),
-            Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
-            Command::GetXpub { path, display } => Ok(Self::GetXpub { path, display }),
-            Command::DisplayAddress(addr, ctx) => Ok(Self::GetWalletAddress {
-                address: match addr {
-                    DisplayAddress::ByMultisig(_) => {
-                        return Err(LedgerError::UnsupportedDisplayAddress(
-                            "Ledger raw multisig display is not implemented".into(),
-                        ));
-                    }
-                    address => address,
-                },
-                context: ctx,
-            }),
-            Command::SignMessage { message, path } => Ok(Self::SignMessage { message, path }),
-            Command::GetVersion => Ok(Self::GetAppInfo),
-            Command::RegisterWallet { name, policy } => Ok(Self::RegisterWallet {
-                policy: LedgerWalletPolicy::new(name, Version::V2, policy),
-            }),
-            Command::SignTx(psbt, context) => {
-                let (ledger_policy, wallet_hmac) = context
-                    .and_then(|ctx| match ctx {
-                        DeviceContext::Ledger {
-                            wallet_policy,
-                            wallet_hmac,
-                        } => Some((wallet_policy, wallet_hmac)),
-                        #[cfg(feature = "bitbox")]
-                        _ => None,
-                    })
-                    .ok_or(LedgerError::MissingCommandInfo("ledger sign tx context"))?;
-                Ok(Self::SignPsbt {
-                    psbt,
-                    policy: ledger_policy,
-                    hmac: wallet_hmac,
-                })
-            }
-        }
-    }
-}
-
-impl From<LedgerResponse> for Response {
-    fn from(res: LedgerResponse) -> Response {
-        match res {
-            LedgerResponse::AppInfo(res) => Response::Info(Info {
-                version: res.version.to_string(),
-                networks: vec![res.network()],
-                firmware: Some(res.app_name),
-                initialized: None,
-            }),
-            LedgerResponse::Signature(header, signature) => Response::Signature(header, signature),
-            LedgerResponse::TaskDone => Response::TaskDone,
-            LedgerResponse::Xpub(xpub) => Response::Xpub(xpub),
-            LedgerResponse::MasterFingerprint(fg) => Response::MasterFingerprint(fg),
-            LedgerResponse::Address(address) => Response::Address(address),
-            LedgerResponse::WalletHmac(hmac) => {
-                Response::WalletRegistration(crate::common::WalletRegistration::Complete {
-                    hmac: Some(hmac),
-                })
-            }
-            LedgerResponse::SignedPsbt(psbt) => Response::SignedPsbt(psbt),
-        }
-    }
-}
-
-impl From<LedgerError> for Error {
-    fn from(error: LedgerError) -> Error {
-        match error {
-            LedgerError::MissingCommandInfo(e) => Error::MissingCommandInfo(e),
-            LedgerError::NoErrorOrResult => Error::NoErrorOrResult,
-            LedgerError::Apdu(e) => Error::Serialization(format!("{:?}", e)),
-            LedgerError::Store(_) => Error::Request("Store operation failed"),
-            LedgerError::Wallet(_) => Error::Request("Wallet operation failed"),
-            LedgerError::Interrupted => Error::Request("Operation interrupted"),
-            LedgerError::UnexpectedResult(data, ctx) => Error::unexpected_result(data, ctx),
-            LedgerError::UnsupportedDisplayAddress(ctx) => Error::UnsupportedDisplayAddress(ctx),
-            LedgerError::FailedToOpenApp(_) => Error::AuthenticationRefused,
-            LedgerError::InvalidPsbt(e) => Error::Serialization(e),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Interpreter;
-    use std::str::FromStr;
 
     const XONLY: [u8; 32] = [
         0x4f, 0x35, 0x5b, 0xdc, 0xb7, 0xcc, 0x0a, 0xf7, 0x28, 0xef, 0x3c, 0xce, 0xb9, 0x61, 0x5d,
@@ -979,24 +833,5 @@ mod tests {
         payload.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
         assert_ignored(&payload, 11);
-    }
-
-    #[test]
-    fn nonstandard_xpub_path_retries_with_display() {
-        let path = DerivationPath::from_str("m/0h/0h/4h").unwrap();
-        let command = crate::common::Command::GetXpub {
-            path,
-            display: false,
-        };
-        let mut interpreter = crate::common::LedgerInterpreter::default();
-
-        let initial = interpreter.start(command).unwrap();
-        assert_eq!(initial.payload[5], 0);
-
-        let retry = interpreter
-            .exchange(vec![0x6a, 0x82])
-            .unwrap()
-            .expect("non-standard path should be retried");
-        assert_eq!(retry.payload[5], 1);
     }
 }

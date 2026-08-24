@@ -8,6 +8,8 @@ use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::Signature;
 
+mod adapters;
+
 #[derive(Default)]
 pub struct UnlockOptions {
     pub network: Option<Network>,
