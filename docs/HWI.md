@@ -20,6 +20,11 @@ features marked unsupported by the device firmware are shown as `n/a` here.
 For device-management commands that are not applicable to Ledger, Jade, and
 Coldcard, BHWI still tests Python HWI-compatible unsupported-action errors.
 
+The `hwi` binary also follows Python HWI's exit-status contract: runtime JSON
+errors exit `0`, and argparse-style usage errors exit `2` with
+`{"error": "...", "code": -2}` on stdout and usage text on stderr. See
+[HWI_PARITY.md](HWI_PARITY.md#exit-status-contract).
+
 ## Feature Parity
 
 |Command           |Ledger|Jade |Coldcard|Trezor|KeepKey|BitBox01|BitBox02|Notes                                                                 |

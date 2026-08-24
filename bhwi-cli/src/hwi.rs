@@ -25,7 +25,7 @@ use bitcoin::{
     secp256k1::{PublicKey as SecpPublicKey, Secp256k1, XOnlyPublicKey},
 };
 use chrono::{Datelike, Local, Timelike};
-use clap::{ArgAction, ArgGroup, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{ArgAction, ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use miniscript::{
     Descriptor, DescriptorPublicKey,
     descriptor::{DescriptorType, WalletPolicy, checksum},
@@ -276,6 +276,7 @@ pub struct HwiError {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HwiErrorCode {
     NoDeviceType,
+    MissingArguments,
     UnknownDevice,
     BadArgument,
     UnsupportedCommand,
@@ -289,6 +290,7 @@ impl HwiErrorCode {
     fn code(self) -> i32 {
         match self {
             HwiErrorCode::NoDeviceType => -1,
+            HwiErrorCode::MissingArguments => -2,
             HwiErrorCode::UnknownDevice => -4,
             HwiErrorCode::BadArgument => -7,
             HwiErrorCode::UnsupportedCommand => -9,
@@ -495,27 +497,162 @@ where
             )));
         }
     };
-    let request = match HwiCli::try_parse_from(args) {
-        Ok(args) => match request_from_cli(args) {
-            Ok(request) => request,
-            Err(err) => return print_response(HwiResponse::Error(err)),
-        },
-        Err(err) if err.kind() == ErrorKind::DisplayHelp => {
-            print!("{err}");
-            return ExitCode::SUCCESS;
+    let outcome = cli_outcome(args);
+    let status = ExitCode::from(exit_status(&outcome));
+    match outcome {
+        CliOutcome::Stdout(text) => {
+            print!("{text}");
+            status
         }
-        Err(err) if err.kind() == ErrorKind::DisplayVersion => {
-            print!("{err}");
-            return ExitCode::SUCCESS;
+        CliOutcome::Usage(usage) => {
+            println!(
+                "{}",
+                serde_json::to_string(&HwiError {
+                    error: usage.message,
+                    code: HwiErrorCode::MissingArguments.code(),
+                })
+                .expect("serialize HWI usage error")
+            );
+            eprintln!("{}", usage.usage);
+            status
         }
-        Err(err) => {
-            return print_response(HwiResponse::Error(HwiError::new(
-                HwiErrorCode::BadArgument,
-                err.to_string(),
-            )));
-        }
+        CliOutcome::Response(response) => print_response(response),
+        CliOutcome::Request(request) => print_response(process_request(*request).await),
+    }
+}
+
+/// Argparse-style usage failure: `message` goes to stdout as HWI JSON, `usage` to stderr.
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct UsageError {
+    message: String,
+    usage: String,
+}
+
+#[derive(Debug)]
+enum CliOutcome {
+    Stdout(String),
+    Usage(UsageError),
+    Response(HwiResponse),
+    Request(Box<HwiRequest>),
+}
+
+fn exit_status(outcome: &CliOutcome) -> u8 {
+    match outcome {
+        CliOutcome::Usage(_) => 2,
+        _ => 0,
+    }
+}
+
+fn cli_outcome(args: Vec<OsString>) -> CliOutcome {
+    let prog = program_name(&args);
+    let cli = match HwiCli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(err) => return clap_outcome(&prog, err),
     };
-    print_response(process_request(request).await)
+    match request_from_cli(cli) {
+        Ok(request) => {
+            if let HwiCommand::Unsupported(command) = &request.command {
+                CliOutcome::Usage(UsageError {
+                    message: format!(
+                        "{prog}: error: argument command: invalid choice: '{command}'"
+                    ),
+                    usage: top_level_usage(&prog),
+                })
+            } else {
+                CliOutcome::Request(Box::new(request))
+            }
+        }
+        Err(err) if err.code == HwiErrorCode::MissingArguments.code() => {
+            CliOutcome::Usage(UsageError {
+                message: format!("{prog}: error: {}", err.error),
+                usage: top_level_usage(&prog),
+            })
+        }
+        Err(err) => CliOutcome::Response(HwiResponse::Error(err)),
+    }
+}
+
+fn clap_outcome(prog: &str, err: clap::Error) -> CliOutcome {
+    match err.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => CliOutcome::Stdout(err.to_string()),
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand | ErrorKind::MissingSubcommand => {
+            CliOutcome::Usage(UsageError {
+                message: format!("{prog}: error: the following arguments are required: command"),
+                usage: top_level_usage(prog),
+            })
+        }
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::UnknownArgument
+        | ErrorKind::InvalidValue
+        | ErrorKind::InvalidSubcommand
+        | ErrorKind::ArgumentConflict
+        | ErrorKind::NoEquals
+        | ErrorKind::WrongNumberOfValues
+        | ErrorKind::TooManyValues
+        | ErrorKind::TooFewValues => CliOutcome::Usage(clap_usage_error(prog, &err)),
+        // Every other kind keeps the pre-existing runtime error JSON.
+        _ => CliOutcome::Response(HwiResponse::Error(HwiError::new(
+            HwiErrorCode::BadArgument,
+            err.to_string(),
+        ))),
+    }
+}
+
+fn clap_usage_error(prog: &str, err: &clap::Error) -> UsageError {
+    let rendered = err.render().to_string();
+    let mut message = String::new();
+    let mut usage = String::new();
+    let mut in_usage = false;
+    for line in rendered.lines() {
+        if line.starts_with("Usage:") {
+            in_usage = true;
+        }
+        if line.starts_with("For more information, try") {
+            continue;
+        }
+        if in_usage {
+            if !usage.is_empty() {
+                usage.push('\n');
+            }
+            usage.push_str(line);
+        } else {
+            for word in line.split_whitespace() {
+                if !message.is_empty() {
+                    message.push(' ');
+                }
+                message.push_str(word);
+            }
+        }
+    }
+    let message = message
+        .strip_prefix("error: ")
+        .unwrap_or(&message)
+        .to_owned();
+    let usage = usage.trim();
+    UsageError {
+        message: format!("{prog}: error: {message}"),
+        usage: if usage.is_empty() {
+            top_level_usage(prog)
+        } else {
+            usage.to_owned()
+        },
+    }
+}
+
+fn program_name(args: &[OsString]) -> String {
+    args.first()
+        .map(PathBuf::from)
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "hwi".to_owned())
+}
+
+fn top_level_usage(prog: &str) -> String {
+    let mut command = HwiCli::command().bin_name(prog);
+    command.render_usage().to_string()
 }
 
 fn args_from_stdin<I, T>(args: I) -> io::Result<Vec<OsString>>
@@ -2751,22 +2888,12 @@ fn hwi_unavailable_action_message(
 }
 
 fn print_response(response: HwiResponse) -> ExitCode {
-    match response {
-        HwiResponse::Error(error) => {
-            println!(
-                "{}",
-                serde_json::to_string(&HwiResponse::Error(error)).expect("serialize HWI error")
-            );
-            ExitCode::from(1)
-        }
-        response => {
-            println!(
-                "{}",
-                serde_json::to_string(&response).expect("serialize HWI response")
-            );
-            ExitCode::SUCCESS
-        }
-    }
+    println!(
+        "{}",
+        serde_json::to_string(&response).expect("serialize HWI response")
+    );
+    // Runtime error JSON exits 0 to match Python HWI 3.2.0 (hwilib/_cli.py main).
+    ExitCode::SUCCESS
 }
 
 fn parse_device_type(value: &str) -> HwiResult<DeviceType> {
@@ -2918,10 +3045,10 @@ fn parse_chain(value: &str) -> HwiResult<Network> {
     match value {
         "main" | "mainnet" => Ok(Network::Bitcoin),
         "test" | "testnet" => Ok(Network::Testnet),
-        _ => Network::from_str(value).map_err(|err| {
+        _ => Network::from_str(value).map_err(|_| {
             HwiError::new(
-                HwiErrorCode::BadArgument,
-                format!("Unsupported chain {value}: {err}"),
+                HwiErrorCode::MissingArguments,
+                format!("argument --chain: invalid choice: '{value}'"),
             )
         }),
     }
@@ -3479,6 +3606,134 @@ mod tests {
             request.command,
             HwiCommand::Unsupported("unknowncommand".to_owned())
         );
+    }
+
+    fn outcome_of(args: &[&str]) -> CliOutcome {
+        cli_outcome(args.iter().map(OsString::from).collect())
+    }
+
+    fn usage_of(args: &[&str]) -> UsageError {
+        match outcome_of(args) {
+            CliOutcome::Usage(usage) => usage,
+            other => panic!("expected usage error for {args:?}, got {other:?}"),
+        }
+    }
+
+    fn runtime_error_of(args: &[&str]) -> HwiError {
+        match outcome_of(args) {
+            CliOutcome::Response(HwiResponse::Error(error)) => error,
+            other => panic!("expected runtime error for {args:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_command_is_a_usage_error() {
+        let args = ["hwi"];
+        let usage = usage_of(&args);
+
+        assert_eq!(
+            usage.message,
+            "hwi: error: the following arguments are required: command"
+        );
+        assert!(usage.usage.contains("Usage:"), "{}", usage.usage);
+        assert!(usage.usage.contains("hwi"), "{}", usage.usage);
+        assert_eq!(exit_status(&outcome_of(&args)), 2);
+    }
+
+    #[test]
+    fn unknown_subcommand_is_a_usage_error() {
+        let args = ["hwi", "boguscmd"];
+        let usage = usage_of(&args);
+
+        assert_eq!(
+            usage.message,
+            "hwi: error: argument command: invalid choice: 'boguscmd'"
+        );
+        assert_eq!(exit_status(&outcome_of(&args)), 2);
+    }
+
+    #[test]
+    fn missing_required_argument_is_a_usage_error() {
+        let usage = usage_of(&["hwi", "getxpub"]);
+
+        assert!(usage.message.contains("required"), "{}", usage.message);
+        assert!(usage.message.contains("<PATH>"), "{}", usage.message);
+        assert!(usage.usage.contains("getxpub"), "{}", usage.usage);
+    }
+
+    #[test]
+    fn invalid_flag_choice_is_a_usage_error() {
+        let usage = usage_of(&["hwi", "getmasterxpub", "--addr-type", "bogus"]);
+
+        assert!(
+            usage.message.contains("invalid value 'bogus'"),
+            "{}",
+            usage.message
+        );
+        assert!(usage.usage.contains("Usage:"), "{}", usage.usage);
+    }
+
+    #[test]
+    fn invalid_chain_choice_is_a_usage_error() {
+        let usage = usage_of(&["hwi", "--chain", "foo", "enumerate"]);
+
+        assert_eq!(
+            usage.message,
+            "hwi: error: argument --chain: invalid choice: 'foo'"
+        );
+    }
+
+    #[test]
+    fn usage_errors_serialize_python_hwi_json() {
+        let usage = usage_of(&["hwi", "boguscmd"]);
+        let json = serde_json::to_string(&HwiError {
+            error: usage.message,
+            code: HwiErrorCode::MissingArguments.code(),
+        })
+        .expect("serialize usage error");
+
+        assert_eq!(
+            json,
+            r#"{"error":"hwi: error: argument command: invalid choice: 'boguscmd'","code":-2}"#
+        );
+    }
+
+    #[test]
+    fn runtime_errors_keep_their_code_and_exit_zero() {
+        let bad_path = ["hwi", "getxpub", "not_a_path"];
+        assert_eq!(
+            runtime_error_of(&bad_path).code,
+            HwiErrorCode::BadArgument.code()
+        );
+        assert_eq!(exit_status(&outcome_of(&bad_path)), 0);
+
+        let bad_device = ["hwi", "--device-type", "trezor", "enumerate"];
+        assert_eq!(
+            runtime_error_of(&bad_device).code,
+            HwiErrorCode::UnknownDevice.code()
+        );
+        assert_eq!(exit_status(&outcome_of(&bad_device)), 0);
+    }
+
+    #[test]
+    fn help_and_version_print_to_stdout_and_exit_zero() {
+        for args in [["hwi", "--help"], ["hwi", "--version"]] {
+            let outcome = outcome_of(&args);
+            let CliOutcome::Stdout(text) = &outcome else {
+                panic!("expected stdout outcome for {args:?}, got {outcome:?}");
+            };
+            assert!(!text.is_empty());
+            assert_eq!(exit_status(&outcome), 0);
+        }
+    }
+
+    #[test]
+    fn successful_parse_yields_a_request_and_exits_zero() {
+        let args = ["hwi", "--device-type", "ledger", "enumerate"];
+        let outcome = outcome_of(&args);
+
+        assert!(matches!(outcome, CliOutcome::Request(_)));
+        assert_eq!(exit_status(&outcome), 0);
     }
 
     #[test]

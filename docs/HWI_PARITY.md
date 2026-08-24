@@ -27,6 +27,32 @@ commands and devices where parity is claimed.
   emulator and runs the pinned upstream HWI suite as that job's final test
   gate.
 
+## Exit status contract
+
+The `hwi` binary matches pinned Python HWI 3.2.0 process status
+(`hwilib/_cli.py`, `HWIArgumentParser.error` and `main`).
+
+|Status|Cases                                                                      |
+|------|---------------------------------------------------------------------------|
+|`0`   |Success, `--help`, `--version`, every runtime `{"error", "code"}` JSON response (`-1`, `-3`, `-4`, `-5`, `-7`, `-9`, `-13`, `-14`, `-16`, `-18`), and per-device `enumerate` failures.|
+|`2`   |Usage errors: no arguments, unknown subcommand, missing required argument, invalid flag choice. These print `{"error": "...", "code": -2}` on stdout and usage text on stderr.|
+|`1`   |Reserved for internal crashes that produce no JSON on stdout.               |
+
+Runtime errors exiting `0` is deliberate: upstream prints the error JSON and
+returns normally, so a nonzero status would break callers that treat a failed
+device operation as a well-formed HWI response.
+
+The parity harness asserts process status on both sides, not just JSON. Exact
+usage-error message and usage text is not compared, because the reference
+reports the nix store script as its program name and lists argparse-specific
+choice sets. Only status, JSON shape, code `-2`, and non-empty stderr are
+compared for usage errors.
+
+Known divergence: values rejected by a type or value parser rather than by
+argument structure, such as `getkeypool notanum 5` or an invalid derivation
+path, stay on the runtime path and exit `0` with code `-7` where upstream exits
+`2` with code `-2`. That ordering difference is tracked separately.
+
 ## Final acceptance gate
 
 Parity is accepted only when the unmodified Bitcoin Core HWI 3.2.0 device

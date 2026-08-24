@@ -27,6 +27,13 @@ pub struct HwiOutput {
     pub json: Value,
 }
 
+#[derive(Clone, Debug)]
+pub struct RawHwiOutput {
+    pub status_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 impl HwiBinary {
     pub fn from_env(label: &'static str, var: &str, default: Option<&str>) -> Result<Self> {
         let path = match env::var(var) {
@@ -51,7 +58,23 @@ impl HwiBinary {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        parse_output(self.label, self.run_raw(args, |_| {})?)
+        parse_output(self.label, self.run_command(args, |_| {})?)
+    }
+
+    /// Like [`HwiBinary::run`] but tolerates non-JSON stdout, as `--help` produces.
+    pub fn run_raw<I, S>(&self, args: I) -> Result<RawHwiOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let output = self.run_command(args, |_| {})?;
+        Ok(RawHwiOutput {
+            status_code: output.status.code(),
+            stdout: String::from_utf8(output.stdout)
+                .with_context(|| format!("{} hwi wrote non-utf8 stdout", self.label))?,
+            stderr: String::from_utf8(output.stderr)
+                .with_context(|| format!("{} hwi wrote non-utf8 stderr", self.label))?,
+        })
     }
 
     pub fn run_with_envs<I, S>(&self, args: I, envs: &[(&str, &str)]) -> Result<HwiOutput>
@@ -59,7 +82,7 @@ impl HwiBinary {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = self.run_raw(args, |command| {
+        let output = self.run_command(args, |command| {
             command.envs(envs.iter().copied());
         })?;
         parse_output(self.label, output)
@@ -70,7 +93,7 @@ impl HwiBinary {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = self.run_raw(args, |command| {
+        let output = self.run_command(args, |command| {
             command.current_dir(cwd);
         })?;
         parse_output(self.label, output)
@@ -106,7 +129,7 @@ impl HwiBinary {
         )
     }
 
-    fn run_raw<I, S>(&self, args: I, configure: impl FnOnce(&mut Command)) -> Result<Output>
+    fn run_command<I, S>(&self, args: I, configure: impl FnOnce(&mut Command)) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -326,6 +349,58 @@ mod tests {
         let output = HwiBinary::reference()?.run(["enumerate"])?;
         assert_success("reference", &output)?;
         assert_enumerate_array("reference", &output.json)?;
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_usage_errors_match_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let cases: [&[&str]; 7] = [
+            &[],
+            &["boguscmd"],
+            &["getxpub"],
+            &["--chain", "foo", "enumerate"],
+            &["displayaddress"],
+            &["getmasterxpub", "--addr-type", "bogus"],
+            &["--bogus", "enumerate"],
+        ];
+
+        for case in cases {
+            let args = case.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+            assert_usage_error_parity(args)
+                .with_context(|| format!("usage error parity failed for args: {case:?}"))?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_help_and_version_status_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        for flag in ["--help", "--version"] {
+            for binary in [HwiBinary::reference()?, HwiBinary::candidate()?] {
+                let output = binary.run_raw([flag])?;
+                if output.status_code != Some(0) {
+                    bail!(
+                        "{} hwi {flag} exited {:?}\nstdout:\n{}\nstderr:\n{}",
+                        binary.label,
+                        output.status_code,
+                        output.stdout,
+                        output.stderr
+                    );
+                }
+                if output.stdout.trim().is_empty() {
+                    bail!("{} hwi {flag} wrote no stdout", binary.label);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -878,13 +953,66 @@ mod tests {
         Ok(())
     }
 
+    /// Usage-error text is not compared across sides: the reference reports the nix
+    /// store script as its program name and lists argparse-specific choices.
+    fn assert_usage_error_parity(args: Vec<String>) -> Result<()> {
+        for binary in [HwiBinary::reference()?, HwiBinary::candidate()?] {
+            let output = binary.run_raw(args.clone())?;
+            if output.status_code != Some(2) {
+                bail!(
+                    "{} hwi did not exit 2 for a usage error\nstatus: {:?}\nstdout:\n{}\nstderr:\n{}",
+                    binary.label,
+                    output.status_code,
+                    output.stdout,
+                    output.stderr
+                );
+            }
+
+            let json: Value = serde_json::from_str(output.stdout.trim()).with_context(|| {
+                format!(
+                    "{} hwi usage error stdout was not JSON\nstdout:\n{}\nstderr:\n{}",
+                    binary.label, output.stdout, output.stderr
+                )
+            })?;
+            assert_error_shape(binary.label, &json)?;
+            if json.get("code").and_then(Value::as_i64) != Some(-2) {
+                bail!(
+                    "{} hwi usage error code was not -2:\n{}",
+                    binary.label,
+                    serde_json::to_string_pretty(&json)?
+                );
+            }
+            if json
+                .get("error")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                bail!(
+                    "{} hwi usage error message was empty:\n{}",
+                    binary.label,
+                    serde_json::to_string_pretty(&json)?
+                );
+            }
+
+            if !output.stderr.to_lowercase().contains("usage:") {
+                bail!(
+                    "{} hwi usage error stderr had no usage text\nstderr:\n{}",
+                    binary.label,
+                    output.stderr
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     fn assert_error_json_parity(args: Vec<String>) -> Result<()> {
         let reference = HwiBinary::reference()?.run(args.clone())?;
         let candidate = HwiBinary::candidate()?.run(args)?;
 
-        // Python HWI 3.2.0 sometimes exits 0 for JSON error responses; keep
-        // command parity focused on the HWI JSON contract until the dedicated
-        // error-model work standardizes process status.
+        assert_success("reference", &reference)?;
+        assert_success("candidate", &candidate)?;
+
         assert_error_shape("reference", &reference.json)?;
         assert_error_shape("candidate", &candidate.json)?;
 
@@ -963,7 +1091,10 @@ mod tests {
                 assert_success(label, output)?;
                 assert_displayaddress_shape(label, &output.json)
             }
-            ExpectedResult::Error => assert_error_shape(label, &output.json),
+            ExpectedResult::Error => {
+                assert_success(label, output)?;
+                assert_error_shape(label, &output.json)
+            }
         }
     }
 
