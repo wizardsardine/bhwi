@@ -296,6 +296,7 @@ pub enum HwiErrorCode {
     DeviceNotReady,
     DeviceNotInitialized,
     HelpText,
+    ActionCanceled,
 }
 
 impl HwiErrorCode {
@@ -314,6 +315,7 @@ impl HwiErrorCode {
             HwiErrorCode::DeviceNotReady => -12,
             HwiErrorCode::DeviceNotInitialized => -18,
             HwiErrorCode::HelpText => -17,
+            HwiErrorCode::ActionCanceled => -14,
         }
     }
 }
@@ -956,7 +958,7 @@ async fn setup_device(
         .await
     {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(device_error(err)),
+        Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
 }
 
@@ -1002,7 +1004,7 @@ async fn wipe_device(selector: DeviceSelector) -> HwiResponse {
 
     match device.device().wipe_device().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(device_error(err)),
+        Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
 }
 
@@ -1096,7 +1098,7 @@ async fn restore_device(
         .await
     {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(device_error(err)),
+        Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
 }
 
@@ -1145,7 +1147,7 @@ async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
 
     match device.device().toggle_passphrase().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(device_error(err)),
+        Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
 }
 
@@ -1337,7 +1339,7 @@ async fn backup_device(
                 format!("backup failed: {err}"),
             )),
         },
-        Err(err) => HwiResponse::Error(device_error(err)),
+        Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
 }
 
@@ -1418,7 +1420,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
                 return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err));
             }
             Err(LedgerSigningError::Device(err)) => {
-                return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceConnectionError, err));
+                return HwiResponse::Error(err);
             }
         };
 
@@ -1435,10 +1437,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
             {
                 Ok(psbt) => psbt,
                 Err(err) => {
-                    return HwiResponse::Error(HwiError::new(
-                        HwiErrorCode::DeviceConnectionError,
-                        err.to_string(),
-                    ));
+                    return HwiResponse::Error(classify_device_error(&err));
                 }
             };
             merge_psbt_signatures(&mut signed_psbt, result);
@@ -1458,7 +1457,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
                 psbt: signed,
             })
         }
-        Err(err) => HwiResponse::Error(device_error(err)),
+        Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
 }
 
@@ -1505,7 +1504,7 @@ async fn sign_message(
                 &signature,
             ),
         }),
-        Err(err) => HwiResponse::Error(device_error(err)),
+        Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
 }
 
@@ -1585,7 +1584,7 @@ async fn display_address(
     }
     match address {
         Ok(address) => HwiResponse::DisplayAddress(HwiDisplayAddressResponse { address }),
-        Err(err) => display_address_error(err.to_string()),
+        Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
 }
 
@@ -1906,7 +1905,7 @@ async fn get_keypool(selector: DeviceSelector, request: HwiGetKeypoolRequest) ->
 #[derive(Debug)]
 enum LedgerSigningError {
     BadArgument(String),
-    Device(String),
+    Device(HwiError),
 }
 
 struct LedgerSigningContext {
@@ -1973,7 +1972,7 @@ async fn ledger_signing_contexts(
     let fingerprint = device
         .fingerprint()
         .await
-        .map_err(|err| LedgerSigningError::Device(err.to_string()))?;
+        .map_err(|err| LedgerSigningError::Device(classify_anyhow_device_error(&err)))?;
     let plans = ledger_signing_plans(psbt, fingerprint, network)
         .map_err(LedgerSigningError::BadArgument)?;
     let mut contexts = Vec::with_capacity(plans.len());
@@ -1988,7 +1987,7 @@ async fn ledger_signing_contexts(
                     .device()
                     .get_extended_pubkey(account_path.clone(), false)
                     .await
-                    .map_err(|err| LedgerSigningError::Device(err.to_string()))?;
+                    .map_err(|err| LedgerSigningError::Device(classify_device_error(&err)))?;
                 let policy = singlesig_wallet_policy(
                     &extend_account_path_for_policy(&account_path),
                     fingerprint,
@@ -2012,16 +2011,20 @@ async fn ledger_signing_contexts(
                     .device()
                     .register_wallet(&name, &policy)
                     .await
-                    .map_err(|err| LedgerSigningError::Device(err.to_string()))?;
+                    .map_err(|err| LedgerSigningError::Device(classify_device_error(&err)))?;
                 let hmac = registration.hmac().ok_or_else(|| {
-                    LedgerSigningError::Device(
-                        "Ledger wallet registration returned no HMAC".to_string(),
-                    )
+                    LedgerSigningError::Device(HwiError::new(
+                        HwiErrorCode::DeviceConnectionError,
+                        "Ledger wallet registration returned no HMAC",
+                    ))
                 })?;
                 if hmac.len() != 32 {
-                    return Err(LedgerSigningError::Device(format!(
-                        "Ledger wallet registration returned a {}-byte HMAC instead of 32 bytes",
-                        hmac.len()
+                    return Err(LedgerSigningError::Device(HwiError::new(
+                        HwiErrorCode::DeviceConnectionError,
+                        format!(
+                            "Ledger wallet registration returned a {}-byte HMAC instead of 32 bytes",
+                            hmac.len()
+                        ),
                     )));
                 }
                 let wallet_policy = WalletPolicy::from_str(&policy)
@@ -2863,23 +2866,33 @@ fn descriptor_key_matches_xpub(key: &str, xpub: Xpub) -> bool {
         ))
 }
 
-fn display_address_error(error: String) -> HwiResponse {
-    let error = match error.find("Coldcard Error:") {
-        Some(idx) => error[idx..].to_owned(),
-        None => error,
-    };
-    let code = if error.contains("unsupported display address")
-        || error.contains("does not support displaying")
-        || error.contains("does not support this path address format")
-        || error.contains("does not support this address format")
-    {
-        HwiErrorCode::UnsupportedCommand
-    } else if error.contains("Coldcard Error:") || error.starts_with("invalid input:") {
-        HwiErrorCode::BadArgument
-    } else {
-        HwiErrorCode::DeviceConnectionError
-    };
-    HwiResponse::Error(HwiError::new(code, error))
+/// Maps typed device errors from the async stack onto Python HWI's error
+/// codes. Walks the `source()` chain for a `bhwi::common::Error` so cancels
+/// and argument refusals stop flattening to `-3`; unclassified failures keep
+/// the full message with `-3`.
+fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(current) = source {
+        if let Some(error) = current.downcast_ref::<bhwi::common::Error>() {
+            use bhwi::common::Error as CommonError;
+            let code = match error {
+                CommonError::UserCancelled => HwiErrorCode::ActionCanceled,
+                CommonError::UnsupportedDisplayAddress(_) => HwiErrorCode::UnsupportedCommand,
+                // Device-refused input keeps upstream's bad-argument class,
+                // e.g. `Coldcard Error: ...` for an unknown multisig wallet.
+                CommonError::InvalidInput(_) | CommonError::Device(_) => HwiErrorCode::BadArgument,
+                _ => break,
+            };
+            return HwiError::new(code, error.to_string());
+        }
+        source = current.source();
+    }
+    device_error(err)
+}
+
+fn classify_anyhow_device_error(err: &anyhow::Error) -> HwiError {
+    let source: &(dyn std::error::Error + 'static) = err.as_ref();
+    classify_device_error(source)
 }
 
 fn hwi_descriptor_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAddressType> {
@@ -4185,15 +4198,51 @@ mod tests {
         assert_eq!(json, serde_json::json!({ "address": "tb1qexample" }));
     }
 
+    fn wrapped_device_error(error: bhwi::common::Error) -> bhwi_async::HWIDeviceError {
+        bhwi_async::HWIDeviceError::new(
+            bhwi_async::Error::<std::io::Error, std::io::Error>::Interpreter(error),
+        )
+    }
+
     #[test]
-    fn unsupported_bitbox_address_format_uses_hwi_unsupported_code() {
-        let response = display_address_error(
-            "invalid input: BitBox does not support this address format".into(),
-        );
-        let HwiResponse::Error(error) = response else {
-            panic!("expected HWI error");
-        };
-        assert_eq!(error.code, HwiErrorCode::UnsupportedCommand.code());
+    fn classify_device_error_maps_typed_common_errors() {
+        use bhwi::common::Error as CommonError;
+
+        let cancelled = classify_device_error(&wrapped_device_error(CommonError::UserCancelled));
+        assert_eq!(cancelled.code, HwiErrorCode::ActionCanceled.code());
+        assert_eq!(cancelled.error, "action canceled by the user");
+
+        let unsupported = classify_device_error(&wrapped_device_error(
+            CommonError::UnsupportedDisplayAddress(
+                "BitBox does not support this address format".into(),
+            ),
+        ));
+        assert_eq!(unsupported.code, HwiErrorCode::UnsupportedCommand.code());
+
+        let invalid = classify_device_error(&wrapped_device_error(CommonError::InvalidInput(
+            "bad argument".into(),
+        )));
+        assert_eq!(invalid.code, HwiErrorCode::BadArgument.code());
+
+        let device = classify_device_error(&wrapped_device_error(CommonError::Device(
+            "Coldcard Error: Unknown multisig wallet".into(),
+        )));
+        assert_eq!(device.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(device.error, "Coldcard Error: Unknown multisig wallet");
+
+        let fallback = classify_device_error(&wrapped_device_error(CommonError::Serialization(
+            "boom".into(),
+        )));
+        assert_eq!(fallback.code, HwiErrorCode::DeviceConnectionError.code());
+        assert!(fallback.error.contains("boom"), "{}", fallback.error);
+    }
+
+    #[test]
+    fn classify_anyhow_device_error_walks_the_chain() {
+        let err = anyhow::Error::new(wrapped_device_error(bhwi::common::Error::UserCancelled))
+            .context("getting master fingerprint");
+        let classified = classify_anyhow_device_error(&err);
+        assert_eq!(classified.code, HwiErrorCode::ActionCanceled.code());
     }
 
     #[test]
