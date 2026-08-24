@@ -34,7 +34,7 @@ The `hwi` binary matches pinned Python HWI 3.2.0 process status
 
 |Status|Cases                                                                      |
 |------|---------------------------------------------------------------------------|
-|`0`   |Success, `--help`, `--version`, every runtime `{"error", "code"}` JSON response (`-1`, `-3`, `-4`, `-5`, `-7`, `-9`, `-13`, `-14`, `-16`, `-18`), and per-device `enumerate` failures.|
+|`0`   |Success, `--help` (which prints `{"error": "Help text requested", "code": -17}` on stdout and the help text on stderr), `--version`, every runtime `{"error", "code"}` JSON response (`-1`, `-3`, `-4`, `-5`, `-7`, `-9`, `-13`, `-14`, `-16`, `-17`, `-18`), and per-device `enumerate` failures.|
 |`2`   |Usage errors: no arguments, unknown subcommand, missing required argument, invalid flag choice. These print `{"error": "...", "code": -2}` on stdout and usage text on stderr.|
 |`1`   |Reserved for internal crashes that produce no JSON on stdout.               |
 

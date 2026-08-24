@@ -383,20 +383,54 @@ mod tests {
             return Ok(());
         }
 
-        for flag in ["--help", "--version"] {
+        // `--version` prints plain text on stdout and exits 0 on both sides.
+        for binary in [HwiBinary::reference()?, HwiBinary::candidate()?] {
+            let output = binary.run_raw(["--version"])?;
+            if output.status_code != Some(0) {
+                bail!(
+                    "{} hwi --version exited {:?}\nstdout:\n{}\nstderr:\n{}",
+                    binary.label,
+                    output.status_code,
+                    output.stdout,
+                    output.stderr
+                );
+            }
+            if output.stdout.trim().is_empty() {
+                bail!("{} hwi --version wrote no stdout", binary.label);
+            }
+        }
+
+        // `--help` prints the `-17` JSON object on stdout and the help text on
+        // stderr, exiting 0 (hwilib/_cli.py HWIHelpAction). The help body is
+        // not compared: prog name and argparse/clap formatting differ.
+        let expected = serde_json::json!({"error": "Help text requested", "code": -17});
+        for args in [["--help"].as_slice(), ["getxpub", "--help"].as_slice()] {
             for binary in [HwiBinary::reference()?, HwiBinary::candidate()?] {
-                let output = binary.run_raw([flag])?;
+                let output = binary.run_raw(args.iter().copied())?;
                 if output.status_code != Some(0) {
                     bail!(
-                        "{} hwi {flag} exited {:?}\nstdout:\n{}\nstderr:\n{}",
+                        "{} hwi {args:?} exited {:?}\nstdout:\n{}\nstderr:\n{}",
                         binary.label,
                         output.status_code,
                         output.stdout,
                         output.stderr
                     );
                 }
-                if output.stdout.trim().is_empty() {
-                    bail!("{} hwi {flag} wrote no stdout", binary.label);
+                let json: Value =
+                    serde_json::from_str(output.stdout.trim()).with_context(|| {
+                        format!(
+                            "{} hwi {args:?} stdout was not JSON\nstdout:\n{}",
+                            binary.label, output.stdout
+                        )
+                    })?;
+                if json != expected {
+                    bail!(
+                        "{} hwi {args:?} help JSON mismatch\nexpected: {expected}\ngot: {json}",
+                        binary.label
+                    );
+                }
+                if output.stderr.trim().is_empty() {
+                    bail!("{} hwi {args:?} wrote no help text on stderr", binary.label);
                 }
             }
         }

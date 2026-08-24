@@ -284,6 +284,7 @@ pub enum HwiErrorCode {
     DeviceConnectionError,
     NeedToBeRoot,
     DeviceNotInitialized,
+    HelpText,
 }
 
 impl HwiErrorCode {
@@ -298,6 +299,7 @@ impl HwiErrorCode {
             HwiErrorCode::DeviceConnectionError => -3,
             HwiErrorCode::NeedToBeRoot => -16,
             HwiErrorCode::DeviceNotInitialized => -18,
+            HwiErrorCode::HelpText => -17,
         }
     }
 }
@@ -504,6 +506,20 @@ where
             print!("{text}");
             status
         }
+        CliOutcome::Help(help) => {
+            // Python HWI 3.2.0 prints a `-17` JSON object on stdout and the
+            // help text on stderr (hwilib/_cli.py HWIHelpAction).
+            println!(
+                "{}",
+                serde_json::to_string(&HwiError::new(
+                    HwiErrorCode::HelpText,
+                    "Help text requested",
+                ))
+                .expect("serialize HWI help error")
+            );
+            eprint!("{help}");
+            status
+        }
         CliOutcome::Usage(usage) => {
             println!(
                 "{}",
@@ -531,6 +547,7 @@ struct UsageError {
 #[derive(Debug)]
 enum CliOutcome {
     Stdout(String),
+    Help(String),
     Usage(UsageError),
     Response(HwiResponse),
     Request(Box<HwiRequest>),
@@ -574,7 +591,10 @@ fn cli_outcome(args: Vec<OsString>) -> CliOutcome {
 
 fn clap_outcome(prog: &str, err: clap::Error) -> CliOutcome {
     match err.kind() {
-        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => CliOutcome::Stdout(err.to_string()),
+        // Upstream shares one HWIArgumentParser across subparsers, so every
+        // `--help` takes the `-17` JSON path; `--version` stays plain stdout.
+        ErrorKind::DisplayHelp => CliOutcome::Help(err.to_string()),
+        ErrorKind::DisplayVersion => CliOutcome::Stdout(err.to_string()),
         ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand | ErrorKind::MissingSubcommand => {
             CliOutcome::Usage(UsageError {
                 message: format!("{prog}: error: the following arguments are required: command"),
@@ -3716,15 +3736,36 @@ mod tests {
     }
 
     #[test]
-    fn help_and_version_print_to_stdout_and_exit_zero() {
-        for args in [["hwi", "--help"], ["hwi", "--version"]] {
-            let outcome = outcome_of(&args);
-            let CliOutcome::Stdout(text) = &outcome else {
-                panic!("expected stdout outcome for {args:?}, got {outcome:?}");
+    fn version_prints_to_stdout_and_exits_zero() {
+        let args = ["hwi", "--version"];
+        let outcome = outcome_of(&args);
+        let CliOutcome::Stdout(text) = &outcome else {
+            panic!("expected stdout outcome for {args:?}, got {outcome:?}");
+        };
+        assert!(!text.is_empty());
+        assert_eq!(exit_status(&outcome), 0);
+    }
+
+    #[test]
+    fn help_yields_json_error_and_help_text_for_top_level_and_subcommand() {
+        for args in [
+            ["hwi", "--help"].as_slice(),
+            ["hwi", "getxpub", "--help"].as_slice(),
+        ] {
+            let outcome = outcome_of(args);
+            let CliOutcome::Help(help) = &outcome else {
+                panic!("expected help outcome for {args:?}, got {outcome:?}");
             };
-            assert!(!text.is_empty());
+            assert!(!help.is_empty());
             assert_eq!(exit_status(&outcome), 0);
         }
+
+        let json = serde_json::to_string(&HwiError::new(
+            HwiErrorCode::HelpText,
+            "Help text requested",
+        ))
+        .expect("serialize help error");
+        assert_eq!(json, r#"{"error":"Help text requested","code":-17}"#);
     }
 
     #[test]
