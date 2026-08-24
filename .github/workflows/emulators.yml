@@ -75,9 +75,11 @@ jobs:
       - name: Run HWI parity tests
         run: |
           set -o pipefail
-          nix run .#hwi-parity-bitbox -- -- --test-threads=1 2>&1 | tee bitbox-hwi-parity.log || {
+          timeout 20m nix run .#hwi-parity-bitbox -- -- --test-threads=1 2>&1 | tee bitbox-hwi-parity.log || {
             bash nix/scripts/emit-gh-error-log.sh "BitBox HWI parity log" bitbox-hwi-parity.log
             cat bitbox-hwi-parity.log || true
+            bash nix/scripts/emit-gh-error-log.sh "BitBox emulator log" bitbox.log
+            cat bitbox.log || true
             exit 1
           }
       - name: Stop shared BitBox simulator before management lifecycle
@@ -156,9 +158,11 @@ jobs:
       - name: Run HWI parity tests
         run: |
           set -o pipefail
-          nix run .#hwi-parity-coldcard -- -- --test-threads=1 2>&1 | tee coldcard-hwi-parity.log || {
+          timeout 20m nix run .#hwi-parity-coldcard -- -- --test-threads=1 2>&1 | tee coldcard-hwi-parity.log || {
             bash nix/scripts/emit-gh-error-log.sh "Coldcard HWI parity log" coldcard-hwi-parity.log
             cat coldcard-hwi-parity.log || true
+            bash nix/scripts/emit-gh-error-log.sh "Coldcard emulator log" coldcard.log
+            cat coldcard.log || true
             exit 1
           }
       - name: Run Coldcard CLI e2e
@@ -223,9 +227,11 @@ jobs:
       - name: Run HWI parity tests
         run: |
           set -o pipefail
-          nix run .#hwi-parity-ledger -- -- --test-threads=1 2>&1 | tee ledger-hwi-parity.log || {
+          timeout 20m nix run .#hwi-parity-ledger -- -- --test-threads=1 2>&1 | tee ledger-hwi-parity.log || {
             bash nix/scripts/emit-gh-error-log.sh "Ledger HWI parity log" ledger-hwi-parity.log
             cat ledger-hwi-parity.log || true
+            bash nix/scripts/emit-gh-error-log.sh "Ledger emulator log" ledger.log
+            cat ledger.log || true
             exit 1
           }
       - name: Restart Ledger Speculos after HWI parity tests
@@ -407,9 +413,11 @@ jobs:
       - name: Run HWI parity tests
         run: |
           set -o pipefail
-          nix run .#hwi-parity-jade -- -- --test-threads=1 2>&1 | tee jade-hwi-parity.log || {
+          timeout 20m nix run .#hwi-parity-jade -- -- --test-threads=1 2>&1 | tee jade-hwi-parity.log || {
             bash nix/scripts/emit-gh-error-log.sh "Jade HWI parity log" jade-hwi-parity.log
             cat jade-hwi-parity.log || true
+            bash nix/scripts/emit-gh-error-log.sh "Jade emulator log" jade.log
+            cat jade.log || true
             exit 1
           }
       - name: Run Jade CLI e2e

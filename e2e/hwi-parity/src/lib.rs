@@ -1,9 +1,11 @@
 use std::{
     env,
-    ffi::OsStr,
-    io::Write,
+    ffi::{OsStr, OsString},
+    io::{Read, Write},
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -47,11 +49,7 @@ impl HwiBinary {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = Command::new(&self.path)
-            .args(args)
-            .output()
-            .with_context(|| format!("failed to spawn {} hwi at {}", self.label, self.path))?;
-        parse_output(self.label, output)
+        parse_output(self.label, self.run_raw(args, |_| {})?)
     }
 
     pub fn run_with_envs<I, S>(&self, args: I, envs: &[(&str, &str)]) -> Result<HwiOutput>
@@ -59,11 +57,9 @@ impl HwiBinary {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = Command::new(&self.path)
-            .args(args)
-            .envs(envs.iter().copied())
-            .output()
-            .with_context(|| format!("failed to spawn {} hwi at {}", self.label, self.path))?;
+        let output = self.run_raw(args, |command| {
+            command.envs(envs.iter().copied());
+        })?;
         parse_output(self.label, output)
     }
 
@@ -72,18 +68,9 @@ impl HwiBinary {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = Command::new(&self.path)
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .with_context(|| {
-                format!(
-                    "failed to spawn {} hwi at {} in {}",
-                    self.label,
-                    self.path,
-                    cwd.display()
-                )
-            })?;
+        let output = self.run_raw(args, |command| {
+            command.current_dir(cwd);
+        })?;
         parse_output(self.label, output)
     }
 
@@ -92,8 +79,9 @@ impl HwiBinary {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        let args = collect_args(args);
         let mut child = Command::new(&self.path)
-            .args(args)
+            .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -110,8 +98,106 @@ impl HwiBinary {
                 .with_context(|| format!("failed to write {} hwi stdin", self.label))?;
         }
 
-        parse_output(self.label, child.wait_with_output()?)
+        parse_output(
+            self.label,
+            wait_with_timeout(child, self.label, &args, command_timeout())?,
+        )
     }
+
+    fn run_raw<I, S>(&self, args: I, configure: impl FnOnce(&mut Command)) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args = collect_args(args);
+        let mut command = Command::new(&self.path);
+        command
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure(&mut command);
+        let child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn {} hwi at {}", self.label, self.path))?;
+        wait_with_timeout(child, self.label, &args, command_timeout())
+    }
+}
+
+fn collect_args<I, S>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    args.into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect()
+}
+
+fn command_timeout() -> Duration {
+    const DEFAULT_SECS: u64 = 180;
+    Duration::from_secs(
+        env::var("HWI_PARITY_COMMAND_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(DEFAULT_SECS),
+    )
+}
+
+/// Waits for `child`, killing it once `timeout` elapses so a device that never
+/// answers fails the test instead of hanging until CI is cancelled.
+fn wait_with_timeout(
+    mut child: Child,
+    label: &str,
+    args: &[OsString],
+    timeout: Duration,
+) -> Result<Output> {
+    let stdout = reader_thread(child.stdout.take());
+    let stderr = reader_thread(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        let stdout = join_reader(stdout);
+        let stderr = join_reader(stderr);
+        bail!(
+            "{label} hwi did not exit within {}s and was killed\nargs: {:?}\nstdout so far:\n{}\nstderr so far:\n{}",
+            timeout.as_secs(),
+            args,
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+    };
+
+    Ok(Output {
+        status,
+        stdout: join_reader(stdout),
+        stderr: join_reader(stderr),
+    })
+}
+
+fn reader_thread<R: Read + Send + 'static>(source: Option<R>) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(mut source) = source {
+            let _ = source.read_to_end(&mut buffer);
+        }
+        buffer
+    })
+}
+
+fn join_reader(handle: JoinHandle<Vec<u8>>) -> Vec<u8> {
+    handle.join().unwrap_or_default()
 }
 
 pub fn assert_json_parity<I, S>(args: I) -> Result<()>
@@ -187,7 +273,10 @@ mod tests {
         os::unix::net::UnixDatagram,
         path::{Path, PathBuf},
         str::FromStr,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         time::{Duration, Instant},
     };
 
@@ -203,6 +292,26 @@ mod tests {
         secp256k1::Secp256k1,
         transaction::Version as TxVersion,
     };
+
+    #[test]
+    fn commands_that_never_exit_are_killed() -> Result<()> {
+        let child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let error = wait_with_timeout(
+            child,
+            "candidate",
+            &[OsString::from("sleep")],
+            Duration::from_millis(200),
+        )
+        .expect_err("a command that never exits must fail");
+
+        assert!(error.to_string().contains("did not exit within"), "{error}");
+        Ok(())
+    }
 
     #[test]
     fn reference_binary_enumerate_is_json_or_reports_clear_error() -> Result<()> {
@@ -449,12 +558,17 @@ mod tests {
         fs::create_dir_all(&reference_dir)?;
         fs::create_dir_all(&candidate_dir)?;
 
-        let reference_approval = spawn_coldcard_backup_approval();
-        let reference = HwiBinary::reference()?.run_in_dir(args.clone(), &reference_dir)?;
-        let _ = reference_approval.join();
-        let candidate_approval = spawn_coldcard_backup_approval();
-        let candidate = HwiBinary::candidate()?.run_in_dir(args, &candidate_dir)?;
-        let _ = candidate_approval.join();
+        store_coldcard_backup_password()?;
+
+        let reference_approval = ColdcardBackupApproval::spawn();
+        let reference = HwiBinary::reference()?.run_in_dir(args.clone(), &reference_dir);
+        reference_approval.finish();
+        let reference = reference?;
+
+        let candidate_approval = ColdcardBackupApproval::spawn();
+        let candidate = HwiBinary::candidate()?.run_in_dir(args, &candidate_dir);
+        candidate_approval.finish();
+        let candidate = candidate?;
 
         assert_success("reference", &reference)?;
         assert_success("candidate", &candidate)?;
@@ -2034,11 +2148,35 @@ mod tests {
         });
     }
 
-    fn spawn_coldcard_backup_approval() -> std::thread::JoinHandle<()> {
-        std::thread::spawn(|| {
-            std::thread::sleep(Duration::from_secs(1));
-            let _ = send_coldcard_backup_approval();
-        })
+    /// Approves the Coldcard backup prompts until the command under test exits.
+    /// A single pass raced the prompt: presses sent before it appeared were lost
+    /// and the command then waited for input that never came again.
+    struct ColdcardBackupApproval {
+        done: Arc<AtomicBool>,
+        handle: std::thread::JoinHandle<()>,
+    }
+
+    impl ColdcardBackupApproval {
+        fn spawn() -> Self {
+            let done = Arc::new(AtomicBool::new(false));
+            let approving = Arc::clone(&done);
+            let handle = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(120);
+                while !approving.load(Ordering::Relaxed) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_secs(1));
+                    if approving.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = send_coldcard_backup_approval();
+                }
+            });
+            Self { done, handle }
+        }
+
+        fn finish(self) {
+            self.done.store(true, Ordering::Relaxed);
+            let _ = self.handle.join();
+        }
     }
 
     fn send_coldcard_approval() -> Result<()> {
@@ -2046,21 +2184,19 @@ mod tests {
         Ok(())
     }
 
+    /// Stores a backup password on the simulator so `backup` offers "use the
+    /// same password as last time" instead of generating fresh words and
+    /// quizzing them back (firmware shared/backups.py: a stored `bkpw` sets
+    /// `skip_quiz`). The quiz shuffles three choices per question, so without
+    /// this the harness can only guess, and a wrong guess costs a two second
+    /// penalty pause before the question is asked again.
+    fn store_coldcard_backup_password() -> Result<()> {
+        coldcard_control_exchange(b"EXECsettings.set('bkpw','a'*32);settings.save()")?;
+        Ok(())
+    }
+
     fn send_coldcard_backup_approval() -> Result<()> {
-        let client_socket = format!(
-            "/tmp/bhwi-hwi-parity-ckcc-backup-{}.sock",
-            std::process::id()
-        );
-        let _ = std::fs::remove_file(&client_socket);
-        let socket = UnixDatagram::bind(&client_socket)?;
-        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-        socket.connect("/tmp/ckcc-simulator.sock")?;
-        coldcard_hid_exchange(&socket, b"XKEYy")?;
-        for _ in 0..20 {
-            std::thread::sleep(Duration::from_millis(250));
-            coldcard_hid_exchange(&socket, b"XKEY1")?;
-        }
-        let _ = std::fs::remove_file(client_socket);
+        coldcard_control_exchange(b"XKEYy")?;
         Ok(())
     }
 
