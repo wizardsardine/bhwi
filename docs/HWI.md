@@ -43,7 +43,7 @@ errors exit `0`, and argparse-style usage errors exit `2` with
 |`backup`          |`n/a` |`n/a`|`[x]`   |`n/a` |`n/a`  |`[ ]`   |`[x]`   |Coldcard file backup and BitBox02 mnemonic-export backup are covered. BitBox01 remains open.|
 |`promptpin`       |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN prompting for Trezor-class devices.      |
 |`sendpin`         |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN entry for Trezor-class devices.          |
-|`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[~]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
+|`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
 |`installudevrules`|`n/a` |`n/a`|`n/a`   |`n/a` |`n/a`  |`n/a`   |`n/a`   |Host-side Python HWI command covered by the shared udev installer. Registered on Linux only.|
 
 ## Running Parity Tests
