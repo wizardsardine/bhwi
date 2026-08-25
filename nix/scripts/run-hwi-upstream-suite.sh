@@ -191,7 +191,7 @@ case " \$* " in
   *" wipe "* | *" signtx "* | *" signmessage "* | *" displayaddress "* | *" togglepassphrase "* | *" setup "* | *" restore "*) press=1 ;;
 esac
 case " \$* " in
-  *" sendpin "*) case " \$* " in *" -p "*) press=1 ;; esac ;;
+  *" sendpin "* | *" enumerate "*) case " \$* " in *" -p "*) press=1 ;; esac ;;
 esac
 case "\$press" in
   1)
