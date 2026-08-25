@@ -181,6 +181,7 @@ impl From<BitBoxResponse> for Response {
                 label: None,
                 on_device_passphrase_entry: None,
                 needs_pin_sent: None,
+                needs_passphrase_sent: None,
             }),
             BitBoxResponse::MasterFingerprint(fingerprint) => Self::MasterFingerprint(fingerprint),
             BitBoxResponse::Xpub(xpub) => Self::Xpub(xpub),

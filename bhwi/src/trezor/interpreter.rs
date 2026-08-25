@@ -83,6 +83,7 @@ pub struct TrezorDeviceInfo {
     pub label: Option<String>,
     pub on_device_passphrase_entry: bool,
     pub needs_pin_sent: bool,
+    pub passphrase_protection: bool,
 }
 
 enum PublicKeyKind {
@@ -705,6 +706,7 @@ fn features_info(features: mgmt::Features, network: Network) -> TrezorDeviceInfo
         on_device_passphrase_entry: on_device,
         needs_pin_sent: features.pin_protection.unwrap_or(false)
             && !features.unlocked.unwrap_or(false),
+        passphrase_protection: features.passphrase_protection.unwrap_or(false),
     }
 }
 

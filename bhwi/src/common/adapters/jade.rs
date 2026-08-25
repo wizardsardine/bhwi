@@ -168,6 +168,7 @@ impl From<JadeResponse> for Response {
                 label: None,
                 on_device_passphrase_entry: None,
                 needs_pin_sent: None,
+                needs_passphrase_sent: None,
             }),
             JadeResponse::Address(address) => Self::Address(address),
             JadeResponse::RegisteredDescriptor => {
