@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: run-hwi-upstream-suite.sh <bitbox02|coldcard|ledger|jade> [extra run_tests.py args...]
+usage: run-hwi-upstream-suite.sh <bitbox02|coldcard|ledger|jade|trezor|trezor-t> [extra run_tests.py args...]
 
 Required:
   HWI_BIN                     Path to the BHWI hwi binary under test.
@@ -14,6 +14,7 @@ Optional device inputs:
   HWI_COLDCARD_SIMULATOR      Prepared Coldcard simulator.py (otherwise uses its prepare script).
   HWI_JADE_SIMULATOR_DIR      Prepared HWI-compatible Jade directory.
   HWI_BITBOX02_SIMULATOR      BitBox02 simulator binary.
+  HWI_TREZOR_EMULATOR         Prebuilt Trezor One emulator (otherwise uses its prepare script).
   HWI_BITCOIND                Path to bitcoind. Defaults to bitcoind on PATH.
 
 The runner executes Bitcoin Core HWI's upstream test suite in --interface=cli
@@ -135,6 +136,80 @@ SH
       bash "${HWI_JADE_PREPARE_SCRIPT:?HWI_JADE_PREPARE_SCRIPT must be set}" --prepare-hwi "$simulator_dir"
     fi
     "$python" run_tests.py "${common_args[@]}" --jade --jade-path "$simulator_dir" "$@"
+    ;;
+  trezor | trezor-t)
+    emulator="${HWI_TREZOR_EMULATOR:-}"
+    if [[ -z "$emulator" ]]; then
+      emulator="$(bash \
+        "${HWI_TREZOR_PREPARE_SCRIPT:?HWI_TREZOR_PREPARE_SCRIPT must be set}" \
+        --prepare-hwi |
+        tail -n 1)"
+    fi
+    if [[ "$device" == trezor-t ]]; then
+      emulator_name="trezor-emu-core"
+      model_args=(--trezor-t --trezor-t-path)
+    else
+      emulator_name="trezor-emu-legacy"
+      model_args=(--trezor-1 --trezor-1-path)
+    fi
+    trezor_dir="$work/trezor-compat"
+    mkdir -p "$trezor_dir"
+    ln -s "$emulator" "$trezor_dir/$emulator_name"
+    emulator="$trezor_dir/$emulator_name"
+
+    cat > "$work/trezor-press.py" <<'PY'
+import os
+import socket
+import time
+
+REPORT_SIZE = 64
+DECISION = 100
+YES = bytes([0x08, 0x01])
+DEADLINE = 300
+
+frame = b"##" + DECISION.to_bytes(2, "big") + len(YES).to_bytes(4, "big") + YES
+report = bytearray(REPORT_SIZE)
+report[0] = 0x3F
+report[1 : 1 + len(frame)] = frame
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.connect(("127.0.0.1", 21325))
+parent = os.getppid()
+started = time.monotonic()
+while os.getppid() == parent and time.monotonic() - started < DEADLINE:
+    time.sleep(0.25)
+    try:
+        sock.send(bytes(report))
+    except OSError:
+        pass
+PY
+
+    cat > "$work/bin/hwi" <<EOF
+#!/usr/bin/env bash
+press=0
+case " \$* " in
+  *" wipe "* | *" signtx "* | *" signmessage "* | *" displayaddress "* | *" togglepassphrase "* | *" setup "* | *" restore "*) press=1 ;;
+esac
+case " \$* " in
+  *" sendpin "*) case " \$* " in *" -p "*) press=1 ;; esac ;;
+esac
+case "\$press" in
+  1)
+    "$python" "$work/trezor-press.py" &
+    presser=\$!
+    trap 'kill "\$presser" 2>/dev/null || true' EXIT HUP INT TERM
+    "$HWI_BIN" "\$@"
+    status=\$?
+    kill "\$presser" 2>/dev/null || true
+    wait "\$presser" 2>/dev/null || true
+    exit "\$status"
+    ;;
+esac
+exec "$HWI_BIN" "\$@"
+EOF
+    chmod +x "$work/bin/hwi"
+
+    "$python" run_tests.py "${common_args[@]}" "${model_args[@]}" "$emulator" "$@"
     ;;
   *)
     echo "unsupported upstream HWI suite device: $device" >&2

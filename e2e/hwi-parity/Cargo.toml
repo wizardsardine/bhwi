@@ -9,3 +9,5 @@ license-file.workspace = true
 anyhow.workspace = true
 bitcoin = { workspace = true, features = ["base64"] }
 serde_json.workspace = true
+
+bhwi-e2e-trezor = { path = "../trezor" }

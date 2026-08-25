@@ -11,6 +11,7 @@ use bhwi::{
     bitcoin::psbt::Psbt,
     common::{MultisigAddressType, MultisigDisplayAddress},
     ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
+    trezor::HostPassphrase,
 };
 use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions};
 use bitcoin::{
@@ -36,7 +37,9 @@ use crate::{
     Device, DeviceManager, DeviceType,
     config::DeviceSelector,
     get_descriptors::GetDescriptorOptions,
-    management::{bitbox_restore_context, bitbox_setup_context},
+    management::{
+        bitbox_restore_context, bitbox_setup_context, trezor_restore_context, trezor_setup_context,
+    },
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -151,6 +154,7 @@ pub enum HwiCliCommand {
         pin: String,
     },
     Togglepassphrase,
+    #[cfg(target_os = "linux")]
     Installudevrules {
         #[arg(long, default_value = "/etc/udev/rules.d/")]
         location: PathBuf,
@@ -213,6 +217,10 @@ pub enum HwiCommand {
         label: String,
     },
     TogglePassphrase,
+    PromptPin,
+    SendPin {
+        pin: String,
+    },
     UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
     InstallUdevRules {
         location: PathBuf,
@@ -283,6 +291,9 @@ pub enum HwiErrorCode {
     DeviceFailure,
     DeviceConnectionError,
     NeedToBeRoot,
+    DeviceAlreadyInitialized,
+    DeviceAlreadyUnlocked,
+    DeviceNotReady,
     DeviceNotInitialized,
 }
 
@@ -297,6 +308,9 @@ impl HwiErrorCode {
             HwiErrorCode::DeviceFailure => -13,
             HwiErrorCode::DeviceConnectionError => -3,
             HwiErrorCode::NeedToBeRoot => -16,
+            HwiErrorCode::DeviceAlreadyInitialized => -10,
+            HwiErrorCode::DeviceAlreadyUnlocked => -11,
+            HwiErrorCode::DeviceNotReady => -12,
             HwiErrorCode::DeviceNotInitialized => -18,
         }
     }
@@ -472,6 +486,8 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
             label,
         } => restore_device(request.selector, interactive, word_count, label).await,
         HwiCommand::TogglePassphrase => toggle_passphrase_device(request.selector).await,
+        HwiCommand::PromptPin => prompt_pin_device(request.selector).await,
+        HwiCommand::SendPin { pin } => send_pin_device(request.selector, pin).await,
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
@@ -545,10 +561,13 @@ fn exit_status(outcome: &CliOutcome) -> u8 {
 
 fn cli_outcome(args: Vec<OsString>) -> CliOutcome {
     let prog = program_name(&args);
-    let cli = match HwiCli::try_parse_from(args) {
+    let mut cli = match HwiCli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(err) => return clap_outcome(&prog, err),
     };
+    if let Err(err) = read_stdin_password(&mut cli) {
+        return CliOutcome::Response(HwiResponse::Error(err));
+    }
     match request_from_cli(cli) {
         Ok(request) => {
             if let HwiCommand::Unsupported(command) = &request.command {
@@ -677,42 +696,73 @@ where
 }
 
 async fn enumerate(selector: DeviceSelector) -> HwiResponse {
-    let manager = DeviceManager::new(selector);
+    let manager = DeviceManager::new(DeviceSelector {
+        device_type: None,
+        device_path: None,
+        ..selector
+    });
     let devices = match manager.enumerate().await {
         Ok(devices) => devices,
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
     let mut response = Vec::with_capacity(devices.len());
     for mut device in devices {
         let mut error = None;
         let mut code = None;
-        let fingerprint = match device.device().unlock(manager.selector.network).await {
-            Ok(()) => match device.fingerprint().await {
-                Ok(fingerprint) => Some(fingerprint),
-                Err(err) => {
-                    error = Some(err.to_string());
-                    code = Some(HwiErrorCode::DeviceConnectionError.code());
-                    None
+        let mut info = None;
+        let mut fingerprint = None;
+        let mut needs_pin_sent = false;
+        match device.device().unlock(manager.selector.network).await {
+            Ok(()) => {
+                // A device waiting for a PIN stops answering every other request, and the
+                // fingerprint request is what makes it start waiting.
+                if reports_device_info(device.device_type()) {
+                    match device.info().await {
+                        Ok(device_info) => info = Some(device_info),
+                        Err(err) => {
+                            error = Some(err.to_string());
+                            code = Some(HwiErrorCode::DeviceConnectionError.code());
+                        }
+                    }
                 }
-            },
+                needs_pin_sent = info
+                    .as_ref()
+                    .and_then(|info| info.needs_pin_sent)
+                    .unwrap_or(false);
+                if needs_pin_sent {
+                    error = Some(bhwi::trezor::TrezorError::LOCKED.to_owned());
+                    code = Some(HwiErrorCode::DeviceNotReady.code());
+                } else if error.is_none() {
+                    match device.fingerprint().await {
+                        Ok(device_fingerprint) => fingerprint = Some(device_fingerprint),
+                        Err(err) => {
+                            error = Some(err.to_string());
+                            code = Some(HwiErrorCode::DeviceConnectionError.code());
+                        }
+                    }
+                }
+            }
             Err(err) => {
                 error = Some(err.to_string());
                 code = Some(HwiErrorCode::DeviceConnectionError.code());
-                None
             }
-        };
+        }
+        let label = info.as_ref().and_then(|info| info.label.clone());
+        let firmware = info.as_ref().and_then(|info| info.firmware.clone());
         response.push(HwiEnumeratedDevice {
             device_type: device.device_type().to_string(),
-            model: hwi_enumerate_model(device.device_type(), device.model(), device.is_emulated()),
+            model: hwi_enumerate_model(
+                device.device_type(),
+                device.model(),
+                device.is_emulated(),
+                firmware.as_deref(),
+            ),
             path: hwi_enumerate_path(device.device_type(), device.path(), device.is_emulated()),
-            label: label_for(device.device_type()),
+            label: label_for(device.device_type(), label),
             fingerprint,
-            needs_pin_sent: false,
+            needs_pin_sent,
             needs_passphrase_sent: false,
             error,
             code,
@@ -756,10 +806,7 @@ async fn unsupported_device_action(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -799,10 +846,7 @@ async fn setup_device(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -812,7 +856,18 @@ async fn setup_device(
             "setup requires interactive mode",
         ));
     }
-    if device.device_type() != DeviceType::BitBox02 {
+    if device.device_type() == DeviceType::Trezor
+        && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
+    {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceAlreadyInitialized,
+            "Device is already initialized. Use wipe first and try again",
+        ));
+    }
+    if !matches!(
+        device.device_type(),
+        DeviceType::BitBox02 | DeviceType::Trezor
+    ) {
         let action = HwiUnsupportedDeviceAction::Setup {
             interactive,
             label,
@@ -823,23 +878,32 @@ async fn setup_device(
             hwi_unavailable_action_message(device.device_type(), &action),
         ));
     }
-    if !backup_passphrase.is_empty() {
+    if device.device_type() == DeviceType::BitBox02 && !backup_passphrase.is_empty() {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             "Passphrase not needed when setting up a BitBox02.",
         ));
     }
-    if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+    if device.device_type() == DeviceType::BitBox02
+        && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
+    {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             "The BitBox02 must be wiped before setup.",
         ));
     }
 
-    let context = match bitbox_setup_context(device.is_emulated()) {
-        Ok(context) => context,
-        Err(err) => {
-            return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, err.to_string()));
+    let context = if device.device_type() == DeviceType::Trezor {
+        trezor_setup_context()
+    } else {
+        match bitbox_setup_context(device.is_emulated()) {
+            Ok(context) => context,
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
         }
     };
     match device
@@ -854,10 +918,7 @@ async fn setup_device(
         .await
     {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -879,20 +940,22 @@ async fn wipe_device(selector: DeviceSelector) -> HwiResponse {
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
-    if device.device_type() != DeviceType::BitBox02 {
+    if !matches!(
+        device.device_type(),
+        DeviceType::BitBox02 | DeviceType::Trezor
+    ) {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             hwi_unavailable_action_message(device.device_type(), &HwiUnsupportedDeviceAction::Wipe),
         ));
     }
-    if device.info().await.ok().and_then(|info| info.initialized) == Some(false) {
+    if device.device_type() == DeviceType::BitBox02
+        && device.info().await.ok().and_then(|info| info.initialized) == Some(false)
+    {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::DeviceNotInitialized,
             "The BitBox02 must be initialized first.",
@@ -901,10 +964,7 @@ async fn wipe_device(selector: DeviceSelector) -> HwiResponse {
 
     match device.device().wipe_device().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -931,10 +991,7 @@ async fn restore_device(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -944,7 +1001,18 @@ async fn restore_device(
             "restore requires interactive mode",
         ));
     }
-    if device.device_type() != DeviceType::BitBox02 {
+    if device.device_type() == DeviceType::Trezor
+        && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
+    {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceFailure,
+            "Device already initialized. Call device.wipe() and try again.",
+        ));
+    }
+    if !matches!(
+        device.device_type(),
+        DeviceType::BitBox02 | DeviceType::Trezor
+    ) {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             hwi_unavailable_action_message(
@@ -957,29 +1025,40 @@ async fn restore_device(
             ),
         ));
     }
-    if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::UnsupportedCommand,
-            "The BitBox02 must be wiped before setup.",
-        ));
-    }
-
-    let context = match bitbox_restore_context() {
-        Ok(context) => context,
-        Err(err) => {
-            return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, err.to_string()));
+    let context = if device.device_type() == DeviceType::BitBox02 {
+        if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::UnsupportedCommand,
+                "The BitBox02 must be wiped before setup.",
+            ));
+        }
+        match bitbox_restore_context() {
+            Ok(context) => Some(context),
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
+        }
+    } else {
+        match trezor_restore_context() {
+            Ok(context) => Some(context),
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
         }
     };
     match device
         .device()
-        .restore_device(RestoreOptions { label, word_count }, Some(context))
+        .restore_device(RestoreOptions { label, word_count }, context)
         .await
     {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1001,14 +1080,14 @@ async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
-    if device.device_type() != DeviceType::BitBox02 {
+    if !matches!(
+        device.device_type(),
+        DeviceType::BitBox02 | DeviceType::Trezor
+    ) {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             hwi_unavailable_action_message(
@@ -1017,7 +1096,9 @@ async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
             ),
         ));
     }
-    if device.info().await.ok().and_then(|info| info.initialized) == Some(false) {
+    if device.device_type() == DeviceType::BitBox02
+        && device.info().await.ok().and_then(|info| info.initialized) == Some(false)
+    {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::DeviceNotInitialized,
             "The BitBox02 must be initialized first.",
@@ -1026,10 +1107,131 @@ async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
 
     match device.device().toggle_passphrase().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
+    }
+}
+
+pub const PIN_MATRIX_DESCRIPTION: &str =
+    "Use the numeric keypad to describe number positions. The layout is:
+    7 8 9
+    4 5 6
+    1 2 3";
+
+async fn device_for_pin_command(
+    selector: DeviceSelector,
+    action: HwiUnsupportedDeviceAction,
+    contact_device: bool,
+) -> Result<crate::Device, HwiError> {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return Err(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+    // Reading a fingerprint means unlocking first, which is what the PIN is for.
+    if !contact_device && selector.fingerprint.is_some() {
+        return Err(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "A locked device cannot be matched by fingerprint; use --device-type or --device-path",
+        ));
+    }
+
+    let manager = DeviceManager::new(selector);
+    let found = if contact_device {
+        manager.get_device_with_fingerprint().await
+    } else {
+        manager.get_device_without_contacting().await
+    };
+    let device = match found {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return Err(HwiError::new(
+                HwiErrorCode::DeviceConnectionError,
+                "Could not find device with specified fingerprint or type",
+            ));
+        }
+        Err(err) => {
+            return Err(device_error(err));
+        }
+    };
+
+    if device.device_type() != DeviceType::Trezor {
+        return Err(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            hwi_unavailable_action_message(device.device_type(), &action),
+        ));
+    }
+    Ok(device)
+}
+
+/// A device waiting for its PIN reports being locked rather than failing to connect.
+fn device_error(err: impl std::fmt::Display) -> HwiError {
+    let message = err.to_string();
+    if message.contains(bhwi::trezor::TrezorError::LOCKED) {
+        return HwiError::new(
+            HwiErrorCode::DeviceNotReady,
+            bhwi::trezor::TrezorError::LOCKED,
+        );
+    }
+    HwiError::new(HwiErrorCode::DeviceConnectionError, message)
+}
+
+/// Reports the bare device message rather than the wrapped transport error.
+fn pin_error(err: impl std::fmt::Display) -> HwiError {
+    let message = err.to_string();
+    for known in [
+        bhwi::trezor::TrezorError::NO_PIN_NEEDED,
+        bhwi::trezor::TrezorError::PIN_ALREADY_SENT,
+    ] {
+        if message.contains(known) {
+            return HwiError::new(HwiErrorCode::DeviceAlreadyUnlocked, known);
+        }
+    }
+    HwiError::new(HwiErrorCode::DeviceConnectionError, message)
+}
+
+async fn prompt_pin_device(selector: DeviceSelector) -> HwiResponse {
+    let mut device =
+        match device_for_pin_command(selector, HwiUnsupportedDeviceAction::PromptPin, true).await {
+            Ok(device) => device,
+            Err(error) => return HwiResponse::Error(error),
+        };
+
+    eprintln!(
+        "Use 'sendpin' to provide the number positions for the PIN as displayed on your device's screen"
+    );
+    eprintln!("{PIN_MATRIX_DESCRIPTION}");
+
+    match device.device().prompt_pin().await {
+        Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        Err(err) => HwiResponse::Error(pin_error(err)),
+    }
+}
+
+async fn send_pin_device(selector: DeviceSelector, pin: String) -> HwiResponse {
+    let pin = match bhwi::trezor::HostPin::new(pin) {
+        Ok(pin) => pin,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
+        }
+    };
+
+    let mut device = match device_for_pin_command(
+        selector,
+        HwiUnsupportedDeviceAction::SendPin { pin: String::new() },
+        false,
+    )
+    .await
+    {
+        Ok(device) => device,
+        Err(error) => return HwiResponse::Error(error),
+    };
+
+    let context =
+        bhwi::common::DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Pin(pin));
+    match device.device().send_pin(Some(context)).await {
+        Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        Err(err) => HwiResponse::Error(pin_error(err)),
     }
 }
 
@@ -1055,10 +1257,7 @@ async fn backup_device(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1073,7 +1272,7 @@ async fn backup_device(
             }
         }
         DeviceType::Coldcard => {}
-        DeviceType::Ledger | DeviceType::Jade => {
+        DeviceType::Ledger | DeviceType::Jade | DeviceType::Trezor => {
             let unsupported = HwiUnsupportedDeviceAction::Backup {
                 label,
                 backup_passphrase,
@@ -1100,10 +1299,7 @@ async fn backup_device(
                 format!("backup failed: {err}"),
             )),
         },
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1166,10 +1362,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1227,10 +1420,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
                 psbt: signed,
             })
         }
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1256,10 +1446,7 @@ async fn sign_message(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1280,10 +1467,7 @@ async fn sign_message(
                 &signature,
             ),
         }),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1308,10 +1492,7 @@ async fn display_address(
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
@@ -1338,7 +1519,7 @@ async fn display_address(
                 Err(single_sig_error) => {
                     if matches!(
                         device.device_type(),
-                        DeviceType::Coldcard | DeviceType::Jade
+                        DeviceType::Coldcard | DeviceType::Jade | DeviceType::Trezor
                     ) {
                         match multisig_display_address_from_descriptor(&descriptor) {
                             Ok(address) => Ok(DisplayAddress::ByMultisig(address)),
@@ -1483,19 +1664,13 @@ async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) 
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
     match device.device().get_extended_pubkey(path, false).await {
         Ok(xpub) => HwiResponse::GetXpub(get_xpub_response(xpub, expert)),
-        Err(err) => HwiResponse::Error(HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            err.to_string(),
-        )),
+        Err(err) => HwiResponse::Error(device_error(err)),
     }
 }
 
@@ -1517,20 +1692,14 @@ async fn get_descriptors(selector: DeviceSelector, account: u32) -> HwiResponse 
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
     let device_type = device.device_type();
@@ -1554,10 +1723,7 @@ async fn get_descriptors(selector: DeviceSelector, account: u32) -> HwiResponse 
             let descriptor = match manager.get_descriptor(device.device(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(HwiError::new(
-                        HwiErrorCode::DeviceConnectionError,
-                        err.to_string(),
-                    ));
+                    return HwiResponse::Error(device_error(err));
                 }
             };
             let descriptor = match hwi_descriptor_string(&descriptor) {
@@ -1615,20 +1781,14 @@ async fn get_keypool(selector: DeviceSelector, request: HwiGetKeypoolRequest) ->
             ));
         }
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
 
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                err.to_string(),
-            ));
+            return HwiResponse::Error(device_error(err));
         }
     };
     let device_type = device.device_type();
@@ -1678,10 +1838,7 @@ async fn get_keypool(selector: DeviceSelector, request: HwiGetKeypoolRequest) ->
             let descriptor = match manager.get_descriptor(device.device(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(HwiError::new(
-                        HwiErrorCode::DeviceConnectionError,
-                        err.to_string(),
-                    ));
+                    return HwiResponse::Error(device_error(err));
                 }
             };
             let desc = match hwi_descriptor_string(&descriptor) {
@@ -2705,6 +2862,7 @@ fn hwi_can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
         DeviceType::Ledger => true,
         DeviceType::Jade => false,
         DeviceType::Coldcard => model.contains("edge"),
+        DeviceType::Trezor => model != "trezor_one",
     }
 }
 
@@ -2773,16 +2931,32 @@ fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
     }
 }
 
-fn label_for(device_type: DeviceType) -> Option<Option<String>> {
+fn reports_device_info(device_type: DeviceType) -> bool {
+    matches!(device_type, DeviceType::Trezor)
+}
+
+fn label_for(device_type: DeviceType, label: Option<String>) -> Option<Option<String>> {
     match device_type {
-        DeviceType::Coldcard | DeviceType::Ledger => Some(None),
+        DeviceType::Coldcard | DeviceType::Ledger | DeviceType::Trezor => Some(label),
         DeviceType::BitBox02 | DeviceType::Jade => None,
     }
 }
 
-fn hwi_enumerate_model(device_type: DeviceType, model: &str, is_emulated: bool) -> String {
+fn hwi_enumerate_model(
+    device_type: DeviceType,
+    model: &str,
+    is_emulated: bool,
+    firmware: Option<&str>,
+) -> String {
     match (device_type, is_emulated) {
         (DeviceType::BitBox02, true) => "bitbox02_nova_multi".to_owned(),
+        (DeviceType::Trezor, emulated) => match firmware {
+            Some(reported) => {
+                let suffix = if emulated { "_simulator" } else { "" };
+                format!("trezor_{}{suffix}", reported.to_lowercase())
+            }
+            None => model.to_owned(),
+        },
         _ => model.to_owned(),
     }
 }
@@ -2819,6 +2993,27 @@ fn hwi_unavailable_action_message(
         }
         (DeviceType::Ledger, HwiUnsupportedDeviceAction::TogglePassphrase) => {
             "The Ledger Nano S and X do not support toggling passphrase from the host"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::Setup { .. }) => {
+            "Trezor setup is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::Wipe) => {
+            "Trezor wipe is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::Restore { .. }) => {
+            "Trezor restore is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::Backup { .. }) => {
+            "The Trezor does not support creating a backup via software"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::PromptPin) => {
+            "Trezor PIN entry is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::SendPin { .. }) => {
+            "Trezor PIN entry is not yet supported"
+        }
+        (DeviceType::Trezor, HwiUnsupportedDeviceAction::TogglePassphrase) => {
+            "Trezor passphrase toggling is not yet supported"
         }
         (DeviceType::Jade, HwiUnsupportedDeviceAction::Setup { .. }) => {
             "Blockstream Jade does not support software setup"
@@ -2897,11 +3092,13 @@ fn print_response(response: HwiResponse) -> ExitCode {
 }
 
 fn parse_device_type(value: &str) -> HwiResult<DeviceType> {
-    match value.to_ascii_lowercase().as_str() {
+    let family = value.split('_').next().unwrap_or(value);
+    match family.to_ascii_lowercase().as_str() {
         "bitbox02" => Ok(DeviceType::BitBox02),
         "coldcard" => Ok(DeviceType::Coldcard),
         "jade" => Ok(DeviceType::Jade),
         "ledger" => Ok(DeviceType::Ledger),
+        "trezor" => Ok(DeviceType::Trezor),
         _ => Err(HwiError::new(
             HwiErrorCode::UnknownDevice,
             "Unknown device type specified",
@@ -2924,17 +3121,35 @@ fn is_known_emulator_path(device_type: Option<DeviceType>, path: Option<&str>) -
                 Some(DeviceType::Ledger),
                 Some("127.0.0.1:9999" | "tcp:127.0.0.1:9999")
             )
+            | (
+                Some(DeviceType::Trezor),
+                Some("127.0.0.1:21324" | "udp:127.0.0.1:21324")
+            )
     )
 }
 
+fn read_stdin_password(args: &mut HwiCli) -> HwiResult<()> {
+    if args.stdinpass {
+        let password = match rpassword::prompt_password("Enter your device password: ") {
+            Ok(password) => password,
+            Err(_) => {
+                eprintln!("Warning: Password input may be echoed.");
+                eprint!("Enter your device password: ");
+                let mut line = String::new();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
+                line.trim_end_matches(['\r', '\n']).to_owned()
+            }
+        };
+        args.password = Some(password);
+    }
+    Ok(())
+}
+
 fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
-    let _accepted_python_hwi_globals = (
-        args.password,
-        args.debug,
-        args.stdin,
-        args.interactive,
-        args.stdinpass,
-    );
+    let _accepted_python_hwi_globals = (args.debug, args.stdin, args.interactive, args.stdinpass);
+    let passphrase = args.password.map(HostPassphrase::new);
     let expert = args.expert;
     let device_type = args
         .device_type
@@ -3012,13 +3227,10 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             label,
             backup_passphrase,
         },
-        HwiCliCommand::Promptpin => {
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::PromptPin)
-        }
-        HwiCliCommand::Sendpin { pin } => {
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::SendPin { pin })
-        }
+        HwiCliCommand::Promptpin => HwiCommand::PromptPin,
+        HwiCliCommand::Sendpin { pin } => HwiCommand::SendPin { pin },
         HwiCliCommand::Togglepassphrase => HwiCommand::TogglePassphrase,
+        #[cfg(target_os = "linux")]
         HwiCliCommand::Installudevrules { location } => HwiCommand::InstallUdevRules { location },
         HwiCliCommand::External(argv) => {
             let command = argv
@@ -3036,6 +3248,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             device_type,
             device_path: args.device_path,
             include_emulators,
+            passphrase,
         },
         command,
     })
@@ -3077,6 +3290,19 @@ mod tests {
         transaction::Version as TxVersion,
     };
     use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn device_type_accepts_model_qualified_names() {
+        for value in ["trezor", "trezor_1", "trezor_t", "trezor_1_simulator"] {
+            assert_eq!(parse_device_type(value).unwrap(), DeviceType::Trezor);
+        }
+        assert_eq!(parse_device_type("bitbox02").unwrap(), DeviceType::BitBox02);
+        assert_eq!(
+            parse_device_type("coldcard_simulator").unwrap(),
+            DeviceType::Coldcard
+        );
+        assert!(parse_device_type("notadevice").is_err());
+    }
 
     #[test]
     fn backup_filename_matches_python_hwi_local_time_format() {
@@ -3459,7 +3685,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_device_type_as_hwi_error() {
-        let error = parse_args(["hwi", "--device-type", "trezor", "enumerate"])
+        let error = parse_args(["hwi", "--device-type", "nonexistent", "enumerate"])
             .expect_err("unsupported device type");
 
         assert_eq!(error.code, HwiErrorCode::UnknownDevice.code());
@@ -3472,6 +3698,27 @@ mod tests {
             parse_args(["hwi", "--device-type", "bitbox02", "enumerate"]).expect("bitbox02 parses");
 
         assert_eq!(request.selector.device_type, Some(DeviceType::BitBox02));
+    }
+
+    #[test]
+    fn trezor_enumerate_model_follows_python_hwi() {
+        let model = |firmware, emulated| {
+            hwi_enumerate_model(DeviceType::Trezor, "trezor_t", emulated, firmware)
+        };
+        assert_eq!(model(Some("T"), false), "trezor_t");
+        assert_eq!(model(Some("1"), false), "trezor_1");
+        assert_eq!(model(Some("Safe 3"), false), "trezor_safe 3");
+        assert_eq!(model(Some("1"), true), "trezor_1_simulator");
+        assert_eq!(model(Some("T"), true), "trezor_t_simulator");
+        assert_eq!(model(None, false), "trezor_t");
+    }
+
+    #[test]
+    fn accepts_trezor_device_type() {
+        let request =
+            parse_args(["hwi", "--device-type", "trezor", "enumerate"]).expect("trezor parses");
+
+        assert_eq!(request.selector.device_type, Some(DeviceType::Trezor));
     }
 
     #[test]
@@ -3562,20 +3809,18 @@ mod tests {
 
     #[test]
     fn parses_pin_actions_and_toggle_passphrase() {
-        let promptpin = parse_args(["hwi", "--device-type", "ledger", "promptpin"])
-            .expect("unsupported promptpin request");
-        assert_eq!(
-            promptpin.command,
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::PromptPin)
-        );
+        // Device support is decided when the device is found, not while parsing.
+        let promptpin =
+            parse_args(["hwi", "--device-type", "ledger", "promptpin"]).expect("promptpin request");
+        assert_eq!(promptpin.command, HwiCommand::PromptPin);
 
-        let sendpin = parse_args(["hwi", "--device-type", "ledger", "sendpin", "1234"])
-            .expect("unsupported sendpin request");
+        let sendpin = parse_args(["hwi", "--device-type", "trezor", "sendpin", "1234"])
+            .expect("sendpin request");
         assert_eq!(
             sendpin.command,
-            HwiCommand::UnsupportedDeviceAction(HwiUnsupportedDeviceAction::SendPin {
+            HwiCommand::SendPin {
                 pin: "1234".to_owned()
-            })
+            }
         );
 
         let togglepassphrase = parse_args(["hwi", "--device-type", "ledger", "togglepassphrase"])
@@ -3583,6 +3828,7 @@ mod tests {
         assert_eq!(togglepassphrase.command, HwiCommand::TogglePassphrase);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parses_installudevrules_without_device_selection() {
         let request = parse_args(["hwi", "installudevrules", "--location", "/tmp/bhwi-rules.d"])
@@ -3707,7 +3953,7 @@ mod tests {
         );
         assert_eq!(exit_status(&outcome_of(&bad_path)), 0);
 
-        let bad_device = ["hwi", "--device-type", "trezor", "enumerate"];
+        let bad_device = ["hwi", "--device-type", "keepkey", "enumerate"];
         assert_eq!(
             runtime_error_of(&bad_device).code,
             HwiErrorCode::UnknownDevice.code()
@@ -3780,7 +4026,7 @@ mod tests {
                 device_type: "ledger".to_owned(),
                 model: "ledger_nano_s".to_owned(),
                 path: "tcp:localhost:9999".to_owned(),
-                label: label_for(DeviceType::Ledger),
+                label: label_for(DeviceType::Ledger, None),
                 fingerprint: None,
                 needs_pin_sent: false,
                 needs_passphrase_sent: false,
@@ -3795,7 +4041,7 @@ mod tests {
                 device_type: "coldcard".to_owned(),
                 model: "coldcard".to_owned(),
                 path: "/tmp/ckcc-simulator.sock".to_owned(),
-                label: label_for(DeviceType::Coldcard),
+                label: label_for(DeviceType::Coldcard, None),
                 fingerprint: None,
                 needs_pin_sent: false,
                 needs_passphrase_sent: false,
@@ -3813,7 +4059,7 @@ mod tests {
             device_type: "jade".to_owned(),
             model: "jade".to_owned(),
             path: "localhost:30121".to_owned(),
-            label: label_for(DeviceType::Jade),
+            label: label_for(DeviceType::Jade, None),
             fingerprint: None,
             needs_pin_sent: false,
             needs_passphrase_sent: false,
@@ -3830,9 +4076,9 @@ mod tests {
     fn bitbox_emulator_enumerate_shape_matches_python_hwi() {
         let json = serde_json::to_value(HwiEnumeratedDevice {
             device_type: "bitbox02".to_owned(),
-            model: hwi_enumerate_model(DeviceType::BitBox02, "bitbox02_simulator", true),
+            model: hwi_enumerate_model(DeviceType::BitBox02, "bitbox02_simulator", true, None),
             path: hwi_enumerate_path(DeviceType::BitBox02, "tcp:127.0.0.1:15423", true),
-            label: label_for(DeviceType::BitBox02),
+            label: label_for(DeviceType::BitBox02, None),
             fingerprint: None,
             needs_pin_sent: false,
             needs_passphrase_sent: false,

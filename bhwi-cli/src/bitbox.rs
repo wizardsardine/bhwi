@@ -17,6 +17,8 @@ use bhwi_async::{
 };
 use futures::StreamExt;
 use futures::TryStreamExt;
+
+pub const HOST_PASSPHRASE_REJECTED: &str = "The BitBox02 does not accept a passphrase from the host. Please enable the passphrase option and enter the passphrase on the device during unlock.";
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,

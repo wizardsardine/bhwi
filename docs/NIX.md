@@ -41,6 +41,7 @@ on-demand workflow.
 - `cargo test -p bhwi-e2e-coldcard -- --test-threads=1`
 - `cargo test -p bhwi-e2e-ledger -- --test-threads=1`
 - `cargo test -p bhwi-e2e-jade -- --test-threads=1`
+- `cargo test -p bhwi-e2e-trezor -- --test-threads=1`, once per model
 
 CI uses:
 
@@ -68,6 +69,9 @@ Apps:
 - `nix run .#jade-pinserver`
 - `nix run .#jade`
 - `nix run .#jade-init`
+- `nix run .#trezor-one`
+- `nix run .#trezor-t`
+- `nix run .#trezor-init`
 
 Development shells:
 
@@ -75,6 +79,7 @@ Development shells:
 - `nix develop .#coldcard`
 - `nix develop .#ledger`
 - `nix develop .#jade`
+- `nix develop .#trezor`
 
 Packages/checks:
 
@@ -139,12 +144,28 @@ nix run .#jade-init
 nix develop .#jade -c cargo test -p bhwi-e2e-jade -- --test-threads=1
 ```
 
+Trezor. The Trezor One runs the `legacy` firmware and the Model T the `core`
+firmware, so each model has its own emulator app. Both listen on UDP 21324, so
+run only one at a time.
+
+```sh
+# Terminal 1
+nix run .#trezor-one   # or nix run .#trezor-t
+
+# Terminal 2, after the emulator answers
+nix run .#trezor-init
+
+# Terminal 2
+nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1
+```
+
 Useful readiness checks:
 
 ```sh
 test -S /tmp/ckcc-simulator.sock
 nc -z localhost 9999 && nc -z localhost 5000
 nc -z localhost 8096 && nc -z localhost 30121
+bash nix/scripts/wait-for-trezor.sh 127.0.0.1 21324 60
 ```
 
 ## Upstream HWI Suite
@@ -222,6 +243,23 @@ Jade:
 - Starts QEMU TCP serial on `localhost:30121` and web display on
   `localhost:30122`.
 - `jade-init` sets the e2e mnemonic and configures the local pinserver.
+
+Trezor:
+
+- Uses pinned `trezor/trezor-firmware`, the same revision the vendored protobuf
+  bindings in `bhwi/src/trezor/proto.rs` are generated from.
+- The Trezor One runs the `legacy` firmware and the Model T the `core` firmware.
+  These are separate firmware codebases, so `trezor-one` and `trezor-t` are
+  separate emulators rather than one binary with a model switch.
+- On Linux, downloads the pinned prebuilt emulator binaries published by
+  upstream (autopatched to run on NixOS). On macOS, no prebuilt is published, so
+  both are built from source in `$XDG_CACHE_HOME/bhwi/trezor` through
+  trezor-firmware's own `shell.nix`, which is the macOS path upstream documents.
+- The `legacy` emulator is built with `DEBUG_LINK=1` so `trezor-init` can load a
+  seed over the debug link.
+- Both listen on UDP `127.0.0.1:21324` with the debug link on `21325`, so only
+  one model can run at a time.
+- `trezor-init` loads the e2e mnemonic. `TREZOR_MNEMONIC` overrides it.
 
 ## Notes
 

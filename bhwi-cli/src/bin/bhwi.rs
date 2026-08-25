@@ -1,12 +1,17 @@
 use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
+use bhwi::trezor::HostPassphrase;
 use bhwi_async::{DeviceBackup, DeviceContext, RestoreOptions, SetupOptions, WalletRegistration};
 use bhwi_cli::{
     DeviceManager, DeviceType, OutputFormat,
     address::AddressTarget,
     config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
-    management::{bitbox_restore_context, bitbox_setup_context},
+    hwi::PIN_MATRIX_DESCRIPTION,
+    management::{
+        bitbox_restore_context, bitbox_setup_context, trezor_pin_context, trezor_restore_context,
+        trezor_setup_context,
+    },
     udev::{UdevRuleSelection, install_udev_rules},
 };
 
@@ -43,6 +48,9 @@ struct Args {
     /// output formatting
     #[arg(long, short)]
     format: Option<OutputFormat>,
+    /// passphrase for devices that take one from the host
+    #[arg(long, short)]
+    passphrase: Option<String>,
 }
 
 impl Args {
@@ -53,6 +61,7 @@ impl Args {
             device_type: self.device_type,
             device_path: self.device_path.clone(),
             include_emulators: true,
+            passphrase: self.passphrase.clone().map(HostPassphrase::new),
         }
     }
 }
@@ -158,22 +167,32 @@ enum DeviceCommands {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
-    /// Initialize an unseeded BitBox02
+    /// Initialize an unseeded device
     Setup {
         /// User-visible device name
         #[arg(long, short, default_value = "")]
         label: String,
     },
-    /// Erase wallet material from the selected BitBox02
+    /// Erase wallet material from the selected device
     Wipe,
-    /// Restore an unseeded BitBox02 using its on-device mnemonic flow
+    /// Restore an unseeded device using its on-device mnemonic flow
     Restore {
         /// User-visible device name
         #[arg(long, short, default_value = "")]
         label: String,
+        /// Number of words in the recovery phrase
+        #[arg(long, short, default_value_t = 24)]
+        word_count: i32,
     },
-    /// Toggle mnemonic-passphrase use on the selected BitBox02
+    /// Toggle mnemonic-passphrase use on the selected device
     TogglePassphrase,
+    /// Ask the selected device to show its PIN keypad
+    PromptPin,
+    /// Send the keypad positions shown on the device screen
+    SendPin {
+        /// Positions on the device's scrambled keypad, not the PIN digits themselves
+        positions: String,
+    },
     /// Install udev rules for hardware wallet device access
     InstallUdevRules {
         /// Device rule targets to install
@@ -376,10 +395,11 @@ async fn main() -> Result<()> {
         }
         Commands::Device(DeviceCommands::Setup { label }) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
-                if device.device_type() != DeviceType::BitBox02 {
-                    anyhow::bail!("device setup is currently supported only for BitBox02");
-                }
-                let context = bitbox_setup_context(device.is_emulated())?;
+                let context = match device.device_type() {
+                    DeviceType::BitBox02 => bitbox_setup_context(device.is_emulated())?,
+                    DeviceType::Trezor => trezor_setup_context(),
+                    other => anyhow::bail!("device setup is not supported for {other}"),
+                };
                 let success = device
                     .device()
                     .setup_device(
@@ -391,7 +411,7 @@ async fn main() -> Result<()> {
                     )
                     .await?;
                 if !success {
-                    anyhow::bail!("BitBox02 setup was not completed");
+                    anyhow::bail!("device setup was not completed");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
@@ -400,35 +420,35 @@ async fn main() -> Result<()> {
         }
         Commands::Device(DeviceCommands::Wipe) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
-                if device.device_type() != DeviceType::BitBox02 {
-                    anyhow::bail!("device wipe is currently supported only for BitBox02");
+                if !matches!(
+                    device.device_type(),
+                    DeviceType::BitBox02 | DeviceType::Trezor
+                ) {
+                    anyhow::bail!("device wipe is not supported for {}", device.device_type());
                 }
                 if !device.device().wipe_device().await? {
-                    anyhow::bail!("BitBox02 wipe was not completed");
+                    anyhow::bail!("device wipe was not completed");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
                 }
             }
         }
-        Commands::Device(DeviceCommands::Restore { label }) => {
+        Commands::Device(DeviceCommands::Restore { label, word_count }) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
-                if device.device_type() != DeviceType::BitBox02 {
-                    anyhow::bail!("device restore is currently supported only for BitBox02");
-                }
-                let context = bitbox_restore_context()?;
+                let context = match device.device_type() {
+                    DeviceType::BitBox02 => bitbox_restore_context()?,
+                    DeviceType::Trezor => trezor_restore_context()?,
+                    device_type => {
+                        anyhow::bail!("device restore is not supported for {device_type}")
+                    }
+                };
                 if !device
                     .device()
-                    .restore_device(
-                        RestoreOptions {
-                            label,
-                            word_count: 24,
-                        },
-                        Some(context),
-                    )
+                    .restore_device(RestoreOptions { label, word_count }, Some(context))
                     .await?
                 {
-                    anyhow::bail!("BitBox02 restore was not completed");
+                    anyhow::bail!("device restore was not completed");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
@@ -437,13 +457,52 @@ async fn main() -> Result<()> {
         }
         Commands::Device(DeviceCommands::TogglePassphrase) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
-                if device.device_type() != DeviceType::BitBox02 {
+                if !matches!(
+                    device.device_type(),
+                    DeviceType::BitBox02 | DeviceType::Trezor
+                ) {
                     anyhow::bail!(
-                        "device toggle-passphrase is currently supported only for BitBox02"
+                        "device toggle-passphrase is not supported for {}",
+                        device.device_type()
                     );
                 }
                 if !device.device().toggle_passphrase().await? {
-                    anyhow::bail!("BitBox02 passphrase setting was not changed");
+                    anyhow::bail!("passphrase setting was not changed");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::PromptPin) => {
+            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                if device.device_type() != DeviceType::Trezor {
+                    anyhow::bail!(
+                        "device prompt-pin is not supported for {}",
+                        device.device_type()
+                    );
+                }
+                eprintln!("{PIN_MATRIX_DESCRIPTION}");
+                if !device.device().prompt_pin().await? {
+                    anyhow::bail!("device did not ask for a PIN");
+                }
+                if let Some(OutputFormat::Json) = format {
+                    println!("{}", serde_json::json!({ "success": true }));
+                }
+            }
+        }
+        Commands::Device(DeviceCommands::SendPin { positions }) => {
+            // Nothing may be sent to a device waiting for a PIN, so this lookup stays quiet.
+            if let Some(mut device) = dev_man.get_device_without_contacting().await? {
+                if device.device_type() != DeviceType::Trezor {
+                    anyhow::bail!(
+                        "device send-pin is not supported for {}",
+                        device.device_type()
+                    );
+                }
+                let context = trezor_pin_context(positions)?;
+                if !device.device().send_pin(Some(context)).await? {
+                    anyhow::bail!("device rejected the PIN");
                 }
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
@@ -465,6 +524,7 @@ async fn main() -> Result<()> {
             let selection = if all {
                 UdevRuleSelection::Devices(vec![
                     bhwi_cli::DeviceType::Coldcard,
+                    bhwi_cli::DeviceType::Trezor,
                     bhwi_cli::DeviceType::Jade,
                     bhwi_cli::DeviceType::Ledger,
                 ])
@@ -685,7 +745,18 @@ mod tests {
             .expect("parse device restore");
         assert!(matches!(
             args.command,
-            Commands::Device(DeviceCommands::Restore { label }) if label == "Recovered"
+            Commands::Device(DeviceCommands::Restore { label, word_count })
+                if label == "Recovered" && word_count == 24
+        ));
+    }
+
+    #[test]
+    fn parses_device_restore_word_count() {
+        let args = Args::try_parse_from(["bhwi", "device", "restore", "--word-count", "12"])
+            .expect("parse device restore word count");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::Restore { word_count, .. }) if word_count == 12
         ));
     }
 
@@ -697,6 +768,31 @@ mod tests {
             args.command,
             Commands::Device(DeviceCommands::TogglePassphrase)
         ));
+    }
+
+    #[test]
+    fn parses_device_prompt_pin() {
+        let args = Args::try_parse_from(["bhwi", "device", "prompt-pin"])
+            .expect("parse device prompt-pin");
+        assert!(matches!(
+            args.command,
+            Commands::Device(DeviceCommands::PromptPin)
+        ));
+    }
+
+    #[test]
+    fn parses_device_send_pin_positions() {
+        let args = Args::try_parse_from(["bhwi", "device", "send-pin", "7913"])
+            .expect("parse device send-pin");
+        let Commands::Device(DeviceCommands::SendPin { positions }) = args.command else {
+            panic!("expected device send-pin");
+        };
+        assert_eq!(positions, "7913");
+    }
+
+    #[test]
+    fn device_send_pin_requires_positions() {
+        assert!(Args::try_parse_from(["bhwi", "device", "send-pin"]).is_err());
     }
 
     #[test]
@@ -787,6 +883,22 @@ mod tests {
 
         assert_eq!(args.device_type, Some(DeviceType::BitBox02));
         assert_eq!(args.device_path.as_deref(), Some("tcp:127.0.0.1:15423"));
+    }
+
+    #[test]
+    fn native_cli_passes_password_through_to_the_selector() {
+        let args = Args::try_parse_from(["bhwi", "-p", "secret", "device", "list"])
+            .expect("password parses");
+        assert_eq!(
+            args.device_selector()
+                .passphrase
+                .as_ref()
+                .map(|p| p.as_str()),
+            Some("secret")
+        );
+
+        let without = Args::try_parse_from(["bhwi", "device", "list"]).expect("no password parses");
+        assert!(without.device_selector().passphrase.is_none());
     }
 
     #[test]

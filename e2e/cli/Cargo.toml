@@ -9,6 +9,7 @@ license-file.workspace = true
 anyhow.workspace = true
 bhwi-async.workspace = true
 bhwi-cli = { path = "../../bhwi-cli" }
+bhwi-e2e-trezor = { path = "../trezor" }
 bitcoin = { workspace = true, features = ["base64"] }
 hex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }

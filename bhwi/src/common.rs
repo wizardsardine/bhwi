@@ -1,6 +1,8 @@
 #[cfg(feature = "bitbox")]
 use crate::bitbox;
 use crate::miniscript::descriptor::{DescriptorPublicKey, WalletPolicy};
+#[cfg(feature = "trezor")]
+use crate::trezor;
 use crate::{coldcard, jade, ledger};
 use bitcoin::Network;
 use bitcoin::address::AddressType;
@@ -107,6 +109,8 @@ pub enum Command {
     Unlock {
         options: UnlockOptions,
     },
+    PromptPin,
+    SendPin(Option<DeviceContext>),
 }
 
 /// Device-specific context data required by certain commands.
@@ -125,6 +129,9 @@ pub enum DeviceContext {
     /// Required context for BitBox02 setup and restore operations.
     #[cfg(feature = "bitbox")]
     BitBoxManagement(bitbox::ManagementContext),
+    /// Required context for Trezor setup.
+    #[cfg(feature = "trezor")]
+    TrezorManagement(trezor::ManagementContext),
 }
 
 pub enum Response {
@@ -171,6 +178,12 @@ pub struct Info {
     pub firmware: Option<String>,
     /// Whether the device has initialized wallet material, when reported by the firmware.
     pub initialized: Option<bool>,
+    /// User-set device name, when the device protocol reports one.
+    pub label: Option<String>,
+    /// Whether the device can take a passphrase on its own screen, when it reports the capability.
+    pub on_device_passphrase_entry: Option<bool>,
+    /// Whether the device is waiting for a PIN from the host, when it reports a lock state.
+    pub needs_pin_sent: Option<bool>,
 }
 
 pub enum Recipient {
@@ -218,6 +231,9 @@ pub enum Error {
 
     #[error("unsupported display address: {0}")]
     UnsupportedDisplayAddress(String),
+
+    #[error("{0}")]
+    DeviceAlreadyUnlocked(&'static str),
 }
 
 impl Error {
@@ -232,6 +248,8 @@ pub type ColdcardInterpreter<'a> =
     coldcard::ColdcardInterpreter<'a, Command, Transmit, Response, Error>;
 pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Error>;
 pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
+#[cfg(feature = "trezor")]
+pub type TrezorInterpreter = trezor::TrezorInterpreter<Command, Transmit, Response, Error>;
 
 impl From<Vec<u8>> for Transmit {
     fn from(payload: Vec<u8>) -> Transmit {

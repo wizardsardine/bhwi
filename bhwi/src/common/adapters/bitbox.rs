@@ -56,6 +56,9 @@ impl TryFrom<Command> for BitBoxCommand {
                 })
             }
             Command::TogglePassphrase => Ok(Self::TogglePassphrase),
+            Command::PromptPin | Command::SendPin(_) => Err(BitBoxError::InvalidInput(
+                "PIN entry from the host not needed by BitBox02",
+            )),
             Command::Unlock { .. } => Ok(Self::UnlockAndPair),
             Command::GetVersion => Ok(Self::GetVersion),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
@@ -175,6 +178,9 @@ impl From<BitBoxResponse> for Response {
                 networks: vec![],
                 firmware: Some(info.name),
                 initialized: Some(info.initialized),
+                label: None,
+                on_device_passphrase_entry: None,
+                needs_pin_sent: None,
             }),
             BitBoxResponse::MasterFingerprint(fingerprint) => Self::MasterFingerprint(fingerprint),
             BitBoxResponse::Xpub(xpub) => Self::Xpub(xpub),

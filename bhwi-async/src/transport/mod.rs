@@ -3,6 +3,8 @@ pub mod bitbox;
 pub mod coldcard;
 pub mod jade;
 pub mod ledger;
+#[cfg(feature = "trezor")]
+pub mod trezor;
 
 use async_trait::async_trait;
 

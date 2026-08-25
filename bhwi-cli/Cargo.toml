@@ -20,7 +20,7 @@ path = "src/bin/hwi.rs"
 anyhow.workspace = true
 async-trait.workspace = true
 bitcoin = { workspace = true, features = ["base64", "serde"] }
-bhwi-async = { workspace = true, features = ["bitbox", "emulators"] }
+bhwi-async = { workspace = true, features = ["bitbox", "emulators", "trezor"] }
 bhwi.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures.workspace = true
@@ -33,6 +33,8 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync", "time"] }
 
 async-hid = "0.5.0"
+nusb = { version = "0.2", features = ["tokio"] }
 clap = { version = "4.4.7", features = ["derive"] }
+rpassword = "=7.5.4"
 strum = { version = "0.28", features = ["derive"] }
 tokio-serial = "5.4.5"

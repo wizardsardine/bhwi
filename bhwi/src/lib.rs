@@ -9,6 +9,8 @@ pub mod device;
 pub mod jade;
 pub mod ledger;
 pub mod policy;
+#[cfg(feature = "trezor")]
+pub mod trezor;
 
 pub trait Interpreter {
     type Command;

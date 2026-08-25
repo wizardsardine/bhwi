@@ -9,7 +9,7 @@ use strum::{EnumIter, IntoEnumIterator};
 
 use crate::{
     bitbox::BitBoxDevice, coldcard::ColdcardDevice, config::DeviceSelector, jade::JadeDevice,
-    ledger::LedgerDevice,
+    ledger::LedgerDevice, trezor::TrezorDevice,
 };
 
 pub mod address;
@@ -22,7 +22,9 @@ pub mod hwi;
 pub mod jade;
 pub mod ledger;
 pub mod management;
+pub mod trezor;
 pub mod udev;
+pub mod webusb;
 
 #[derive(Serialize)]
 pub struct Device {
@@ -47,6 +49,12 @@ pub struct Info {
     pub firmware: Option<String>,
     #[serde(skip)]
     pub initialized: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip)]
+    pub on_device_passphrase_entry: Option<bool>,
+    #[serde(skip)]
+    pub needs_pin_sent: Option<bool>,
 }
 
 impl Info {
@@ -66,6 +74,9 @@ impl From<bhwi_async::Info> for Info {
             networks: info.networks,
             firmware: info.firmware,
             initialized: info.initialized,
+            label: info.label,
+            on_device_passphrase_entry: info.on_device_passphrase_entry,
+            needs_pin_sent: info.needs_pin_sent,
         }
     }
 }
@@ -145,6 +156,7 @@ pub enum DeviceType {
     Coldcard,
     Jade,
     Ledger,
+    Trezor,
 }
 
 impl DeviceType {
@@ -154,6 +166,7 @@ impl DeviceType {
             DeviceType::Ledger => LedgerDevice::enumerate(selector).await?,
             DeviceType::Coldcard => ColdcardDevice::enumerate(selector).await?,
             DeviceType::Jade => JadeDevice::enumerate(selector).await?,
+            DeviceType::Trezor => TrezorDevice::enumerate(selector).await?,
         })
     }
 }
@@ -184,6 +197,9 @@ impl DeviceManager {
         let Some(mut dev) = target_dev else {
             return Ok(None);
         };
+        if self.selector.passphrase.is_some() && dev.device_type == DeviceType::BitBox02 {
+            anyhow::bail!(crate::bitbox::HOST_PASSPHRASE_REJECTED);
+        }
         let info = dev.info().await?;
         let networks = &info.networks;
         let net = self.selector.network;
@@ -195,6 +211,12 @@ impl DeviceManager {
             );
         }
         Ok(Some(dev))
+    }
+
+    /// Selects a device without sending it anything: an `Initialize` would clear the
+    /// keypad a device is waiting on.
+    pub async fn get_device_without_contacting(&self) -> Result<Option<Device>> {
+        Ok(self.enumerate().await?.into_iter().next())
     }
 
     pub async fn enumerate(&self) -> Result<Vec<Device>> {
