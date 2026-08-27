@@ -56,7 +56,7 @@
         pkgs = import nixpkgs {
           inherit system overlays;
           config.permittedInsecurePackages = [
-            "python3.12-ecdsa-0.19.1"
+            "python3.12-ecdsa-0.19.2"
           ];
         };
         coldcardPkgs = import nixpkgs-coldcard {inherit system;};
@@ -808,6 +808,9 @@
 
               cargoLock = {
                 lockFile = ./Cargo.lock;
+                outputHashes = {
+                  "miniscript-13.0.0" = "sha256-sCxv3/haaN6AJn1ot4gqnAoJJypKAv5nUh/rSDTS3YI=";
+                };
               };
 
               nativeBuildInputs = inputs;
