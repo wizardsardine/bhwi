@@ -163,13 +163,13 @@
         };
         mkWebsite = pkgs.callPackage ({
           buildNpmPackage,
-          nodejs_20,
+          nodejs_22,
           base ? "/",
         }:
           buildNpmPackage {
             name = "bhwi-website";
             src = ./website;
-            nodejs = nodejs_20;
+            nodejs = nodejs_22;
             npmDepsHash = "sha256-B+hl2uXdXBV9N99+RDSRzwO4xvpr8l+l2RU7MO2OyWA=";
             postPatch = ''
               cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} pkg
@@ -192,8 +192,8 @@
           pkgs.wasm-bindgen-cli
           pkgs.binaryen
           pkgs.clang
-          pkgs.corepack_20
-          pkgs.nodejs_20
+          pkgs.corepack_22
+          pkgs.nodejs_22
         ];
         emulatorInputs =
           [
@@ -845,7 +845,7 @@
             website = {
               type = "app";
               program = toString (pkgs.writeShellScript "run-website" ''
-                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.corepack_20]}:$PATH"
+                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_22 pkgs.corepack_22]}:$PATH"
                 rm -rf website/pkg
                 cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} website/pkg
                 cd website && npm install && npm run dev
@@ -862,7 +862,7 @@
               type = "app";
               program = toString (pkgs.writeShellScript "publish-wasm" ''
                 set -euo pipefail
-                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.jq]}:$PATH"
+                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_22 pkgs.jq]}:$PATH"
 
                 names=("$@")
                 if [ ''${#names[@]} -eq 0 ]; then

@@ -20,11 +20,11 @@
     "coldcard-firmware": {
       "flake": false,
       "locked": {
-        "lastModified": 1777127775,
-        "narHash": "sha256-Zw1jd4/LN55/o4462wtEJMUEOH4OjD3CVGPOZFpmO1c=",
+        "lastModified": 1787667409,
+        "narHash": "sha256-fUjD29dP5VZfk3xxlNmkUHx3x25hknbfbvQYlweK3hc=",
         "owner": "Coldcard",
         "repo": "firmware",
-        "rev": "ca06dfd2509eacfad333be9d35ed274559915d0e",
+        "rev": "fda3f15c15e5c6b72c87c0984ede5c4b1a619c3e",
         "type": "github"
       },
       "original": {
@@ -105,12 +105,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1773282481,
-        "narHash": "sha256-b/GV2ysM8mKHhinse2wz+uP37epUrSE+sAKXy/xvBY4=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "fe416aaedd397cacb33a610b33d60ff2b431b127",
-        "type": "github"
+        "lastModified": 1787498568,
+        "narHash": "sha256-FoOSoBG7tEvOlGRTpWnVdY506Ner4y7r7UYO3OGgmE8=",
+        "rev": "56c02bc00adcf003215cc4bd996d6efaf4cff188",
+        "type": "tarball",
+        "url": "https://releases.nixos.org/nixos/unstable/nixos-26.11pre1060451.56c02bc00adc/nixexprs.tar.xz"
       },
       "original": {
         "id": "nixpkgs",
@@ -208,11 +207,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1773371126,
-        "narHash": "sha256-SGnZQO8hnynR90Lo/1MVrTScsOPx9i26XjqSqoFOZ4E=",
+        "lastModified": 1787713867,
+        "narHash": "sha256-ZRYTEvDb8QZLCHRoMyIZle9V3Bvw905m0teeo1RvI7M=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "475826b105eb52f39bd3281f60c052299e64d085",
+        "rev": "494680f9ffa2b4bf9f2df0f442c7096e44adfa00",
         "type": "github"
       },
       "original": {
