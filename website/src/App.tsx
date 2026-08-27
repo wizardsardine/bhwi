@@ -54,6 +54,12 @@ interface AddressResult {
     address: string;
 }
 
+interface SignMessageResult {
+    message: string;
+    derivationPath: string;
+    signature: string;
+}
+
 const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
 
 const App = () => {
@@ -79,6 +85,16 @@ const App = () => {
     const [walletPolicy, setWalletPolicy] = useState('');
     const [registerWalletResults, setRegisterWalletResults] = useState<RegisterWalletResult[]>([]);
     const [registeringWallet, setRegisteringWallet] = useState(false);
+    const [psbtInput, setPsbtInput] = useState('');
+    const [psbtPolicyName, setPsbtPolicyName] = useState('');
+    const [psbtDescriptor, setPsbtDescriptor] = useState('');
+    const [psbtHmac, setPsbtHmac] = useState('');
+    const [psbtResults, setPsbtResults] = useState<string[]>([]);
+    const [signingPsbt, setSigningPsbt] = useState(false);
+    const [signMsgText, setSignMsgText] = useState('');
+    const [signMsgPath, setSignMsgPath] = useState("m/84'/0'/0'/0/0");
+    const [signMsgResults, setSignMsgResults] = useState<SignMessageResult[]>([]);
+    const [signingMessage, setSigningMessage] = useState(false);
     const [processing, setProcessing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [pairingCode, setPairingCode] = useState<string | null>(null);
@@ -156,6 +172,7 @@ const App = () => {
             const ct = detectedNetwork === 'testnet' ? 1 : 0;
             setDerivationPath(`m/48'/${ct}'/0'/2'`);
             setAddressPath(`m/84'/${ct}'/0'/0/0`);
+            setSignMsgPath(`m/84'/${ct}'/0'/0/0`);
             setDevice({ client, type, masterFingerprint, network: detectedNetwork });
         } catch (err) {
             const message = err instanceof Error ? err.message : typeof err === 'string' ? err : `Failed to connect to ${type}`;
@@ -266,6 +283,49 @@ const App = () => {
             console.error("Error registering wallet:", err);
         } finally {
             setRegisteringWallet(false);
+            setProcessing(false);
+        }
+    };
+
+    const signPsbt = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!device || processing) return;
+
+        setSigningPsbt(true);
+        setProcessing(true);
+        try {
+            const signed = await device.client.sign_psbt(
+                psbtInput.trim(),
+                psbtPolicyName.trim() || undefined,
+                psbtDescriptor.trim() || undefined,
+                psbtHmac.trim() || undefined,
+            );
+            setPsbtResults(prev => [signed, ...prev]);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to sign PSBT";
+            showError(message);
+            console.error("Error signing PSBT:", err);
+        } finally {
+            setSigningPsbt(false);
+            setProcessing(false);
+        }
+    };
+
+    const signMessage = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!device || processing) return;
+
+        setSigningMessage(true);
+        setProcessing(true);
+        try {
+            const signature = await device.client.sign_message(signMsgText, signMsgPath);
+            setSignMsgResults(prev => [{ message: signMsgText, derivationPath: signMsgPath, signature }, ...prev]);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to sign message";
+            showError(message);
+            console.error("Error signing message:", err);
+        } finally {
+            setSigningMessage(false);
             setProcessing(false);
         }
     };
@@ -622,6 +682,142 @@ const App = () => {
                                                         <span className="font-mono text-sm break-all">{result.hmac}</span>
                                                     </div>
                                                 )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </details>
+
+                        <details className="bg-gray-800 rounded-lg shadow-lg group">
+                            <summary className="p-6 cursor-pointer list-none flex justify-between items-center">
+                                <h2 className="text-lg font-semibold text-gray-400">Sign PSBT</h2>
+                                <span className="text-gray-400 group-open:rotate-180 transition-transform">▼</span>
+                            </summary>
+                            <div className="px-6 pb-6">
+                                <form onSubmit={signPsbt}>
+                                    <label htmlFor="psbt-input" className="block text-sm text-gray-400 mb-2">
+                                        PSBT (base64)
+                                    </label>
+                                    <textarea
+                                        id="psbt-input"
+                                        value={psbtInput}
+                                        onChange={(e) => setPsbtInput(e.target.value)}
+                                        placeholder="cHNidP8B..."
+                                        rows={4}
+                                        className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                    />
+                                    {device.type === 'Ledger' && (
+                                        <>
+                                            <label htmlFor="psbt-policy-name" className="block text-sm text-gray-400 mb-2">
+                                                Policy Name (registered wallets only)
+                                            </label>
+                                            <input
+                                                id="psbt-policy-name"
+                                                type="text"
+                                                value={psbtPolicyName}
+                                                onChange={(e) => setPsbtPolicyName(e.target.value)}
+                                                placeholder="Optional — name used at registration"
+                                                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                            />
+                                            <label htmlFor="psbt-hmac" className="block text-sm text-gray-400 mb-2">
+                                                Wallet HMAC (hex)
+                                            </label>
+                                            <input
+                                                id="psbt-hmac"
+                                                type="text"
+                                                value={psbtHmac}
+                                                onChange={(e) => setPsbtHmac(e.target.value)}
+                                                placeholder="Optional — 64 hex characters"
+                                                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                            />
+                                        </>
+                                    )}
+                                    {(device.type === 'Ledger' || device.type === 'BitBox02') && (
+                                        <>
+                                            <label htmlFor="psbt-descriptor" className="block text-sm text-gray-400 mb-2">
+                                                Wallet Descriptor {device.type === 'BitBox02' ? '(for multisig/policy signing)' : '(registered wallets only)'}
+                                            </label>
+                                            <textarea
+                                                id="psbt-descriptor"
+                                                value={psbtDescriptor}
+                                                onChange={(e) => setPsbtDescriptor(e.target.value)}
+                                                placeholder="Optional — e.g. wsh(sortedmulti(2,@0/**,@1/**))"
+                                                rows={2}
+                                                className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                            />
+                                        </>
+                                    )}
+                                    <button
+                                        type="submit"
+                                        disabled={processing}
+                                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-lg font-medium transition-colors"
+                                    >
+                                        {signingPsbt ? 'Signing...' : 'Sign'}
+                                    </button>
+                                </form>
+
+                                {psbtResults.length > 0 && (
+                                    <div className="mt-6 pt-6 border-t border-gray-700 space-y-4">
+                                        {psbtResults.map((result, index) => (
+                                            <div key={index} className="bg-gray-700/50 rounded-lg p-4">
+                                                <div className="text-sm text-gray-400 mb-1">Signed PSBT</div>
+                                                <div className="font-mono text-sm break-all">{result}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </details>
+
+                        <details className="bg-gray-800 rounded-lg shadow-lg group">
+                            <summary className="p-6 cursor-pointer list-none flex justify-between items-center">
+                                <h2 className="text-lg font-semibold text-gray-400">Sign Message</h2>
+                                <span className="text-gray-400 group-open:rotate-180 transition-transform">▼</span>
+                            </summary>
+                            <div className="px-6 pb-6">
+                                <form onSubmit={signMessage}>
+                                    <label htmlFor="sign-message-text" className="block text-sm text-gray-400 mb-2">
+                                        Message
+                                    </label>
+                                    <input
+                                        id="sign-message-text"
+                                        type="text"
+                                        value={signMsgText}
+                                        onChange={(e) => setSignMsgText(e.target.value)}
+                                        placeholder="Hello world"
+                                        className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                    />
+                                    <label htmlFor="sign-message-path" className="block text-sm text-gray-400 mb-2">
+                                        Derivation Path
+                                    </label>
+                                    <input
+                                        id="sign-message-path"
+                                        type="text"
+                                        value={signMsgPath}
+                                        onChange={(e) => setSignMsgPath(e.target.value)}
+                                        placeholder="m/84'/0'/0'/0/0"
+                                        className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-1"
+                                    />
+                                    {getPathNetworkWarning(signMsgPath) && (
+                                        <p className="text-amber-400 text-xs mb-3">{getPathNetworkWarning(signMsgPath)}</p>
+                                    )}
+                                    {!getPathNetworkWarning(signMsgPath) && <div className="mb-3" />}
+                                    <button
+                                        type="submit"
+                                        disabled={processing}
+                                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-lg font-medium transition-colors"
+                                    >
+                                        {signingMessage ? 'Signing...' : 'Sign'}
+                                    </button>
+                                </form>
+
+                                {signMsgResults.length > 0 && (
+                                    <div className="mt-6 pt-6 border-t border-gray-700 space-y-4">
+                                        {signMsgResults.map((result, index) => (
+                                            <div key={index} className="bg-gray-700/50 rounded-lg p-4">
+                                                <div className="text-sm text-gray-400 mb-1">{result.message} — {result.derivationPath}</div>
+                                                <div className="font-mono text-sm break-all">{result.signature}</div>
                                             </div>
                                         ))}
                                     </div>

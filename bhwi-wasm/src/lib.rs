@@ -15,7 +15,13 @@ use bhwi_async::{
     bitbox::BitBox, coldcard::Coldcard, transport::bitbox::hid::BitBoxTransportHID,
     transport::coldcard::hid::ColdcardTransportHID, transport::ledger::hid::LedgerTransportHID,
 };
-use bitcoin::{Network, address::AddressType, bip32::DerivationPath};
+use bitcoin::{
+    Network,
+    address::AddressType,
+    base64::prelude::{BASE64_STANDARD, Engine as _},
+    bip32::DerivationPath,
+    psbt::Psbt,
+};
 use log::Level;
 use pinserver::PinServer;
 use wasm_bindgen::prelude::*;
@@ -61,6 +67,12 @@ pub trait HWI {
         name: &str,
         policy: &str,
     ) -> Result<WalletRegistration, JsValue>;
+    async fn sign_tx(
+        &mut self,
+        psbt: Psbt,
+        context: Option<DeviceContext>,
+    ) -> Result<Psbt, JsValue>;
+    async fn sign_message(&mut self, message: &str, path: &str) -> Result<String, JsValue>;
     async fn get_info(&mut self) -> Result<JsValue, JsValue>;
 }
 
@@ -107,6 +119,28 @@ impl<T: AsyncHWI> HWI for T {
         AsyncHWI::register_wallet(self, name, policy)
             .await
             .map_err(|e| JsValue::from_str(&format!("Failed to register wallet: {:?}", e)))
+    }
+
+    async fn sign_tx(
+        &mut self,
+        psbt: Psbt,
+        context: Option<DeviceContext>,
+    ) -> Result<Psbt, JsValue> {
+        AsyncHWI::sign_tx(self, psbt, context)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to sign psbt: {:?}", e)))
+    }
+
+    async fn sign_message(&mut self, message: &str, path: &str) -> Result<String, JsValue> {
+        let path = DerivationPath::from_str(path)
+            .map_err(|e| JsValue::from_str(&format!("Invalid derivation path: {:?}", e)))?;
+        let (header, signature) = AsyncHWI::sign_message(self, message.as_bytes(), path)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to sign message: {:?}", e)))?;
+        let mut payload = [0u8; 65];
+        payload[0] = header;
+        payload[1..].copy_from_slice(&signature.serialize_compact());
+        Ok(BASE64_STANDARD.encode(payload))
     }
 
     async fn get_info(&mut self) -> Result<JsValue, JsValue> {
@@ -380,6 +414,83 @@ impl Client {
         };
         match &mut self.device {
             Some(d) => d.as_mut().display_address(address, context).await,
+            None => Err(JsValue::from_str("Device not connected")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub async fn sign_psbt(
+        &mut self,
+        psbt: &str,
+        policy_name: Option<String>,
+        wallet_descriptor: Option<String>,
+        wallet_hmac_hex: Option<String>,
+    ) -> Result<String, JsValue> {
+        let psbt = Psbt::from_str(psbt.trim())
+            .map_err(|e| JsValue::from_str(&format!("Invalid PSBT: {e}")))?;
+        // Ledger signs registered policies with name+descriptor+hmac; BitBox re-supplies the
+        // policy descriptor for multisig signing; Coldcard/Jade resolve everything on-device.
+        let context = match &self.device {
+            Some(Device::Ledger(_)) => {
+                let hmac = wallet_hmac_hex
+                    .map(|hmac_hex| {
+                        let hmac_bytes = hex::decode(&hmac_hex)
+                            .map_err(|e| JsValue::from_str(&format!("Invalid hmac hex: {e}")))?;
+                        hmac_bytes
+                            .try_into()
+                            .map_err(|_| JsValue::from_str("hmac must be 32 bytes (64 hex chars)"))
+                    })
+                    .transpose()?;
+                match (policy_name, wallet_descriptor, hmac) {
+                    (Some(name), Some(desc), hmac) => {
+                        let wallet_policy: WalletPolicy = desc.parse().map_err(|e| {
+                            JsValue::from_str(&format!("Invalid wallet descriptor: {e}"))
+                        })?;
+                        Some(DeviceContext::Ledger {
+                            wallet_policy: LedgerWalletPolicy::new(
+                                name,
+                                Version::V2,
+                                wallet_policy,
+                            ),
+                            wallet_hmac: hmac,
+                        })
+                    }
+                    (None, None, None) => None,
+                    (None, None, Some(_)) => {
+                        return Err(JsValue::from_str(
+                            "wallet_hmac_hex requires policy_name and wallet_descriptor",
+                        ));
+                    }
+                    _ => {
+                        return Err(JsValue::from_str(
+                            "policy_name and wallet_descriptor must be provided together",
+                        ));
+                    }
+                }
+            }
+            Some(Device::BitBox(_)) => wallet_descriptor
+                .map(|desc| {
+                    desc.parse()
+                        .map(|policy| DeviceContext::BitBox { policy })
+                        .map_err(|e| JsValue::from_str(&format!("Invalid wallet descriptor: {e}")))
+                })
+                .transpose()?,
+            _ => None,
+        };
+        match &mut self.device {
+            Some(d) => d
+                .as_mut()
+                .sign_tx(psbt, context)
+                .await
+                .map(|signed| signed.to_string()),
+            None => Err(JsValue::from_str("Device not connected")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub async fn sign_message(&mut self, message: &str, path: &str) -> Result<String, JsValue> {
+        match &mut self.device {
+            Some(d) => d.as_mut().sign_message(message, path).await,
             None => Err(JsValue::from_str("Device not connected")),
         }
     }

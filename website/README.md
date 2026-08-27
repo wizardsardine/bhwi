@@ -2,7 +2,9 @@
 
 Demo web application for [BHWI](../README.md) using WebAssembly.
 
-Supports connecting to Coldcard, Jade, and Ledger devices via WebHID/WebSerial.
+Supports connecting to Coldcard, Jade, Ledger, and BitBox02 devices via
+WebHID/WebSerial: fetching xpubs, displaying addresses, registering
+wallets, signing PSBTs, and signing messages.
 
 Requires a Chromium-based browser (Chrome, Edge, etc.).
 
