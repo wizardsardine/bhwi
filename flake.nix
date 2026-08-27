@@ -89,12 +89,28 @@
         jadePython = pkgs.python3.withPackages (pythonPackages: [
           pythonPackages.zopfli
         ]);
+        # HWI 3.2.0 needs cbor2 5.9.x for Jade: 5.8.0 times out because its
+        # larger stream reads expose HWI's exact-fill Jade TCP read loop
+        # (https://github.com/bitcoin-core/HWI/pull/832), and 6.x rejects
+        # jadepy's read-only interface object because load() now requires
+        # readable()/seekable(). Built from source instead of overriding
+        # nixpkgs cbor2, whose 6.x derivation carries a Rust extension.
+        hwiCbor2 = pkgs.python312Packages.buildPythonPackage rec {
+          pname = "cbor2";
+          version = "5.9.0";
+          pyproject = true;
+          src = pkgs.fetchPypi {
+            inherit pname version;
+            hash = "sha256-hcekYnmsjyJuEFknUiHms9DjcNK7a9BQD5eAeBYVvOo=";
+          };
+          build-system = [
+            pkgs.python312Packages.setuptools
+            pkgs.python312Packages.setuptools-scm
+          ];
+          doCheck = false;
+        };
         hwiPython = pkgs.python312.withPackages (pythonPackages: [
-          # HWI 3.2.0 times out against Jade with cbor2 5.8.0 because its
-          # larger stream reads expose HWI's exact-fill Jade TCP read loop.
-          # nixpkgs now ships cbor2 >= 5.9.0, which avoids the issue:
-          # https://github.com/bitcoin-core/HWI/pull/832
-          pythonPackages.cbor2
+          hwiCbor2
           pythonPackages.ecdsa
           pythonPackages.hidapi
           pythonPackages.libusb1
