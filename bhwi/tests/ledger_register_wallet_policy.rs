@@ -1,0 +1,48 @@
+use core::str::FromStr;
+use std::collections::HashSet;
+
+use bhwi::policy::{extract_parts, format_key_info};
+use miniscript::{
+    descriptor::{DescriptorPublicKey, WalletPolicy},
+    Descriptor,
+};
+
+// Liana-style taproot descriptor: two xpubs, each used three times with
+// different multipath derivations, taptree shape {{A,B},C}.
+const DESC: &str = "tr([0266a74a/48'/1'/0'/2']tpubDFEXpjxZr3xqdAFQWoDRzo5CaJCc7zFbNV7WzB43oAnLvTSq9Kw8A7iJPWmgJbpCZ4nndgZgjsVb7dr1rnBmYdnmcWz7sfhyvBdhueh5XaX/<0;1>/*,{{and_v(v:multi_a(1,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*,[0266a74a/48'/1'/0'/2']tpubDFEXpjxZr3xqdAFQWoDRzo5CaJCc7zFbNV7WzB43oAnLvTSq9Kw8A7iJPWmgJbpCZ4nndgZgjsVb7dr1rnBmYdnmcWz7sfhyvBdhueh5XaX/<2;3>/*),older(17)),and_v(v:multi_a(1,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<4;5>/*,[0266a74a/48'/1'/0'/2']tpubDFEXpjxZr3xqdAFQWoDRzo5CaJCc7zFbNV7WzB43oAnLvTSq9Kw8A7iJPWmgJbpCZ4nndgZgjsVb7dr1rnBmYdnmcWz7sfhyvBdhueh5XaX/<4;5>/*),older(20))},pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*)})#mvg3vd9a";
+
+// The {{A,B},C} taptree renders as {{A,B,C}} (miniscript rev c9b0499e
+// TapTree Display bug), so the descriptor no longer parses.
+#[test]
+fn taptree_display_round_trips() {
+    let descriptor = Descriptor::<DescriptorPublicKey>::from_str(DESC).unwrap();
+    let displayed = descriptor.to_string();
+    Descriptor::<DescriptorPublicKey>::from_str(&displayed)
+        .unwrap_or_else(|e| panic!("descriptor display must round-trip: {e}: {displayed}"));
+}
+
+// The Ledger app parses the descriptor template it receives during
+// registration, so the template must itself be a valid wallet policy.
+#[test]
+fn register_wallet_template_is_parseable() {
+    let policy = WalletPolicy::from_str(DESC).unwrap();
+    let (template, _) = extract_parts(&policy).unwrap();
+    WalletPolicy::from_str(&template)
+        .unwrap_or_else(|e| panic!("template must be a valid wallet policy: {e:?}: {template}"));
+}
+
+// BIP-388 forbids duplicate entries in the key information vector; the
+// Ledger app enforces it. The two xpubs must map to two key infos.
+#[test]
+fn register_wallet_keys_are_deduplicated() {
+    let policy = WalletPolicy::from_str(DESC).unwrap();
+    let (template, keys) = extract_parts(&policy).unwrap();
+    let key_infos: Vec<String> = keys.iter().map(format_key_info).collect();
+    let distinct: HashSet<&String> = key_infos.iter().collect();
+    assert_eq!(
+        key_infos.len(),
+        distinct.len(),
+        "key information vector contains duplicates: {key_infos:?}"
+    );
+    assert_eq!(key_infos.len(), 2, "template: {template}");
+}
