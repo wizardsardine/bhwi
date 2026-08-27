@@ -184,6 +184,8 @@ pub struct Info {
     pub on_device_passphrase_entry: Option<bool>,
     /// Whether the device is waiting for a PIN from the host, when it reports a lock state.
     pub needs_pin_sent: Option<bool>,
+    /// Whether the device expects the BIP39 passphrase from the host rather than its own screen.
+    pub needs_passphrase_sent: Option<bool>,
 }
 
 pub enum Recipient {

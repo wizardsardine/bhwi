@@ -286,6 +286,7 @@ impl From<ColdcardResponse> for Response {
                 label: None,
                 on_device_passphrase_entry: None,
                 needs_pin_sent: None,
+                needs_passphrase_sent: None,
             }),
             ColdcardResponse::MyPub { encryption_key, .. } => Self::EncryptionKey(encryption_key),
             ColdcardResponse::Signature(header, signature) => Self::Signature(header, signature),

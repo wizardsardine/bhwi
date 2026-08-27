@@ -181,7 +181,3 @@ only, because the Model T takes its PIN and passphrase on its own screen.
 covered by `bhwi-e2e-trezor` and `bhwi-e2e-cli` instead. It is supported on the
 Model T, which takes the recovery phrase on its own screen; the Trezor One
 requires host word entry and is unsupported.
-
-`togglepassphrase` runs but is not at parity. Python HWI's enumerate emits a
-`warnings` field for a Trezor One with passphrase protection enabled and no
-passphrase supplied; BHWI emits no `warnings` key for any device.

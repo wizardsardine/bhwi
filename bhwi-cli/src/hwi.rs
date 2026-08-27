@@ -343,6 +343,8 @@ pub struct HwiEnumeratedDevice {
     pub fingerprint: Option<Fingerprint>,
     pub needs_pin_sent: bool,
     pub needs_passphrase_sent: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -715,6 +717,8 @@ where
     Ok(args)
 }
 
+const EMPTY_PASSPHRASE_WARNING: &str = "Passphrase protection enabled but passphrase was not provided. Using default passphrase of the empty string (\"\")";
+
 async fn enumerate(selector: DeviceSelector) -> HwiResponse {
     let manager = DeviceManager::new(DeviceSelector {
         device_type: None,
@@ -734,6 +738,8 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
         let mut info = None;
         let mut fingerprint = None;
         let mut needs_pin_sent = false;
+        let mut needs_passphrase_sent = false;
+        let mut warnings = Vec::new();
         match device.device().unlock(manager.selector.network).await {
             Ok(()) => {
                 // A device waiting for a PIN stops answering every other request, and the
@@ -751,12 +757,23 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
                     .as_ref()
                     .and_then(|info| info.needs_pin_sent)
                     .unwrap_or(false);
+                needs_passphrase_sent = info
+                    .as_ref()
+                    .and_then(|info| info.needs_passphrase_sent)
+                    .unwrap_or(false);
                 if needs_pin_sent {
                     error = Some(bhwi::trezor::TrezorError::LOCKED.to_owned());
                     code = Some(HwiErrorCode::DeviceNotReady.code());
                 } else if error.is_none() {
+                    if needs_passphrase_sent && manager.selector.passphrase.is_none() {
+                        warnings.push(vec![EMPTY_PASSPHRASE_WARNING.to_owned()]);
+                    }
                     match device.fingerprint().await {
-                        Ok(device_fingerprint) => fingerprint = Some(device_fingerprint),
+                        Ok(device_fingerprint) => {
+                            fingerprint = Some(device_fingerprint);
+                            // Deriving it required the passphrase, so it has been sent.
+                            needs_passphrase_sent = false;
+                        }
                         Err(err) => {
                             error = Some(err.to_string());
                             code = Some(HwiErrorCode::DeviceConnectionError.code());
@@ -783,7 +800,8 @@ async fn enumerate(selector: DeviceSelector) -> HwiResponse {
             label: label_for(device.device_type(), label),
             fingerprint,
             needs_pin_sent,
-            needs_passphrase_sent: false,
+            needs_passphrase_sent,
+            warnings,
             error,
             code,
         });
@@ -4071,6 +4089,7 @@ mod tests {
                 fingerprint: None,
                 needs_pin_sent: false,
                 needs_passphrase_sent: false,
+                warnings: Vec::new(),
                 error: None,
                 code: None,
             })
@@ -4086,6 +4105,7 @@ mod tests {
                 fingerprint: None,
                 needs_pin_sent: false,
                 needs_passphrase_sent: false,
+                warnings: Vec::new(),
                 error: None,
                 code: None,
             })
@@ -4104,6 +4124,7 @@ mod tests {
             fingerprint: None,
             needs_pin_sent: false,
             needs_passphrase_sent: false,
+            warnings: Vec::new(),
             error: Some("connection failed".to_owned()),
             code: Some(HwiErrorCode::DeviceConnectionError.code()),
         })
@@ -4123,6 +4144,7 @@ mod tests {
             fingerprint: None,
             needs_pin_sent: false,
             needs_passphrase_sent: false,
+            warnings: Vec::new(),
             error: None,
             code: None,
         })
