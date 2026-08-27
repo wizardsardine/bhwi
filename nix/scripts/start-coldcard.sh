@@ -50,7 +50,8 @@ fi
 
 mkdir -p "$cache_root"
 
-if [[ ! -f "$marker" || ! -f "$build_key_file" || "$(cat "$build_key_file")" != "$build_key" ]]; then
+if [[ ! -f "$marker" || ! -f "$build_key_file" || "$(cat "$build_key_file")" != "$build_key" ]] \
+  || ! "$work/ENV/bin/python3" -c '' 2>/dev/null; then
   echo "Building Coldcard simulator in $work" >&2
   rm -rf "$work"
   if [[ -n "${COLDCARD_FIRMWARE_URL:-}" && "$rev" != "locked" ]]; then

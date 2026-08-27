@@ -25,6 +25,10 @@ if [[ ! -d "$work" ]]; then
 fi
 
 cd "$work"
+if [[ -d venv ]] && ! venv/bin/python -c '' 2>/dev/null; then
+  echo "Recreating Jade venv: cached interpreter no longer runs" >&2
+  rm -rf venv
+fi
 if [[ ! -d venv ]]; then
   python3 -m venv venv
   venv/bin/pip install --upgrade pip setuptools
