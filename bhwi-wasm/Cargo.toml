@@ -24,11 +24,11 @@ thiserror.workspace = true
 
 console_log = "0.2"
 console_error_panic_hook = "0.1.7"
-js-sys = "=0.3.91"
+js-sys = "=0.3.98"
 getrandom = { version = "=0.2.16", features = ["js"] }
-wasm-bindgen = { version = "=0.2.114" }
-wasm-bindgen-futures = { version = "=0.4.64" }
-web-sys = { version = "=0.3.91", features = [
+wasm-bindgen = { version = "=0.2.121" }
+wasm-bindgen-futures = { version = "=0.4.71" }
+web-sys = { version = "=0.3.98", features = [
     "Headers",
     "Request",
     "RequestInit",

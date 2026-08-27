@@ -44,6 +44,10 @@ if [[ ! -f "$server_key" ]]; then
 fi
 
 cd "$work"
+if [[ -d venv-pinserver ]] && ! venv-pinserver/bin/python -c '' 2>/dev/null; then
+  echo "Recreating Jade pinserver venv: cached interpreter no longer runs" >&2
+  rm -rf venv-pinserver
+fi
 if [[ ! -d venv-pinserver ]]; then
   "$python" -m venv venv-pinserver
   venv-pinserver/bin/pip install --upgrade pip setuptools wheel

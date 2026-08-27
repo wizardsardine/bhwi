@@ -56,7 +56,7 @@
         pkgs = import nixpkgs {
           inherit system overlays;
           config.permittedInsecurePackages = [
-            "python3.12-ecdsa-0.19.1"
+            "python3.12-ecdsa-0.19.2"
           ];
         };
         coldcardPkgs = import nixpkgs-coldcard {inherit system;};
@@ -89,19 +89,27 @@
         jadePython = pkgs.python3.withPackages (pythonPackages: [
           pythonPackages.zopfli
         ]);
-        hwiCbor2 = pkgs.python312Packages.cbor2.overridePythonAttrs (_old: rec {
+        # HWI 3.2.0 needs cbor2 5.9.x for Jade: 5.8.0 times out because its
+        # larger stream reads expose HWI's exact-fill Jade TCP read loop
+        # (https://github.com/bitcoin-core/HWI/pull/832), and 6.x rejects
+        # jadepy's read-only interface object because load() now requires
+        # readable()/seekable(). Built from source instead of overriding
+        # nixpkgs cbor2, whose 6.x derivation carries a Rust extension.
+        hwiCbor2 = pkgs.python312Packages.buildPythonPackage rec {
+          pname = "cbor2";
           version = "5.9.0";
+          pyproject = true;
           src = pkgs.fetchPypi {
-            pname = "cbor2";
-            inherit version;
+            inherit pname version;
             hash = "sha256-hcekYnmsjyJuEFknUiHms9DjcNK7a9BQD5eAeBYVvOo=";
           };
-        });
+          build-system = [
+            pkgs.python312Packages.setuptools
+            pkgs.python312Packages.setuptools-scm
+          ];
+          doCheck = false;
+        };
         hwiPython = pkgs.python312.withPackages (pythonPackages: [
-          # HWI 3.2.0 times out against Jade with cbor2 5.8.0 because its
-          # larger stream reads expose HWI's exact-fill Jade TCP read loop.
-          # Upstream HWI is relaxing its cbor2 cap to permit 5.9.0:
-          # https://github.com/bitcoin-core/HWI/pull/832
           hwiCbor2
           pythonPackages.ecdsa
           pythonPackages.hidapi
@@ -163,13 +171,13 @@
         };
         mkWebsite = pkgs.callPackage ({
           buildNpmPackage,
-          nodejs_20,
+          nodejs_22,
           base ? "/",
         }:
           buildNpmPackage {
             name = "bhwi-website";
             src = ./website;
-            nodejs = nodejs_20;
+            nodejs = nodejs_22;
             npmDepsHash = "sha256-B+hl2uXdXBV9N99+RDSRzwO4xvpr8l+l2RU7MO2OyWA=";
             postPatch = ''
               cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} pkg
@@ -192,8 +200,8 @@
           pkgs.wasm-bindgen-cli
           pkgs.binaryen
           pkgs.clang
-          pkgs.corepack_20
-          pkgs.nodejs_20
+          pkgs.corepack_22
+          pkgs.nodejs_22
         ];
         emulatorInputs =
           [
@@ -808,6 +816,9 @@
 
               cargoLock = {
                 lockFile = ./Cargo.lock;
+                outputHashes = {
+                  "miniscript-13.0.0" = "sha256-sCxv3/haaN6AJn1ot4gqnAoJJypKAv5nUh/rSDTS3YI=";
+                };
               };
 
               nativeBuildInputs = inputs;
@@ -845,7 +856,7 @@
             website = {
               type = "app";
               program = toString (pkgs.writeShellScript "run-website" ''
-                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.corepack_20]}:$PATH"
+                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_22 pkgs.corepack_22]}:$PATH"
                 rm -rf website/pkg
                 cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} website/pkg
                 cd website && npm install && npm run dev
@@ -862,7 +873,7 @@
               type = "app";
               program = toString (pkgs.writeShellScript "publish-wasm" ''
                 set -euo pipefail
-                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_20 pkgs.jq]}:$PATH"
+                export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_22 pkgs.jq]}:$PATH"
 
                 names=("$@")
                 if [ ''${#names[@]} -eq 0 ]; then
