@@ -89,20 +89,12 @@
         jadePython = pkgs.python3.withPackages (pythonPackages: [
           pythonPackages.zopfli
         ]);
-        hwiCbor2 = pkgs.python312Packages.cbor2.overridePythonAttrs (_old: rec {
-          version = "5.9.0";
-          src = pkgs.fetchPypi {
-            pname = "cbor2";
-            inherit version;
-            hash = "sha256-hcekYnmsjyJuEFknUiHms9DjcNK7a9BQD5eAeBYVvOo=";
-          };
-        });
         hwiPython = pkgs.python312.withPackages (pythonPackages: [
           # HWI 3.2.0 times out against Jade with cbor2 5.8.0 because its
           # larger stream reads expose HWI's exact-fill Jade TCP read loop.
-          # Upstream HWI is relaxing its cbor2 cap to permit 5.9.0:
+          # nixpkgs now ships cbor2 >= 5.9.0, which avoids the issue:
           # https://github.com/bitcoin-core/HWI/pull/832
-          hwiCbor2
+          pythonPackages.cbor2
           pythonPackages.ecdsa
           pythonPackages.hidapi
           pythonPackages.libusb1
