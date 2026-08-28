@@ -292,6 +292,113 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn can_sign_reused_multipath_key_psbt() {
+        let secp = Secp256k1::new();
+        let mut dev = device().await;
+        let account: DerivationPath = "m/48'/0'/0'/2'".parse().unwrap();
+        let fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let our_xpub = dev
+            .get_extended_pubkey(account.clone(), false)
+            .await
+            .unwrap();
+
+        // The recovery key recurs with two multipath pairs, so the policy
+        // template sent to the BitBox must reuse its placeholder instead of
+        // numbering each occurrence. The device co-holds the 1-of-2 primary
+        // path and signs exactly once.
+        let recovery_root = Xpriv::new_master(Network::Bitcoin, &[0xb4u8; 32]).unwrap();
+        let recovery_fp = recovery_root.fingerprint(&secp);
+        let recovery_xpub =
+            Xpub::from_priv(&secp, &recovery_root.derive_priv(&secp, &account).unwrap());
+        let policy = format!(
+            "wsh(or_d(multi(1,[{fingerprint}/48'/0'/0'/2']{our_xpub}/<0;1>/*,[{recovery_fp}/48'/0'/0'/2']{recovery_xpub}/<0;1>/*),and_v(v:pkh([{recovery_fp}/48'/0'/0'/2']{recovery_xpub}/<2;3>/*),older(10))))"
+        );
+
+        dev.register_wallet("bhwi-e2e-reuse", &policy)
+            .await
+            .expect("register policy");
+
+        let (receive, change) = definite_branches(&policy);
+        let psbt = build_psbt(&secp, &receive, &change);
+
+        let signed = dev
+            .sign_tx(
+                psbt,
+                Some(DeviceContext::BitBox {
+                    policy: WalletPolicy::from_str(&policy).unwrap(),
+                }),
+            )
+            .await
+            .expect("sign reused-multipath-key psbt");
+
+        assert_eq!(signed.inputs.len(), 1);
+        let input = &signed.inputs[0];
+        assert_eq!(
+            input.partial_sigs.len(),
+            1,
+            "expected exactly one signature"
+        );
+        assert!(
+            input
+                .partial_sigs
+                .contains_key(&receive_pubkey(&secp, &our_xpub)),
+            "device key signature missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn can_sign_taproot_reused_multipath_key_psbt() {
+        let secp = Secp256k1::new();
+        let mut dev = device().await;
+        let account: DerivationPath = "m/48'/0'/0'/2'".parse().unwrap();
+        let fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let our_xpub = dev
+            .get_extended_pubkey(account.clone(), false)
+            .await
+            .unwrap();
+
+        // Liana-style taproot: the device key is the spendable internal key;
+        // the recovery key recurs in two timelocked leaves with distinct
+        // multipath pairs, so the policy template must reuse its placeholder.
+        // Key-path signing yields exactly one signature, the device's.
+        let recovery_root = Xpriv::new_master(Network::Bitcoin, &[0x5cu8; 32]).unwrap();
+        let recovery_fp = recovery_root.fingerprint(&secp);
+        let recovery_xpub =
+            Xpub::from_priv(&secp, &recovery_root.derive_priv(&secp, &account).unwrap());
+        let policy = format!(
+            "tr([{fingerprint}/48'/0'/0'/2']{our_xpub}/<0;1>/*,{{and_v(v:pkh([{recovery_fp}/48'/0'/0'/2']{recovery_xpub}/<0;1>/*),older(10)),and_v(v:pkh([{recovery_fp}/48'/0'/0'/2']{recovery_xpub}/<2;3>/*),older(20))}})"
+        );
+
+        dev.register_wallet("bhwi-e2e-tr-reuse", &policy)
+            .await
+            .expect("register policy");
+
+        let (receive, change) = definite_branches(&policy);
+        let psbt = build_psbt(&secp, &receive, &change);
+
+        let signed = dev
+            .sign_tx(
+                psbt,
+                Some(DeviceContext::BitBox {
+                    policy: WalletPolicy::from_str(&policy).unwrap(),
+                }),
+            )
+            .await
+            .expect("sign taproot reused-multipath-key psbt");
+
+        assert_eq!(signed.inputs.len(), 1);
+        let input = &signed.inputs[0];
+        assert!(
+            input.partial_sigs.is_empty() && input.tap_script_sigs.is_empty(),
+            "expected no script-path or ECDSA signatures"
+        );
+        assert!(
+            input.tap_key_sig.is_some(),
+            "device key-path signature missing"
+        );
+    }
+
     /// Value of the single input the sign test spends (must equal the witness UTXO).
     const INPUT_VALUE: Amount = Amount::from_sat(50_000);
     /// Value sent to the change output (input minus fee).

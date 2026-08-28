@@ -183,6 +183,37 @@ mod tests {
         assert!(display_res.is_err());
     }
 
+    // NOTE: The pinned Coldcard firmware only parses classic multisig configs
+    // during `enrl` enrollment, so miniscript registration is refused by the
+    // simulator. This should succeed on miniscript-capable firmware.
+    #[tokio::test]
+    async fn register_miniscript_descriptor_is_rejected_by_simulator() {
+        let (mut dev, _control) = device().await;
+        let secp = Secp256k1::new();
+        let device_fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let account_path: DerivationPath = "48'/1'/0'/2'".parse().unwrap();
+        let device_xpub = dev
+            .get_extended_pubkey(account_path.clone(), false)
+            .await
+            .unwrap();
+        let cosigner_master = Xpriv::new_master(Network::Testnet, &[9u8; 32]).unwrap();
+        let cosigner_fingerprint = cosigner_master.fingerprint(&secp);
+        let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path).unwrap();
+        let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
+
+        // Liana-style miniscript: the cosigner key recurs with two multipath
+        // pairs. The client-side payload accepts it; only the device decides.
+        let policy = format!(
+            "wsh(or_d(multi(1,[{device_fingerprint}/{account_path}]{device_xpub}/<0;1>/*,[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/<0;1>/*),and_v(v:pkh([{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/<2;3>/*),older(10))))"
+        );
+
+        let result = dev.register_wallet("cold-e2e-ms", &policy).await;
+        assert!(
+            result.is_err(),
+            "pinned simulator firmware lacks miniscript enrollment"
+        );
+    }
+
     #[tokio::test]
     async fn can_register_and_display_multisig_addresses() {
         let (mut dev, mut control) = device().await;

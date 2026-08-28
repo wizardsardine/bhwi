@@ -11,6 +11,7 @@ async-trait.workspace = true
 base64ct = { workspace = true, features = ["alloc"] }
 bhwi-async = { workspace = true, features = ["emulators"] }
 bitcoin.workspace = true
+miniscript.workspace = true
 reqwest.workspace = true
 serde_cbor.workspace = true
 tokio = { workspace = true, features = ["macros"] }
