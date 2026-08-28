@@ -66,3 +66,20 @@ jade.disconnect()
 ```sh
 ./jade_cli.py set-pinserver --pubkey pinserver/test_keys/server_public_key.pub http://localhost:8096
 ```
+
+## Descriptor Registration Names
+
+Jade persists registered descriptors as NVS storage keys on the device, so the
+`descriptor_name` passed to `register_descriptor` is constrained: at most 16
+characters, using only letters, digits and underscores. Spaces are not allowed.
+See the [Jade API client](https://github.com/Blockstream/Jade/tree/master/jadepy)
+(`jadepy`) and the [RPC docs](https://github.com/Blockstream/Jade/blob/master/docs/index.rst)
+for the reference behaviour. The check itself is
+[`storage_key_name_valid`](https://github.com/Blockstream/Jade/blob/f94fc04f66d6ed96f9df43af024b89be1b240bb2/main/storage.c#L398)
+in the firmware.
+
+An invalid name (e.g. `my wallet`) is rejected by the firmware before anything
+is shown on the device, with the misleading RPC error
+`-32602 "Missing or invalid descriptor name parameter"`; use `my_wallet`
+instead. Ledger wallet policy names allow spaces, so a name that works for a
+Ledger registration may still fail on Jade.

@@ -62,6 +62,8 @@ interface SignMessageResult {
 
 const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
 
+const JADE_WALLET_NAME_REGEX = /^[A-Za-z0-9_]{1,16}$/;
+
 const App = () => {
     const [device, setDevice] = useState<ConnectedDevice | null>(null);
     const [connecting, setConnecting] = useState<DeviceType | null>(null);
@@ -263,9 +265,17 @@ const App = () => {
         }
     };
 
+    const walletNameInvalid = device?.type === 'Jade'
+        && walletName.length > 0
+        && !JADE_WALLET_NAME_REGEX.test(walletName);
+
     const registerWallet = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!device || processing) return;
+
+        if (device.type === 'Jade' && !JADE_WALLET_NAME_REGEX.test(walletName)) {
+            return;
+        }
 
         setRegisteringWallet(true);
         setProcessing(true);
@@ -642,11 +652,21 @@ const App = () => {
                                     <input
                                         id="wallet-name"
                                         type="text"
+                                        required
                                         value={walletName}
                                         onChange={(e) => setWalletName(e.target.value)}
-                                        placeholder="My Wallet"
-                                        className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                        placeholder={device.type === 'Jade' ? 'My_Wallet' : 'My Wallet'}
+                                        className={`w-full bg-gray-700 border rounded-lg px-4 py-2 text-sm focus:outline-none mb-4 ${walletNameInvalid ? 'border-red-500 focus:border-red-500' : 'border-gray-600 focus:border-blue-500'}`}
                                     />
+                                    {walletNameInvalid ? (
+                                        <p className="text-xs text-red-400 -mt-2 mb-4">
+                                            Jade wallet names must be 1-16 characters, using only letters, digits and underscores (no spaces)
+                                        </p>
+                                    ) : device.type === 'Jade' && (
+                                        <p className="text-xs text-gray-500 -mt-2 mb-4">
+                                            Jade: 1-16 characters, letters, digits and underscores only
+                                        </p>
+                                    )}
                                     <label htmlFor="wallet-policy" className="block text-sm text-gray-400 mb-2">
                                         Wallet Descriptor
                                     </label>
@@ -660,7 +680,7 @@ const App = () => {
                                     />
                                     <button
                                         type="submit"
-                                        disabled={processing}
+                                        disabled={processing || walletNameInvalid}
                                         className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-lg font-medium transition-colors"
                                     >
                                         {registeringWallet ? 'Registering...' : 'Register'}
