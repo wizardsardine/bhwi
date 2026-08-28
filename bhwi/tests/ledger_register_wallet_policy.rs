@@ -1,6 +1,7 @@
 use core::str::FromStr;
+use std::collections::HashSet;
 
-use bhwi::policy::extract_parts;
+use bhwi::policy::{extract_parts, format_key_info};
 use miniscript::{
     Descriptor,
     descriptor::{DescriptorPublicKey, WalletPolicy},
@@ -26,4 +27,19 @@ fn register_wallet_template_is_parseable() {
     let (template, _) = extract_parts(&policy).unwrap();
     WalletPolicy::from_str(&template)
         .unwrap_or_else(|e| panic!("template must be a valid wallet policy: {e:?}: {template}"));
+}
+
+// BIP-388 requires distinct entries in the key information vector.
+#[test]
+fn register_wallet_keys_are_deduplicated() {
+    let policy = WalletPolicy::from_str(DESC).unwrap();
+    let (template, keys) = extract_parts(&policy).unwrap();
+    let key_infos: Vec<String> = keys.iter().map(format_key_info).collect();
+    let distinct: HashSet<&String> = key_infos.iter().collect();
+    assert_eq!(
+        key_infos.len(),
+        distinct.len(),
+        "key information vector contains duplicates: {key_infos:?}"
+    );
+    assert_eq!(key_infos.len(), 2, "template: {template}");
 }

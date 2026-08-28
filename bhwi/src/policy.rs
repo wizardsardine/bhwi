@@ -5,6 +5,7 @@
 //! This module centralizes that extraction so the backends don't each re-derive it.
 
 use core::fmt::Display;
+use std::collections::HashSet;
 
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, WalletPolicyError};
@@ -14,16 +15,17 @@ use miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, WalletPolicyErro
 /// The returned keys are index-aligned with the template's `@i` placeholders: miniscript's
 /// `WalletPolicy` validation guarantees placeholders are consecutive and in order, and
 /// `into_descriptor` substitutes them in that order, so `iter_pk()` yields the keys in `@i`
-/// order. A placeholder reused with disjoint multipaths appears twice in `iter_pk()`; such
-/// consecutive duplicates are collapsed to a single entry so the result has one key per `@i`.
+/// order. Reused placeholders may appear non-consecutively, so keys are deduplicated while
+/// preserving first-occurrence order.
 pub fn extract_parts(
     policy: &WalletPolicy,
 ) -> Result<(String, Vec<DescriptorPublicKey>), WalletPolicyError> {
     let template = format!("{policy:#}");
     let descriptor = policy.clone().into_descriptor()?;
-    let mut keys: Vec<DescriptorPublicKey> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut keys = Vec::new();
     for key in descriptor.iter_pk() {
-        if keys.last().map(format_key_info) != Some(format_key_info(&key)) {
+        if seen.insert(format_key_info(&key)) {
             keys.push(key);
         }
     }
