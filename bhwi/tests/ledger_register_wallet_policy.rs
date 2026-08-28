@@ -1,0 +1,29 @@
+use core::str::FromStr;
+
+use bhwi::policy::extract_parts;
+use miniscript::{
+    Descriptor,
+    descriptor::{DescriptorPublicKey, WalletPolicy},
+};
+
+// Liana-style taproot descriptor: two xpubs, each used three times with
+// different multipath derivations, taptree shape {{A,B},C}.
+const DESC: &str = "tr([0266a74a/48'/1'/0'/2']tpubDFEXpjxZr3xqdAFQWoDRzo5CaJCc7zFbNV7WzB43oAnLvTSq9Kw8A7iJPWmgJbpCZ4nndgZgjsVb7dr1rnBmYdnmcWz7sfhyvBdhueh5XaX/<0;1>/*,{{and_v(v:multi_a(1,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*,[0266a74a/48'/1'/0'/2']tpubDFEXpjxZr3xqdAFQWoDRzo5CaJCc7zFbNV7WzB43oAnLvTSq9Kw8A7iJPWmgJbpCZ4nndgZgjsVb7dr1rnBmYdnmcWz7sfhyvBdhueh5XaX/<2;3>/*),older(17)),and_v(v:multi_a(1,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<4;5>/*,[0266a74a/48'/1'/0'/2']tpubDFEXpjxZr3xqdAFQWoDRzo5CaJCc7zFbNV7WzB43oAnLvTSq9Kw8A7iJPWmgJbpCZ4nndgZgjsVb7dr1rnBmYdnmcWz7sfhyvBdhueh5XaX/<4;5>/*),older(20))},pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*)})#mvg3vd9a";
+
+// The {{A,B},C} taptree rendered as invalid {{A,B,C}} before rust-miniscript #953.
+#[test]
+fn taptree_display_round_trips() {
+    let descriptor = Descriptor::<DescriptorPublicKey>::from_str(DESC).unwrap();
+    let displayed = descriptor.to_string();
+    Descriptor::<DescriptorPublicKey>::from_str(&displayed)
+        .unwrap_or_else(|e| panic!("descriptor display must round-trip: {e}: {displayed}"));
+}
+
+// Ledger parses the descriptor template during wallet registration.
+#[test]
+fn register_wallet_template_is_parseable() {
+    let policy = WalletPolicy::from_str(DESC).unwrap();
+    let (template, _) = extract_parts(&policy).unwrap();
+    WalletPolicy::from_str(&template)
+        .unwrap_or_else(|e| panic!("template must be a valid wallet policy: {e:?}: {template}"));
+}
