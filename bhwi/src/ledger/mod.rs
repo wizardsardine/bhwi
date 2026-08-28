@@ -701,7 +701,7 @@ where
                         if res.status_word != StatusWord::OK {
                             return Err(LedgerError::unexpected_result(
                                 res.data,
-                                "register wallet status",
+                                format!("register wallet status {:?}", res.status_word),
                             )
                             .into());
                         }

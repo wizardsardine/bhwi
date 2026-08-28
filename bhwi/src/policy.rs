@@ -11,23 +11,53 @@ use miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, WalletPolicyErro
 
 /// Extract the BIP-388 template and the ordered per-placeholder keys from a wallet policy.
 ///
-/// The returned keys are index-aligned with the template's `@i` placeholders: miniscript's
-/// `WalletPolicy` validation guarantees placeholders are consecutive and in order, and
-/// `into_descriptor` substitutes them in that order, so `iter_pk()` yields the keys in `@i`
-/// order. A placeholder reused with disjoint multipaths appears twice in `iter_pk()`; such
-/// consecutive duplicates are collapsed to a single entry so the result has one key per `@i`.
+/// The returned keys are index-aligned with the template's `@i` placeholders. Miniscript's
+/// `WalletPolicy` assigns a distinct placeholder to each unique key expression (key info plus
+/// derivation), while BIP-388 numbers placeholders by key info alone, reusing the same `@i`
+/// for a key that appears with several multipath derivations. Keys are deduplicated by key
+/// info in first-occurrence order and the template placeholders are renumbered to match:
+/// `Display` renders placeholders left to right in the same order `iter_pk()` yields keys, so
+/// the n-th `@i` token corresponds to the n-th key occurrence.
 pub fn extract_parts(
     policy: &WalletPolicy,
 ) -> Result<(String, Vec<DescriptorPublicKey>), WalletPolicyError> {
     let template = format!("{policy:#}");
     let descriptor = policy.clone().into_descriptor()?;
     let mut keys: Vec<DescriptorPublicKey> = Vec::new();
+    let mut indices = Vec::new();
     for key in descriptor.iter_pk() {
-        if keys.last().map(format_key_info) != Some(format_key_info(&key)) {
-            keys.push(key);
-        }
+        let info = format_key_info(&key);
+        let index = keys
+            .iter()
+            .position(|k| format_key_info(k) == info)
+            .unwrap_or_else(|| {
+                keys.push(key);
+                keys.len() - 1
+            });
+        indices.push(index);
     }
-    Ok((template, keys))
+
+    let mut renumbered = String::with_capacity(template.len());
+    let mut occurrences = indices.iter();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '@' {
+            renumbered.push(c);
+            continue;
+        }
+        while chars.peek().is_some_and(char::is_ascii_digit) {
+            chars.next();
+        }
+        let index = occurrences
+            .next()
+            .ok_or(WalletPolicyError::WalletPolicyInvalidKeyInfo)?;
+        renumbered.push('@');
+        renumbered.push_str(&index.to_string());
+    }
+    if occurrences.next().is_some() {
+        return Err(WalletPolicyError::WalletPolicyInvalidKeyInfo);
+    }
+    Ok((renumbered, keys))
 }
 
 /// Format a key as a BIP-388 KEY_INFO string (`[origin]xkey`), dropping the derivation-path
