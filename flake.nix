@@ -128,15 +128,16 @@
           cargo = rust;
           rustc = rust;
         };
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes = {
+            "miniscript-13.0.0" = "sha256-sCxv3/haaN6AJn1ot4gqnAoJJypKAv5nUh/rSDTS3YI=";
+          };
+        };
         bhwi-wasm-pkg = rustPlatformWasm.buildRustPackage {
           name = "bhwi-wasm-pkg";
           src = ./.;
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes = {
-              "miniscript-13.0.0" = "sha256-sCxv3/haaN6AJn1ot4gqnAoJJypKAv5nUh/rSDTS3YI=";
-            };
-          };
+          inherit cargoLock;
           nativeBuildInputs = [
             pkgs.wasm-bindgen-cli
             pkgs.binaryen
@@ -169,6 +170,11 @@
           '';
           doCheck = false;
         };
+        websiteNpmDeps = pkgs.fetchNpmDeps {
+          name = "bhwi-website-npm-deps";
+          src = ./website;
+          hash = "sha256-QFlJa2ktVoBSVop3aawbgDNI64NphX62fIStq27Pjjk=";
+        };
         mkWebsite = pkgs.callPackage ({
           buildNpmPackage,
           nodejs_22,
@@ -178,7 +184,7 @@
             name = "bhwi-website";
             src = ./website;
             nodejs = nodejs_22;
-            npmDepsHash = "sha256-QFlJa2ktVoBSVop3aawbgDNI64NphX62fIStq27Pjjk=";
+            npmDeps = websiteNpmDeps;
             postPatch = ''
               cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} pkg
             '';
@@ -814,15 +820,12 @@
               name = "bhwi";
               src = ./.;
 
-              cargoLock = {
-                lockFile = ./Cargo.lock;
-                outputHashes = {
-                  "miniscript-13.0.0" = "sha256-sCxv3/haaN6AJn1ot4gqnAoJJypKAv5nUh/rSDTS3YI=";
-                };
-              };
+              inherit cargoLock;
 
               nativeBuildInputs = inputs;
             };
+            cargo-vendor-check = pkgs.rustPlatform.importCargoLock cargoLock;
+            npm-deps-check = websiteNpmDeps;
             website = mkWebsite {};
             website-ghpages = mkWebsite {base = "/bhwi/";};
           }

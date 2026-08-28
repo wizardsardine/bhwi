@@ -5,6 +5,16 @@ on:
   pull_request:
 
 jobs:
+  vendor_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+      - name: Check flake outputHashes match Cargo.lock
+        run: nix build .#cargo-vendor-check
+      - name: Check flake npmDepsHash matches website/package-lock.json
+        run: nix build .#npm-deps-check
+
   linter:
     runs-on: ubuntu-latest
     steps:
