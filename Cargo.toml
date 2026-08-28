@@ -21,7 +21,7 @@ futures = "0.3"
 hex = "0.4.3"
 log = "0.4"
 # Can move to a version once WalletPolicy is in a release
-miniscript = { git = "https://github.com/rust-bitcoin/rust-miniscript.git", rev = "c9b0499e" }
+miniscript = { git = "https://github.com/rust-bitcoin/rust-miniscript.git", rev = "ff4732e5" }
 rand_core = "0.6.4"
 reqwest = "0.13.4"
 serde = "1.0.228"
