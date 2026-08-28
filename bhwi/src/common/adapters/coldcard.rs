@@ -106,13 +106,18 @@ fn coldcard_registration_payload(
         .clone()
         .into_descriptor()
         .map_err(|error| ColdcardError::InvalidInput(error.to_string()))?;
-    let (threshold, signer_count) = coldcard_sortedmulti_size(&descriptor).ok_or_else(|| {
+    let class = coldcard_registration_class(&descriptor).ok_or_else(|| {
         ColdcardError::InvalidInput(
-            "Coldcard registration supports only sh(sortedmulti), wsh(sortedmulti), and sh(wsh(sortedmulti)) descriptors"
+            "Coldcard registration supports only sh(sortedmulti), wsh(sortedmulti), sh(wsh(sortedmulti)), wsh miniscript, and tr descriptors"
                 .to_string(),
         )
     })?;
-    if threshold == 0 || threshold > signer_count || signer_count > 15 {
+    if let ColdcardRegistrationClass::SortedMulti {
+        threshold,
+        signer_count,
+    } = class
+        && (threshold == 0 || threshold > signer_count || signer_count > 15)
+    {
         return Err(ColdcardError::InvalidInput(
             "Coldcard multisig policies require 1 to 15 signers and a valid threshold".to_string(),
         ));
@@ -135,16 +140,40 @@ fn coldcard_registration_payload(
     Ok(payload)
 }
 
-fn coldcard_sortedmulti_size(
+/// The descriptor classes Coldcard enrollment accepts: classic sortedmulti
+/// configs on any firmware, and miniscript (wsh or tr) descriptors on
+/// miniscript-capable firmware. The device rejects miniscript enrollment when
+/// its firmware does not support it.
+enum ColdcardRegistrationClass {
+    SortedMulti {
+        threshold: usize,
+        signer_count: usize,
+    },
+    Miniscript,
+}
+
+fn coldcard_registration_class(
     descriptor: &Descriptor<DescriptorPublicKey>,
-) -> Option<(usize, usize)> {
+) -> Option<ColdcardRegistrationClass> {
+    let sortedmulti = |size: Option<(usize, usize)>| {
+        size.map(
+            |(threshold, signer_count)| ColdcardRegistrationClass::SortedMulti {
+                threshold,
+                signer_count,
+            },
+        )
+    };
     match descriptor {
         Descriptor::Sh(sh) => match sh.as_inner() {
-            ShInner::Ms(miniscript) => sortedmulti_size(miniscript),
-            ShInner::Wsh(wsh) => sortedmulti_size(wsh.as_inner()),
+            ShInner::Ms(miniscript) => sortedmulti(sortedmulti_size(miniscript)),
+            ShInner::Wsh(wsh) => sortedmulti(sortedmulti_size(wsh.as_inner())),
             ShInner::Wpkh(_) => None,
         },
-        Descriptor::Wsh(wsh) => sortedmulti_size(wsh.as_inner()),
+        Descriptor::Wsh(wsh) => Some(
+            sortedmulti(sortedmulti_size(wsh.as_inner()))
+                .unwrap_or(ColdcardRegistrationClass::Miniscript),
+        ),
+        Descriptor::Tr(_) => Some(ColdcardRegistrationClass::Miniscript),
         _ => None,
     }
 }
@@ -165,12 +194,11 @@ fn validate_coldcard_registration_key(key: &DescriptorPublicKey) -> Result<(), C
         if paths.len() != 2 || paths.iter().any(|path| path.as_ref().len() != 1) {
             return false;
         }
-        let mut branches = paths
+        let branches = paths
             .iter()
             .map(|path| path.as_ref()[0])
             .collect::<Vec<_>>();
-        branches.sort_unstable();
-        branches == [normal(0), normal(1)]
+        branches[0] != branches[1] && branches.iter().all(|branch| branch.is_normal())
     };
 
     let valid = match key {
@@ -190,7 +218,7 @@ fn validate_coldcard_registration_key(key: &DescriptorPublicKey) -> Result<(), C
         Ok(())
     } else {
         Err(ColdcardError::InvalidInput(
-            "Coldcard multisig keys require origins, extended public keys, and /0/* or /<0;1>/* derivation"
+            "Coldcard registration keys require origins, extended public keys, and /0/* or /<m;n>/* derivation"
                 .to_string(),
         ))
     }
@@ -344,6 +372,26 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(payload["name"], "cold-wallet");
         assert_eq!(payload["desc"], REGISTRATION_POLICY);
+    }
+
+    #[test]
+    fn registration_accepts_wsh_miniscript_with_reused_multipath_keys() {
+        let descriptor = "wsh(or_d(multi(1,[f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*,[00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<0;1>/*),and_v(v:pkh([00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<2;3>/*),older(10))))";
+        let policy = WalletPolicy::from_str(descriptor).unwrap();
+        let payload = coldcard_registration_payload("cold-miniscript", &policy).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["name"], "cold-miniscript");
+        assert_eq!(payload["desc"], descriptor);
+    }
+
+    #[test]
+    fn registration_accepts_tr_miniscript_with_reused_multipath_keys() {
+        let descriptor = "tr([f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*,{and_v(v:pkh([00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<0;1>/*),older(10)),and_v(v:pkh([00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<2;3>/*),older(20))})";
+        let policy = WalletPolicy::from_str(descriptor).unwrap();
+        let payload = coldcard_registration_payload("cold-taproot", &policy).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["name"], "cold-taproot");
+        assert_eq!(payload["desc"], descriptor);
     }
 
     #[test]
