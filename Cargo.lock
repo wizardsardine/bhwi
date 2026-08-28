@@ -380,6 +380,7 @@ dependencies = [
  "bhwi-async",
  "bhwi-cli",
  "bitcoin",
+ "miniscript",
  "reqwest",
  "serde_cbor",
  "tokio",

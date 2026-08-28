@@ -186,6 +186,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn can_register_and_display_reused_multipath_key_descriptor() {
+        use core::str::FromStr;
+
+        use miniscript::{Descriptor, descriptor::DescriptorPublicKey};
+
+        let mut dev = device().await;
+        let secp = Secp256k1::new();
+        let account_path: DerivationPath = "m/48'/1'/0'/2'".parse().unwrap();
+        let device_fingerprint = dev.get_master_fingerprint().await.unwrap();
+        let device_xpub = dev
+            .get_extended_pubkey(account_path.clone(), false)
+            .await
+            .unwrap();
+        let cosigner_master = Xpriv::new_master(Network::Testnet, &[9u8; 32]).unwrap();
+        let cosigner_fingerprint = cosigner_master.fingerprint(&secp);
+        let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path).unwrap();
+        let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
+
+        // The cosigner key recurs with two multipath pairs, so the descriptor
+        // template sent to Jade must reuse its placeholder instead of
+        // numbering each occurrence.
+        let policy = format!(
+            "wsh(or_d(multi(1,[{device_fingerprint}/{account_path}]{device_xpub}/<0;1>/*,[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/<0;1>/*),and_v(v:pkh([{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/<2;3>/*),older(10))))"
+        );
+
+        let registration = dev
+            .register_wallet("jade-e2e-reuse", &policy)
+            .await
+            .expect("register Jade reused-multipath-key descriptor");
+        assert_eq!(registration, WalletRegistration::Complete { hmac: None });
+
+        let address = dev
+            .display_address(
+                DisplayAddress::ByDescriptor {
+                    index: 0,
+                    change: false,
+                    display: true,
+                    descriptor_name: "jade-e2e-reuse".to_string(),
+                },
+                None,
+            )
+            .await
+            .expect("display reused-multipath-key descriptor address");
+
+        let desc = Descriptor::<DescriptorPublicKey>::from_str(&policy).unwrap();
+        let receive = desc
+            .into_single_descriptors()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("receive branch");
+        let expected = receive
+            .derive_at_index(0)
+            .unwrap()
+            .derived_descriptor(&secp)
+            .address(Network::Testnet)
+            .unwrap()
+            .to_string();
+        assert_eq!(address, expected);
+    }
+
+    #[tokio::test]
     async fn rejects_unsupported_path_address_format() {
         let mut dev = device().await;
         let err = dev
