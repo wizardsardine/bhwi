@@ -1,7 +1,10 @@
 #[cfg(feature = "bitbox")]
 pub mod bitbox;
+#[cfg(feature = "coldcard")]
 pub mod coldcard;
+#[cfg(feature = "jade")]
 pub mod jade;
+#[cfg(feature = "ledger")]
 pub mod ledger;
 pub mod transport;
 #[cfg(feature = "trezor")]
@@ -28,7 +31,9 @@ use bhwi::{
     },
     common::{self},
 };
+#[cfg(feature = "jade")]
 pub use jade::Jade;
+#[cfg(feature = "ledger")]
 pub use ledger::Ledger;
 #[cfg(feature = "trezor")]
 pub use trezor::Trezor;
