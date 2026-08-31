@@ -2,6 +2,7 @@ pub mod ledger;
 pub mod pinserver;
 pub mod webhid;
 pub mod webserial;
+pub mod webusb;
 
 use std::str::FromStr;
 
