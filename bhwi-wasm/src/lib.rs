@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use bhwi::bitbox::{BITBOX02_PID, BITBOX02_VID};
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::miniscript::descriptor::WalletPolicy;
-use bhwi::trezor::{HostPin, ManagementContext, TREZOR_DEVICE_ID, TREZOR_ONE_DEVICE_ID};
+use bhwi::trezor::{
+    HostPassphrase, HostPin, ManagementContext, TREZOR_DEVICE_ID, TREZOR_ONE_DEVICE_ID,
+};
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
     DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, Trezor, WalletRegistration,
@@ -312,6 +314,7 @@ impl Client {
     pub async fn connect_trezor_one(
         &mut self,
         network: &str,
+        passphrase: Option<String>,
         on_close_cb: JsValue,
     ) -> Result<(), JsValue> {
         let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -325,7 +328,9 @@ impl Client {
         .await
         .ok_or(JsValue::from_str("Failed to connect to trezor one"))?;
         self.device = Some(Device::TrezorOne(
-            Trezor::new(TrezorTransport::new(device)).with_network(network),
+            Trezor::new(TrezorTransport::new(device))
+                .with_network(network)
+                .with_passphrase(passphrase.map(HostPassphrase::new)),
         ));
         Ok(())
     }
