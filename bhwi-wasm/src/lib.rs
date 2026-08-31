@@ -215,10 +215,15 @@ impl Client {
 
     #[wasm_bindgen]
     pub async fn connect_coldcard(&mut self, on_close_cb: JsValue) -> Result<(), JsValue> {
-        let device =
-            WebHidDevice::get_webhid_device("Coldcard", COLDCARD_DEVICE_ID.vid, None, on_close_cb)
-                .await
-                .ok_or(JsValue::from_str("Failed to connect to coldcard"))?;
+        let device = WebHidDevice::get_webhid_device(
+            Some("Coldcard"),
+            COLDCARD_DEVICE_ID.vid,
+            None,
+            None,
+            on_close_cb,
+        )
+        .await
+        .ok_or(JsValue::from_str("Failed to connect to coldcard"))?;
         let mut rng = rand_core::OsRng;
         self.device = Some(Device::Coldcard(Coldcard::new(
             ColdcardTransportHID::new(device),
@@ -236,9 +241,10 @@ impl Client {
     ) -> Result<(), JsValue> {
         let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let device = WebHidDevice::get_webhid_device(
-            "BitBox02",
+            Some("BitBox02"),
             BITBOX02_VID,
             Some(BITBOX02_PID),
+            None,
             on_close_cb,
         )
         .await
@@ -257,10 +263,15 @@ impl Client {
 
     #[wasm_bindgen]
     pub async fn connect_ledger(&mut self, on_close_cb: JsValue) -> Result<(), JsValue> {
-        let device =
-            WebHidDevice::get_webhid_device("Ledger", LEDGER_DEVICE_ID.vid, None, on_close_cb)
-                .await
-                .ok_or(JsValue::from_str("Failed to connect to ledger"))?;
+        let device = WebHidDevice::get_webhid_device(
+            Some("Ledger"),
+            LEDGER_DEVICE_ID.vid,
+            None,
+            None,
+            on_close_cb,
+        )
+        .await
+        .ok_or(JsValue::from_str("Failed to connect to ledger"))?;
         self.device = Some(Device::Ledger(Ledger::new(LedgerTransportHID::new(device))));
         Ok(())
     }

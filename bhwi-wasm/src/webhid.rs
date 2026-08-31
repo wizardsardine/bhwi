@@ -14,12 +14,12 @@ pub struct WebHidDevice {
     msg_queue: UnboundedReceiver<Vec<u8>>,
 }
 
-#[wasm_bindgen]
 impl WebHidDevice {
     pub async fn get_webhid_device(
-        name: &str,
+        name: Option<&str>,
         vendor_id: u16,
         product_id: Option<u16>,
+        usage_page: Option<u16>,
         on_close_cb: JsValue,
     ) -> Option<WebHidDevice> {
         let navigator = web_sys::window()?.navigator();
@@ -30,6 +30,9 @@ impl WebHidDevice {
         js_sys::Reflect::set(&filter, &"vendorId".into(), &JsValue::from(vendor_id)).unwrap();
         if let Some(product_id) = product_id {
             js_sys::Reflect::set(&filter, &"productId".into(), &JsValue::from(product_id)).unwrap();
+        }
+        if let Some(usage_page) = usage_page {
+            js_sys::Reflect::set(&filter, &"usagePage".into(), &JsValue::from(usage_page)).unwrap();
         }
         filters.push(&filter.into());
 
@@ -48,7 +51,9 @@ impl WebHidDevice {
         let device = devices.get(0).dyn_into::<HidDevice>().unwrap();
 
         log::info!("found hid device: {}", device.product_name());
-        if !device.product_name().contains(name) {
+        if let Some(name) = name
+            && !device.product_name().contains(name)
+        {
             return None;
         }
 
@@ -118,7 +123,10 @@ impl WebHidDevice {
             msg_queue: rx,
         })
     }
+}
 
+#[wasm_bindgen]
+impl WebHidDevice {
     // TODO: return error and maybe remove wasm_bindgen
     #[wasm_bindgen]
     pub async fn read(&mut self) -> Option<Vec<u8>> {
