@@ -10,11 +10,13 @@ use async_trait::async_trait;
 use bhwi::bitbox::{BITBOX02_PID, BITBOX02_VID};
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::miniscript::descriptor::WalletPolicy;
+use bhwi::trezor::{TREZOR_DEVICE_ID, TREZOR_ONE_DEVICE_ID};
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
-    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, WalletRegistration,
+    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, Trezor, WalletRegistration,
     bitbox::BitBox, coldcard::Coldcard, transport::bitbox::hid::BitBoxTransportHID,
     transport::coldcard::hid::ColdcardTransportHID, transport::ledger::hid::LedgerTransportHID,
+    transport::trezor::TrezorTransport,
 };
 use bitcoin::{
     Network,
@@ -177,6 +179,8 @@ pub enum Device {
     Coldcard(Coldcard<ColdcardTransportHID<webhid::WebHidDevice>>),
     Jade(Jade<WebSerialDevice, PinServer>),
     BitBox(BitBox<BitBoxTransportHID<webhid::WebHidDevice>>),
+    TrezorOne(Trezor<TrezorTransport<webhid::WebHidDevice>>),
+    TrezorT(Trezor<TrezorTransport<webusb::WebUsbDevice>>),
 }
 
 impl<'a> AsRef<dyn HWI + 'a> for Device {
@@ -186,6 +190,8 @@ impl<'a> AsRef<dyn HWI + 'a> for Device {
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
             Device::BitBox(b) => b,
+            Device::TrezorOne(t) => t,
+            Device::TrezorT(t) => t,
         }
     }
 }
@@ -197,6 +203,8 @@ impl<'a> AsMut<dyn HWI + 'a> for Device {
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
             Device::BitBox(b) => b,
+            Device::TrezorOne(t) => t,
+            Device::TrezorT(t) => t,
         }
     }
 }
@@ -274,6 +282,48 @@ impl Client {
         .await
         .ok_or(JsValue::from_str("Failed to connect to ledger"))?;
         self.device = Some(Device::Ledger(Ledger::new(LedgerTransportHID::new(device))));
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub async fn connect_trezor_one(
+        &mut self,
+        network: &str,
+        on_close_cb: JsValue,
+    ) -> Result<(), JsValue> {
+        let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let device = WebHidDevice::get_webhid_device(
+            None,
+            TREZOR_ONE_DEVICE_ID.vid,
+            TREZOR_ONE_DEVICE_ID.pid,
+            TREZOR_ONE_DEVICE_ID.usage_page,
+            on_close_cb,
+        )
+        .await
+        .ok_or(JsValue::from_str("Failed to connect to trezor one"))?;
+        self.device = Some(Device::TrezorOne(
+            Trezor::new(TrezorTransport::new(device)).with_network(network),
+        ));
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub async fn connect_trezor_t(
+        &mut self,
+        network: &str,
+        on_close_cb: JsValue,
+    ) -> Result<(), JsValue> {
+        let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let device = webusb::WebUsbDevice::get_webusb_device(
+            TREZOR_DEVICE_ID.vid,
+            TREZOR_DEVICE_ID.pid,
+            on_close_cb,
+        )
+        .await
+        .ok_or(JsValue::from_str("Failed to connect to trezor"))?;
+        self.device = Some(Device::TrezorT(
+            Trezor::new(TrezorTransport::new(device)).with_network(network),
+        ));
         Ok(())
     }
 
