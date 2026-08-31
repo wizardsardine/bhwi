@@ -67,7 +67,7 @@ nix develop .#bitbox -c cargo test -p bhwi-e2e-bitbox -- --test-threads=1
 
 ## Ledger
 
-- Local code:
+- Local code (gated behind the `ledger` cargo feature):
   - [Interpreter](../bhwi/src/ledger/mod.rs)
   - [APDU helpers](../bhwi/src/ledger/apdu.rs)
   - [Command encoders](../bhwi/src/ledger/command.rs)
@@ -94,7 +94,7 @@ nix develop .#ledger -c cargo test -p bhwi-e2e-ledger -- --test-threads=1
 
 ## Coldcard
 
-- Local code:
+- Local code (gated behind the `coldcard` cargo feature):
   - [Interpreter](../bhwi/src/coldcard/mod.rs)
   - [API request/response encoding](../bhwi/src/coldcard/api.rs)
   - [Encryption engine](../bhwi/src/coldcard/encrypt.rs)
@@ -116,7 +116,7 @@ nix develop .#coldcard -c cargo test -p bhwi-e2e-coldcard -- --test-threads=1
 
 ## Jade
 
-- Local code:
+- Local code (gated behind the `jade` cargo feature):
   - [Interpreter](../bhwi/src/jade/mod.rs)
   - [CBOR RPC types](../bhwi/src/jade/api.rs)
   - [TCP transport](../bhwi-async/src/transport/jade/tcp.rs)
@@ -141,7 +141,7 @@ nix develop .#jade -c cargo test -p bhwi-e2e-jade -- --test-threads=1
 
 ## Trezor
 
-- Local code:
+- Local code (gated behind the `trezor` cargo feature):
   - [Interpreter](../bhwi/src/trezor/interpreter.rs)
   - [Protocol messages](../bhwi/src/trezor/api.rs)
   - [Generated protobuf bindings](../bhwi/src/trezor/proto.rs)
@@ -173,6 +173,8 @@ nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1
 
 - Start from `bhwi/src/common.rs` and map each supported common command to the
   device protocol.
+- Declare a cargo feature for the device in `bhwi` (gating its module, adapter,
+  and any device-specific dependencies) and forward it from `bhwi-async`.
 - Keep protocol encoding, response parsing, authentication, and intermediate
   device callbacks inside the device interpreter.
 - Keep USB, serial, TCP, browser, and emulator I/O in transport crates or

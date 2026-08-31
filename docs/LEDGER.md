@@ -1,5 +1,8 @@
 # Ledger
 
+The `bhwi` core interpreter is gated behind the `ledger` cargo feature (enabled
+by default).
+
 ## Simulating Ledger Devices
 
 ## Nix
