@@ -3,10 +3,13 @@ pub use miniscript;
 
 #[cfg(feature = "bitbox")]
 pub mod bitbox;
+#[cfg(feature = "coldcard")]
 pub mod coldcard;
 pub mod common;
 pub mod device;
+#[cfg(feature = "jade")]
 pub mod jade;
+#[cfg(feature = "ledger")]
 pub mod ledger;
 pub mod policy;
 #[cfg(feature = "trezor")]

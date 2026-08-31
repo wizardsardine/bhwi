@@ -1,7 +1,10 @@
 #[cfg(feature = "bitbox")]
 pub mod bitbox;
+#[cfg(feature = "coldcard")]
 pub mod coldcard;
+#[cfg(feature = "jade")]
 pub mod jade;
+#[cfg(feature = "ledger")]
 pub mod ledger;
 #[cfg(feature = "trezor")]
 pub mod trezor;

@@ -1,9 +1,14 @@
 #[cfg(feature = "bitbox")]
 use crate::bitbox;
+#[cfg(feature = "coldcard")]
+use crate::coldcard;
+#[cfg(feature = "jade")]
+use crate::jade;
+#[cfg(feature = "ledger")]
+use crate::ledger;
 use crate::miniscript::descriptor::{DescriptorPublicKey, WalletPolicy};
 #[cfg(feature = "trezor")]
 use crate::trezor;
-use crate::{coldcard, jade, ledger};
 use bitcoin::Network;
 use bitcoin::address::AddressType;
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
@@ -118,6 +123,7 @@ pub enum Command {
 #[derive(Clone, Debug)]
 pub enum DeviceContext {
     /// Required contexts for Ledger devices
+    #[cfg(feature = "ledger")]
     Ledger {
         wallet_policy: ledger::LedgerWalletPolicy,
         wallet_hmac: Option<[u8; 32]>,
@@ -246,9 +252,12 @@ impl Error {
 
 #[cfg(feature = "bitbox")]
 pub type BitBoxInterpreter<'a> = bitbox::BitBoxInterpreter<'a, Command, Transmit, Response, Error>;
+#[cfg(feature = "coldcard")]
 pub type ColdcardInterpreter<'a> =
     coldcard::ColdcardInterpreter<'a, Command, Transmit, Response, Error>;
+#[cfg(feature = "jade")]
 pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Error>;
+#[cfg(feature = "ledger")]
 pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
 #[cfg(feature = "trezor")]
 pub type TrezorInterpreter = trezor::TrezorInterpreter<Command, Transmit, Response, Error>;
@@ -268,6 +277,7 @@ mod tests {
     use super::*;
     use crate::Interpreter;
 
+    #[cfg(all(feature = "jade", feature = "ledger"))]
     #[test]
     fn common_interpreter_is_satisfied() {
         let interpreters: Vec<

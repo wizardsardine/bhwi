@@ -14,9 +14,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 async-trait.workspace = true
 bitcoin = { workspace = true, features = ["secp-lowmemory", "base64"] }
-bhwi = { workspace = true, features = ["bitbox"] }
+bhwi = { workspace = true, features = ["bitbox", "coldcard", "jade", "ledger"] }
 hex.workspace = true
-bhwi-async = { workspace = true, features = ["bitbox"] }
+# no trezor: wasm has no trezor surface, keeping the wasm binary smaller
+bhwi-async = { workspace = true, default-features = false, features = ["bitbox", "coldcard", "jade", "ledger"] }
 futures.workspace = true
 log.workspace = true
 rand_core.workspace = true

@@ -11,8 +11,10 @@ description = "development kit"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["jade", "bitbox"]
-jade = ["serde", "serde_bytes", "serde_cbor"]
+default = ["bitbox", "coldcard", "jade", "ledger", "trezor"]
+coldcard = ["dep:aes", "dep:ctr", "dep:k256"]
+jade = ["dep:hex", "serde", "serde_bytes", "serde_cbor"]
+ledger = []
 bitbox = [
     "dep:byteorder",
     "dep:either",
@@ -46,9 +48,9 @@ thiserror.workspace = true
 serde_bytes = { version = "0.11.14", optional = true }
 
 # coldcard encryption
-aes = "0.8.3"
-ctr = "0.9.2"
-k256 = { version = "0.13.3", features = ["arithmetic"] }
+aes = { version = "0.8.3", optional = true }
+ctr = { version = "0.9.2", optional = true }
+k256 = { version = "0.13.3", features = ["arithmetic"], optional = true }
 
 # bitbox02
 byteorder = { version = "1.5", optional = true }
@@ -61,5 +63,7 @@ itertools = { version = "=0.14.0", optional = true }
 prost = { version = "=0.13.5", optional = true }
 semver = { version = "=1.0.27", optional = true }
 unicode-normalization = { version = "=0.1.24", optional = true }
-zeroize = { version = "=1.8.1", optional = true }
+# zeroize_derive feature needed for #[derive(zeroize::Zeroize)] in trezor code;
+# previously enabled only transitively via noise-rust-crypto (bitbox feature)
+zeroize = { version = "=1.8.1", features = ["zeroize_derive"], optional = true }
 zeroize_derive = { version = "=1.4.3", optional = true }

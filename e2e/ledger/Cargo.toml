@@ -9,7 +9,7 @@ license-file.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 base64ct = { workspace = true, features = ["alloc"] }
-bhwi-async = { workspace = true, features = ["emulators"] }
+bhwi-async = { workspace = true, features = ["emulators", "ledger"] }
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -18,4 +18,4 @@ reqwest = { workspace = true, features = ["json"] }
 miniscript.workspace = true
 
 bhwi-cli = { path = "../../bhwi-cli" }
-bhwi.workspace = true
+bhwi = { workspace = true, features = ["ledger"] }

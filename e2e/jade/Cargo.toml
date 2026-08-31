@@ -9,7 +9,7 @@ license-file.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 base64ct = { workspace = true, features = ["alloc"] }
-bhwi-async = { workspace = true, features = ["emulators"] }
+bhwi-async = { workspace = true, features = ["emulators", "jade"] }
 bitcoin.workspace = true
 miniscript.workspace = true
 reqwest.workspace = true

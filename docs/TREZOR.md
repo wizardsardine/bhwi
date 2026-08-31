@@ -22,8 +22,8 @@ nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1
 unseeded. Set `TREZOR_MODEL` to `trezor-one` or `trezor-t` so model-specific
 assertions select the right firmware version.
 
-The `bhwi` core interpreter is gated behind the `trezor` cargo feature, which is
-**not** enabled by default. Protocol-v1 framing is identical over HID, WebUSB and
+The `bhwi` core interpreter is gated behind the `trezor` cargo feature (enabled
+by default). Protocol-v1 framing is identical over HID, WebUSB and
 the UDP emulator, so one `TrezorTransport` serves all three and the emulator
 differs only in the underlying byte channel.
 

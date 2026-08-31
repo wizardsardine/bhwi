@@ -1,5 +1,8 @@
 # Coldcard Emulation
 
+The `bhwi` core interpreter is gated behind the `coldcard` cargo feature
+(enabled by default).
+
 ## Nix
 
 The recommended local e2e path is the Nix runner documented in

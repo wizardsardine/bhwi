@@ -12,8 +12,11 @@ description = "development kit"
 # https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = []
+default = ["bitbox", "coldcard", "jade", "ledger", "trezor"]
 bitbox = ["bhwi/bitbox"]
+coldcard = ["bhwi/coldcard"]
+jade = ["bhwi/jade", "serde_cbor"]
+ledger = ["bhwi/ledger"]
 trezor = ["bhwi/trezor"]
 emulators = ["hex", "serde", "serde_json"]
 
@@ -23,7 +26,7 @@ bhwi.workspace = true
 futures.workspace = true
 hex = { workspace = true, optional = true}
 serde = { workspace = true, optional = true}
-serde_cbor.workspace = true
+serde_cbor = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true}
 thiserror.workspace = true
 
