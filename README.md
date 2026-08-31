@@ -10,6 +10,8 @@ sits behind one common interface, applications share a single dependency tree
 instead of pulling a separate client library (and its transitive dependencies)
 per hardware wallet. It ships a CLI plus a Python-HWI-compatible `hwi` binary.
 
+<img src="docs/imgs/bhwi-iso-embedded.svg" width="100%" alt="bhwi embedded in a host app">
+
 Keeping I/O out of the core matters because driving a hardware wallet is rarely
 one request/response: registering a Miniscript descriptor before signing,
 answering a Ledger's Merkle-proof data requests, or routing through a Jade PIN
