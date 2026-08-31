@@ -161,6 +161,10 @@ nix develop .#jade -c cargo test -p bhwi-e2e-jade -- --test-threads=1
     xpub/tpub rather than SLIP-132 prefixes.
   - The Trezor One and the Model T run different firmware codebases, so each
     model has its own emulator.
+  - The browser transports split the same way the native ones do. The Trezor One
+    is an HID device, so it uses `bhwi-wasm/src/webhid.rs` with the vendor usage
+    page `0xff00`. The Model T exposes a USB vendor interface instead, so it uses
+    `bhwi-wasm/src/webusb.rs`.
   - Use these commands for emulator-backed tests:
 
 ```sh
