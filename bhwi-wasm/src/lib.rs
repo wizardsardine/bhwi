@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use bhwi::bitbox::{BITBOX02_PID, BITBOX02_VID};
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::miniscript::descriptor::WalletPolicy;
-use bhwi::trezor::{TREZOR_DEVICE_ID, TREZOR_ONE_DEVICE_ID};
+use bhwi::trezor::{HostPin, ManagementContext, TREZOR_DEVICE_ID, TREZOR_ONE_DEVICE_ID};
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
     DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, Trezor, WalletRegistration,
@@ -77,6 +77,8 @@ pub trait HWI {
     ) -> Result<Psbt, JsValue>;
     async fn sign_message(&mut self, message: &str, path: &str) -> Result<String, JsValue>;
     async fn get_info(&mut self) -> Result<JsValue, JsValue>;
+    async fn prompt_pin(&mut self) -> Result<bool, JsValue>;
+    async fn send_pin(&mut self, positions: &str) -> Result<bool, JsValue>;
 }
 
 #[async_trait(?Send)]
@@ -146,6 +148,21 @@ impl<T: AsyncHWI> HWI for T {
         Ok(BASE64_STANDARD.encode(payload))
     }
 
+    async fn prompt_pin(&mut self) -> Result<bool, JsValue> {
+        AsyncHWI::prompt_pin(self)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to prompt PIN: {:?}", e)))
+    }
+
+    async fn send_pin(&mut self, positions: &str) -> Result<bool, JsValue> {
+        let pin = HostPin::new(positions.to_owned())
+            .map_err(|e| JsValue::from_str(&format!("Invalid PIN positions: {:?}", e)))?;
+        let context = DeviceContext::TrezorManagement(ManagementContext::Pin(pin));
+        AsyncHWI::send_pin(self, Some(context))
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to send PIN: {:?}", e)))
+    }
+
     async fn get_info(&mut self) -> Result<JsValue, JsValue> {
         let info = AsyncHWI::get_info(self)
             .await
@@ -167,6 +184,12 @@ impl<T: AsyncHWI> HWI for T {
                 Some(f) => JsValue::from_str(f),
                 None => JsValue::NULL,
             },
+        )
+        .unwrap();
+        js_sys::Reflect::set(
+            &obj,
+            &"needsPinSent".into(),
+            &JsValue::from_bool(info.needs_pin_sent.unwrap_or(false)),
         )
         .unwrap();
         Ok(obj.into())
@@ -353,6 +376,22 @@ impl Client {
     pub async fn get_master_fingerprint(&mut self) -> Result<String, JsValue> {
         match &mut self.device {
             Some(d) => d.as_mut().get_mfg().await,
+            None => Err(JsValue::from_str("Device not connected")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub async fn prompt_pin(&mut self) -> Result<bool, JsValue> {
+        match &mut self.device {
+            Some(d) => d.as_mut().prompt_pin().await,
+            None => Err(JsValue::from_str("Device not connected")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub async fn send_pin(&mut self, positions: &str) -> Result<bool, JsValue> {
+        match &mut self.device {
+            Some(d) => d.as_mut().send_pin(positions).await,
             None => Err(JsValue::from_str("Device not connected")),
         }
     }
