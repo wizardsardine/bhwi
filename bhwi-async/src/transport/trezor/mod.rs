@@ -6,6 +6,8 @@ const CHUNK_SIZE: usize = 63;
 const REPORT_PREFIX: u8 = 0x3f;
 const HEADER_LEN: usize = 8;
 const MAGIC: [u8; 2] = *b"##";
+// Well above any device-to-host V1 message; a Trezor One has 192 KB of SRAM in total.
+const MAX_PAYLOAD_LEN: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrezorTransportError {
@@ -58,6 +60,11 @@ impl<C: Channel> Transport for TrezorTransport<C> {
                     return Err(TrezorTransportError::Comm("missing trezor frame magic"));
                 }
                 let len = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+                if len > MAX_PAYLOAD_LEN {
+                    return Err(TrezorTransportError::Comm(
+                        "declared frame length too large",
+                    ));
+                }
                 total = Some(HEADER_LEN + len);
             }
             if let Some(total) = total
@@ -178,5 +185,23 @@ mod tests {
         });
         let out = futures::executor::block_on(transport.exchange(&v1_frame(29, b""), false));
         assert!(matches!(out, Err(TrezorTransportError::Comm(_))));
+    }
+
+    #[test]
+    fn oversized_declared_length_errors() {
+        let mut header = MAGIC.to_vec();
+        header.extend_from_slice(&30u16.to_be_bytes());
+        header.extend_from_slice(&u32::MAX.to_be_bytes());
+        let mut transport = TrezorTransport::new(MockChannel {
+            sent: RefCell::new(Vec::new()),
+            to_receive: RefCell::new(reports_of(&header)),
+        });
+        let out = futures::executor::block_on(transport.exchange(&v1_frame(29, b""), false));
+        assert!(matches!(
+            out,
+            Err(TrezorTransportError::Comm(
+                "declared frame length too large"
+            ))
+        ));
     }
 }

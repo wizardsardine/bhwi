@@ -1,6 +1,17 @@
 use super::webhid::WebHidDevice;
+use super::webusb::WebUsbDevice;
 use async_trait::async_trait;
 use bhwi_async::transport::Channel;
+
+#[async_trait(?Send)]
+impl Channel for WebUsbDevice {
+    async fn send(&self, data: &[u8]) -> Result<usize, std::io::Error> {
+        self.write(data).await
+    }
+    async fn receive(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error> {
+        self.read(data).await
+    }
+}
 
 #[async_trait(?Send)]
 impl Channel for WebHidDevice {

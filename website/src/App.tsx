@@ -4,14 +4,18 @@ import coldcardIcon from './assets/devices/coldcard.svg';
 import jadeIcon from './assets/devices/blockstream-jade.svg';
 import ledgerIcon from './assets/devices/ledger-nano.svg';
 import bitboxIcon from './assets/devices/bitbox02.svg';
+import trezorOneIcon from './assets/devices/trezor-one.svg';
+import trezorTIcon from './assets/devices/trezor-model-t.svg';
 
-type DeviceType = 'Coldcard' | 'Jade' | 'Ledger' | 'BitBox02';
+type DeviceType = 'Coldcard' | 'Jade' | 'Ledger' | 'BitBox02' | 'TrezorOne' | 'TrezorT';
 
 const DEVICE_ICONS: Record<DeviceType, string> = {
     'Coldcard': coldcardIcon,
     'Jade': jadeIcon,
     'Ledger': ledgerIcon,
     'BitBox02': bitboxIcon,
+    'TrezorOne': trezorOneIcon,
+    'TrezorT': trezorTIcon,
 };
 type Network = 'bitcoin' | 'testnet';
 
@@ -69,6 +73,8 @@ const App = () => {
     const [connecting, setConnecting] = useState<DeviceType | null>(null);
     const [selectedDevice, setSelectedDevice] = useState<DeviceType>('Coldcard');
     const [jadeNetwork, setJadeNetwork] = useState<Network>('bitcoin');
+    const [trezorNetwork, setTrezorNetwork] = useState<Network>('bitcoin');
+    const [trezorPassphrase, setTrezorPassphrase] = useState('');
     const [derivationPath, setDerivationPath] = useState("m/48'/0'/0'/2'");
     const [xpubResults, setXpubResults] = useState<XpubResult[]>([]);
     const [fetchingXpub, setFetchingXpub] = useState(false);
@@ -100,6 +106,8 @@ const App = () => {
     const [processing, setProcessing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [pairingCode, setPairingCode] = useState<string | null>(null);
+    const [pinRequest, setPinRequest] = useState<{ client: Client; type: DeviceType; network?: Network } | null>(null);
+    const [pinPositions, setPinPositions] = useState('');
 
     const showError = (message: string) => {
         setError(message);
@@ -118,13 +126,84 @@ const App = () => {
         initializeWasm();
     }, []);
 
+    const errorMessage = (err: unknown, fallback: string): string =>
+        err instanceof Error ? err.message : typeof err === 'string' ? err : fallback;
+
+    const completeConnection = async (client: Client, type: DeviceType, network?: Network) => {
+        await client.unlock(network ?? 'bitcoin');
+        setPairingCode(null);
+
+        if (type === 'TrezorOne') {
+            const locked = await client.get_info()
+                .then((info) => info.needsPinSent === true)
+                .catch(() => false);
+            if (locked) {
+                await client.prompt_pin();
+                setPinPositions('');
+                setPinRequest({ client, type, network });
+                return;
+            }
+        }
+
+        const masterFingerprint = await client.get_master_fingerprint();
+
+        let detectedNetwork: Network | null = null;
+        if (type === 'Jade') {
+            detectedNetwork = network ?? 'bitcoin';
+        } else {
+            try {
+                const info = await client.get_info();
+                const networks: string[] = info.networks ?? [];
+                if (networks.includes('testnet')) {
+                    detectedNetwork = 'testnet';
+                } else if (networks.includes('bitcoin')) {
+                    detectedNetwork = 'bitcoin';
+                }
+            } catch (err) {
+                console.warn("Could not detect network from device:", err);
+            }
+        }
+
+        const ct = detectedNetwork === 'testnet' ? 1 : 0;
+        setDerivationPath(`m/48'/${ct}'/0'/2'`);
+        setAddressPath(`m/84'/${ct}'/0'/0/0`);
+        setSignMsgPath(`m/84'/${ct}'/0'/0/0`);
+        setDevice({ client, type, masterFingerprint, network: detectedNetwork });
+    };
+
+    const submitPin = async () => {
+        if (!pinRequest) return;
+        const { client, type, network } = pinRequest;
+        setProcessing(true);
+        try {
+            const accepted = await client.send_pin(pinPositions);
+            setPinPositions('');
+            if (!accepted) {
+                showError('Device rejected the PIN');
+                // The keypad is gone after a rejection; a second ack would always fail.
+                await client.prompt_pin();
+                return;
+            }
+            setPinRequest(null);
+            await completeConnection(client, type, network);
+        } catch (err) {
+            setPinRequest(null);
+            setPinPositions('');
+            showError(errorMessage(err, 'Failed to send PIN'));
+            console.error('Error sending PIN:', err);
+        } finally {
+            setProcessing(false);
+        }
+    };
+
     const connectDevice = async (type: DeviceType, network?: Network) => {
         if (processing) return;
         setConnecting(type);
         setProcessing(true);
+        let client: Client | null = null;
         try {
             await initWasm();
-            const client = new Client();
+            client = new Client();
 
             const onCloseCallback = () => {
                 console.log('Device closed');
@@ -148,37 +227,21 @@ const App = () => {
                 case 'BitBox02':
                     await client.connect_bitbox(network ?? 'bitcoin', onCloseCallback, onPairingCodeCallback);
                     break;
+                case 'TrezorOne':
+                    await client.connect_trezor_one(
+                        network ?? 'bitcoin',
+                        trezorPassphrase.length > 0 ? trezorPassphrase : undefined,
+                        onCloseCallback,
+                    );
+                    break;
+                case 'TrezorT':
+                    await client.connect_trezor_t(network ?? 'bitcoin', onCloseCallback);
+                    break;
             }
 
-            await client.unlock(network ?? 'bitcoin');
-            setPairingCode(null);
-            const masterFingerprint = await client.get_master_fingerprint();
-
-            let detectedNetwork: Network | null = null;
-            if (type === 'Jade') {
-                detectedNetwork = network ?? 'bitcoin';
-            } else {
-                try {
-                    const info = await client.get_info();
-                    const networks: string[] = info.networks ?? [];
-                    if (networks.includes('testnet')) {
-                        detectedNetwork = 'testnet';
-                    } else if (networks.includes('bitcoin')) {
-                        detectedNetwork = 'bitcoin';
-                    }
-                } catch (err) {
-                    console.warn("Could not detect network from device:", err);
-                }
-            }
-
-            const ct = detectedNetwork === 'testnet' ? 1 : 0;
-            setDerivationPath(`m/48'/${ct}'/0'/2'`);
-            setAddressPath(`m/84'/${ct}'/0'/0/0`);
-            setSignMsgPath(`m/84'/${ct}'/0'/0/0`);
-            setDevice({ client, type, masterFingerprint, network: detectedNetwork });
+            await completeConnection(client, type, network);
         } catch (err) {
-            const message = err instanceof Error ? err.message : typeof err === 'string' ? err : `Failed to connect to ${type}`;
-            showError(message);
+            showError(errorMessage(err, `Failed to connect to ${type}`));
             console.error(`Error connecting to ${type}:`, err);
         } finally {
             setConnecting(null);
@@ -362,7 +425,7 @@ const App = () => {
     return (
         <div className="min-h-screen bg-gray-900 text-white flex flex-col">
             {error && (
-                <div className="fixed top-4 right-4 bg-red-900/90 border border-red-700 text-red-200 px-4 py-3 rounded-lg shadow-lg max-w-sm">
+                <div className="fixed top-4 right-4 z-60 bg-red-900/90 border border-red-700 text-red-200 px-4 py-3 rounded-lg shadow-lg max-w-sm">
                     <div className="flex justify-between items-start gap-3">
                         <p className="text-sm">{error}</p>
                         <button
@@ -371,6 +434,58 @@ const App = () => {
                         >
                             ×
                         </button>
+                    </div>
+                </div>
+            )}
+
+            {pinRequest && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+                    <div className="bg-gray-800 border border-gray-700 rounded-lg shadow-xl px-8 py-6 max-w-sm text-center">
+                        <div className="flex justify-center mb-4">
+                            <img src={DEVICE_ICONS[pinRequest.type]} alt="" className="h-12 w-12 object-contain" />
+                        </div>
+                        <h2 className="text-lg font-semibold mb-2">Enter PIN</h2>
+                        <p className="text-sm text-gray-400 mb-4">
+                            Your device shows a scrambled keypad. Click the positions matching your PIN,
+                            using the layout on the device screen, not the digits themselves.
+                        </p>
+                        <div className="grid grid-cols-3 gap-2 mb-4">
+                            {[7, 8, 9, 4, 5, 6, 1, 2, 3].map((position) => (
+                                <button
+                                    key={position}
+                                    onClick={() => setPinPositions(pinPositions + position)}
+                                    className="bg-gray-900 hover:bg-gray-700 rounded-lg py-4 text-xl font-mono transition-colors"
+                                >
+                                    &bull;
+                                </button>
+                            ))}
+                        </div>
+                        <p className="font-mono text-xl tracking-widest bg-gray-900 rounded-lg px-4 py-2 mb-4 min-h-[2.5rem]">
+                            {'*'.repeat(pinPositions.length)}
+                        </p>
+                        <div className="flex gap-2">
+                            <button
+                                onClick={() => setPinPositions(pinPositions.slice(0, -1))}
+                                disabled={processing || pinPositions.length === 0}
+                                className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded-lg px-4 py-2 text-sm transition-colors"
+                            >
+                                Delete
+                            </button>
+                            <button
+                                onClick={() => { setPinRequest(null); setPinPositions(''); }}
+                                disabled={processing}
+                                className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded-lg px-4 py-2 text-sm transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={submitPin}
+                                disabled={processing || pinPositions.length === 0}
+                                className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+                            >
+                                Unlock
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
@@ -908,10 +1023,77 @@ const App = () => {
                                 <img src={DEVICE_ICONS['BitBox02']} alt="" className="h-10 w-10 object-contain" />
                                 <span className="font-medium">BitBox02</span>
                             </label>
+
+                            <label className="flex items-center gap-3 bg-gray-800 px-6 py-3 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors">
+                                <input
+                                    type="radio"
+                                    name="device"
+                                    checked={selectedDevice === 'TrezorOne'}
+                                    onChange={() => setSelectedDevice('TrezorOne')}
+                                    className="w-4 h-4 accent-blue-600"
+                                />
+                                <img src={DEVICE_ICONS['TrezorOne']} alt="" className="h-10 w-10 object-contain" />
+                                <span className="font-medium">Trezor One</span>
+                                <input
+                                    type="password"
+                                    value={trezorPassphrase}
+                                    placeholder="Passphrase (optional)"
+                                    autoComplete="off"
+                                    onChange={(e) => {
+                                        setTrezorPassphrase(e.target.value);
+                                        setSelectedDevice('TrezorOne');
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="ml-auto w-44 bg-gray-700 border border-gray-600 rounded-lg px-3 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                />
+                                <select
+                                    value={trezorNetwork}
+                                    onChange={(e) => {
+                                        setTrezorNetwork(e.target.value as Network);
+                                        setSelectedDevice('TrezorOne');
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="bg-gray-700 border border-gray-600 rounded-lg px-3 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                >
+                                    <option value="bitcoin">Mainnet</option>
+                                    <option value="testnet">Testnet</option>
+                                </select>
+                            </label>
+
+                            <label className="flex items-center gap-3 bg-gray-800 px-6 py-3 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors">
+                                <input
+                                    type="radio"
+                                    name="device"
+                                    checked={selectedDevice === 'TrezorT'}
+                                    onChange={() => setSelectedDevice('TrezorT')}
+                                    className="w-4 h-4 accent-blue-600"
+                                />
+                                <img src={DEVICE_ICONS['TrezorT']} alt="" className="h-10 w-10 object-contain" />
+                                <span className="font-medium">Trezor Model T</span>
+                                <select
+                                    value={trezorNetwork}
+                                    onChange={(e) => {
+                                        setTrezorNetwork(e.target.value as Network);
+                                        setSelectedDevice('TrezorT');
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="ml-auto bg-gray-700 border border-gray-600 rounded-lg px-3 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                >
+                                    <option value="bitcoin">Mainnet</option>
+                                    <option value="testnet">Testnet</option>
+                                </select>
+                            </label>
                         </div>
 
                         <button
-                            onClick={() => connectDevice(selectedDevice, selectedDevice === 'Jade' ? jadeNetwork : undefined)}
+                            onClick={() => connectDevice(
+                                selectedDevice,
+                                selectedDevice === 'Jade'
+                                    ? jadeNetwork
+                                    : selectedDevice === 'TrezorOne' || selectedDevice === 'TrezorT'
+                                        ? trezorNetwork
+                                        : undefined,
+                            )}
                             disabled={processing}
                             className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3 rounded-lg font-medium transition-colors"
                         >
