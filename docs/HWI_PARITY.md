@@ -48,6 +48,20 @@ reports the nix store script as its program name and lists argparse-specific
 choice sets. Only status, JSON shape, code `-2`, and non-empty stderr are
 compared for usage errors.
 
+User refusals on the device stop flattening to `-3` and mirror the pinned
+reference exactly: `-14` where upstream raises `ActionCanceledError` (Coldcard
+signmessage/displayaddress, BitBox, Jade), `-13` for Ledger (upstream's
+`ledger_bitcoin` `DenyError` bypasses the `ledger_exception` cancel mapping),
+and, for a refused Coldcard signtx, either `-14` (the refusal frame answers an
+in-flight poll) or `-7` `Coldcard Error: No active request` (the cleared
+request errors on the next poll); both occur upstream depending on poll
+timing. Emulator-backed cancel parity cases cover Ledger (Speculos reject
+automation, both binaries) and Coldcard (simulator refuse keypress,
+candidate-only: the pinned reference presses `y` on the simulator by itself
+via `sim_keypress`, so its refusal path cannot be exercised there and its codes
+are pinned from upstream source); Jade and BitBox refusals are covered by
+protocol unit tests only.
+
 Known divergence: values rejected by a type or value parser rather than by
 argument structure, such as `getkeypool notanum 5` or an invalid derivation
 path, stay on the runtime path and exit `0` with code `-7` where upstream exits

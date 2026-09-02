@@ -655,6 +655,118 @@ mod tests {
     }
 
     #[test]
+    fn candidate_cancel_codes_match_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+        // Jade and BitBox reject automation is not wired; their cancel paths
+        // are covered by protocol unit tests (docs/HWI_PARITY.md).
+        if device_type != "ledger" && device_type != "coldcard" {
+            return Ok(());
+        }
+
+        // A signable PSBT so both sides reach the on-device prompt.
+        let signtx_case = build_singlesig_signtx_case(&device_type, LedgerSinglesigWrapper::Wit)?;
+        let cases = [
+            ("signtx", signtx_args(&device_type, &signtx_case.psbt)),
+            (
+                "signmessage",
+                signmessage_args(&device_type, "cancel me", "m/84'/1'/0'/0/0"),
+            ),
+            (
+                "displayaddress",
+                displayaddress_path_args(&device_type, "wit", "m/84h/1h/0h/0/0"),
+            ),
+        ];
+
+        // Pinned upstream behavior per device/command: Ledger's DenyError
+        // bypasses ledger_exception (-13). A refused Coldcard signtx is
+        // timing-dependent on both implementations: -14 when the refusal frame
+        // answers an in-flight poll, or -7 "No active request" once the
+        // cleared request errors on the next poll. The remaining Coldcard
+        // commands raise CCUserRefused (-14).
+        let expected_codes = |command: &str| -> &'static [i64] {
+            match (device_type.as_str(), command) {
+                ("ledger", _) => &[-13],
+                ("coldcard", "signtx") => &[-7, -14],
+                _ => &[-14],
+            }
+        };
+
+        for (command, case) in cases {
+            // Coldcard's `show` command returns the address in the immediate
+            // response; the on-screen confirmation is fire-and-forget, so no
+            // USB refusal path exists for displayaddress on this firmware.
+            if device_type == "coldcard" && command == "displayaddress" {
+                continue;
+            }
+            // Upstream's Coldcard client presses `y` on the simulator by
+            // itself (coldcard.py `sim_keypress(b'y')` in every prompting
+            // command), so a refusal can never be exercised through the
+            // reference there. Coldcard cases are candidate-only with the
+            // expected codes pinned from upstream source (CCUserRefused ->
+            // -14; a refused signtx may also clear to -7).
+            let labels: &[&str] = if device_type == "coldcard" {
+                &["candidate"]
+            } else {
+                &["reference", "candidate"]
+            };
+            for &label in labels {
+                let candidate_refuses_itself =
+                    label == "candidate" && device_type == "coldcard" && command != "signtx";
+                let mut refusal = None;
+                match device_type.as_str() {
+                    "ledger" => set_ledger_cancel_automation(command)?,
+                    "coldcard" => {
+                        // The simulator numpad is a queue: stray keypresses
+                        // from earlier cases would be consumed by this prompt.
+                        flush_coldcard_keypresses()?;
+                        // The candidate CLI presses the refusal itself for the
+                        // commands with built-in emulator approval.
+                        if !candidate_refuses_itself {
+                            refusal = Some(ColdcardRefusal::spawn());
+                        }
+                    }
+                    _ => {}
+                }
+                let binary = if label == "reference" {
+                    HwiBinary::reference()?
+                } else {
+                    HwiBinary::candidate()?
+                };
+                let output = if candidate_refuses_itself {
+                    binary.run_with_envs(case.clone(), &[("HWI_COLDCARD_EMULATOR_REFUSE", "1")])?
+                } else {
+                    binary.run(case.clone())?
+                };
+                if let Some(refusal) = refusal.take() {
+                    refusal.finish();
+                }
+                if device_type == "coldcard" {
+                    // Drop refusals queued after the prompt was answered so
+                    // they cannot leak into later cases or tests.
+                    flush_coldcard_keypresses()?;
+                }
+                assert_success(label, &output)?;
+                let expected = expected_codes(command);
+                let code = output.json.get("code").and_then(Value::as_i64);
+                if !code.is_some_and(|code| expected.contains(&code)) {
+                    bail!(
+                        "{label} hwi {command} cancel expected code in {expected:?}, got {code:?}\nstdout:\n{}",
+                        output.stdout
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn candidate_backup_matches_reference() -> Result<()> {
         if env::var("HWI_BIN").is_err() {
             return Ok(());
@@ -2649,6 +2761,49 @@ mod tests {
             std::thread::sleep(Duration::from_secs(1));
             let _ = send_coldcard_approval();
         });
+    }
+
+    /// Presses the Coldcard refuse key until the command under test exits. A
+    /// single press raced slow reference startup and stray queued keys.
+    struct ColdcardRefusal {
+        done: Arc<AtomicBool>,
+        handle: std::thread::JoinHandle<()>,
+    }
+
+    impl ColdcardRefusal {
+        fn spawn() -> Self {
+            let done = Arc::new(AtomicBool::new(false));
+            let refusing = Arc::clone(&done);
+            let handle = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(120);
+                while !refusing.load(Ordering::Relaxed) && Instant::now() < deadline {
+                    let _ = coldcard_control_exchange(b"XKEYx");
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            });
+            Self { done, handle }
+        }
+
+        fn finish(self) {
+            self.done.store(true, Ordering::Relaxed);
+            let _ = self.handle.join();
+        }
+    }
+
+    /// Drains the simulator's queued keypresses (`numpad` is a `Queue(64)`);
+    /// the EXEC ends with a harmless QueueEmpty traceback once drained.
+    fn flush_coldcard_keypresses() -> Result<()> {
+        coldcard_control_exchange(b"EXECimport glob\nwhile 1: glob.numpad.get_nowait()")?;
+        Ok(())
+    }
+
+    fn set_ledger_cancel_automation(command: &str) -> Result<()> {
+        let automation = match command {
+            "signtx" => include_str!("../../ledger/automations/sign_psbt_reject.json"),
+            "signmessage" => include_str!("../../ledger/automations/sign_message_reject.json"),
+            _ => include_str!("../../ledger/automations/display_address_reject.json"),
+        };
+        post_speculos_automation(&serde_json::from_str(automation)?)
     }
 
     /// Approves the Coldcard backup prompts until the command under test exits.

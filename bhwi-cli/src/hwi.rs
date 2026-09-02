@@ -1437,7 +1437,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
             {
                 Ok(psbt) => psbt,
                 Err(err) => {
-                    return HwiResponse::Error(classify_device_error(&err));
+                    return HwiResponse::Error(classify_device_error_for(DeviceType::Ledger, &err));
                 }
             };
             merge_psbt_signatures(&mut signed_psbt, result);
@@ -1449,6 +1449,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
         });
     }
 
+    let device_type = device.device_type();
     match device.device().sign_tx(parsed, None).await {
         Ok(signed_psbt) => {
             let signed = signed_psbt.to_string();
@@ -1457,7 +1458,7 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
                 psbt: signed,
             })
         }
-        Err(err) => HwiResponse::Error(classify_device_error(&err)),
+        Err(err) => HwiResponse::Error(classify_device_error_for(device_type, &err)),
     }
 }
 
@@ -1488,8 +1489,10 @@ async fn sign_message(
     };
 
     let device_type = device.device_type();
-    let approval =
-        coldcard_emulator_approval(coldcard_emulator_path(&device), ColdcardApproval::Once);
+    let approval = coldcard_emulator_approval(
+        coldcard_emulator_path(&device),
+        coldcard_emulator_action(ColdcardApproval::Once),
+    );
     let (signature, approval) = tokio::join!(
         device.device().sign_message(message.as_bytes(), path),
         approval
@@ -1504,7 +1507,7 @@ async fn sign_message(
                 &signature,
             ),
         }),
-        Err(err) => HwiResponse::Error(classify_device_error(&err)),
+        Err(err) => HwiResponse::Error(classify_device_error_for(device_type, &err)),
     }
 }
 
@@ -1575,8 +1578,10 @@ async fn display_address(
         Err(error) => return HwiResponse::Error(error),
     };
 
-    let approval =
-        coldcard_emulator_approval(coldcard_emulator_path(&device), ColdcardApproval::Once);
+    let approval = coldcard_emulator_approval(
+        coldcard_emulator_path(&device),
+        coldcard_emulator_action(ColdcardApproval::Once),
+    );
     let (address, approval) =
         tokio::join!(device.device().display_address(display, None), approval);
     if let Err(err) = approval {
@@ -1584,7 +1589,7 @@ async fn display_address(
     }
     match address {
         Ok(address) => HwiResponse::DisplayAddress(HwiDisplayAddressResponse { address }),
-        Err(err) => HwiResponse::Error(classify_device_error(&err)),
+        Err(err) => HwiResponse::Error(classify_device_error_for(device.device_type(), &err)),
     }
 }
 
@@ -1592,6 +1597,18 @@ async fn display_address(
 enum ColdcardApproval {
     Once,
     Backup,
+    Refuse,
+}
+
+/// Undocumented test hook: `HWI_COLDCARD_EMULATOR_REFUSE` swaps the built-in
+/// emulator auto-approval for a refusal so cancel parity cases can exercise
+/// the device's `refu` path through the CLI.
+fn coldcard_emulator_action(default: ColdcardApproval) -> ColdcardApproval {
+    if std::env::var_os("HWI_COLDCARD_EMULATOR_REFUSE").is_some() {
+        ColdcardApproval::Refuse
+    } else {
+        default
+    }
 }
 
 fn coldcard_emulator_path(device: &Device) -> Option<String> {
@@ -1624,7 +1641,11 @@ async fn coldcard_emulator_keypresses(
     let _ = fs::remove_file(&client_path);
     let socket = UnixDatagram::bind(&client_path).map_err(|err| err.to_string())?;
     socket.connect(socket_path).map_err(|err| err.to_string())?;
-    send_coldcard_simulator_keypress(&socket, b'y').await?;
+    let key = match approval {
+        ColdcardApproval::Refuse => b'x',
+        ColdcardApproval::Once | ColdcardApproval::Backup => b'y',
+    };
+    send_coldcard_simulator_keypress(&socket, key).await?;
     if matches!(approval, ColdcardApproval::Backup) {
         for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -1987,7 +2008,12 @@ async fn ledger_signing_contexts(
                     .device()
                     .get_extended_pubkey(account_path.clone(), false)
                     .await
-                    .map_err(|err| LedgerSigningError::Device(classify_device_error(&err)))?;
+                    .map_err(|err| {
+                        LedgerSigningError::Device(classify_device_error_for(
+                            DeviceType::Ledger,
+                            &err,
+                        ))
+                    })?;
                 let policy = singlesig_wallet_policy(
                     &extend_account_path_for_policy(&account_path),
                     fingerprint,
@@ -2011,7 +2037,12 @@ async fn ledger_signing_contexts(
                     .device()
                     .register_wallet(&name, &policy)
                     .await
-                    .map_err(|err| LedgerSigningError::Device(classify_device_error(&err)))?;
+                    .map_err(|err| {
+                        LedgerSigningError::Device(classify_device_error_for(
+                            DeviceType::Ledger,
+                            &err,
+                        ))
+                    })?;
                 let hmac = registration.hmac().ok_or_else(|| {
                     LedgerSigningError::Device(HwiError::new(
                         HwiErrorCode::DeviceConnectionError,
@@ -2893,6 +2924,21 @@ fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
 fn classify_anyhow_device_error(err: &anyhow::Error) -> HwiError {
     let source: &(dyn std::error::Error + 'static) = err.as_ref();
     classify_device_error(source)
+}
+
+/// Device-aware classification. Upstream's Ledger backend uses the new
+/// `ledger_bitcoin` client whose `DenyError` bypasses the `ledger_exception`
+/// cancel mapping, so Ledger cancellations surface as `-13` there instead of
+/// `-14`. Mirror that for parity; every other device keeps `-14`.
+fn classify_device_error_for(
+    device_type: DeviceType,
+    err: &(dyn std::error::Error + 'static),
+) -> HwiError {
+    let classified = classify_device_error(err);
+    if device_type == DeviceType::Ledger && classified.code == HwiErrorCode::ActionCanceled.code() {
+        return HwiError::new(HwiErrorCode::DeviceFailure, classified.error);
+    }
+    classified
 }
 
 fn hwi_descriptor_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAddressType> {
@@ -4235,6 +4281,15 @@ mod tests {
         )));
         assert_eq!(fallback.code, HwiErrorCode::DeviceConnectionError.code());
         assert!(fallback.error.contains("boom"), "{}", fallback.error);
+    }
+
+    #[test]
+    fn ledger_cancellations_downgrade_to_unknown_error_code() {
+        let err = wrapped_device_error(bhwi::common::Error::UserCancelled);
+        let ledger = classify_device_error_for(DeviceType::Ledger, &err);
+        assert_eq!(ledger.code, HwiErrorCode::DeviceFailure.code());
+        let coldcard = classify_device_error_for(DeviceType::Coldcard, &err);
+        assert_eq!(coldcard.code, HwiErrorCode::ActionCanceled.code());
     }
 
     #[test]
