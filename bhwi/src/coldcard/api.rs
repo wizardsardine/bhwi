@@ -249,6 +249,57 @@ mod tests {
             super::response::SignedTransactionStatus::Pending
         ));
     }
+
+    #[test]
+    fn refu_frames_are_user_cancelled_errors() {
+        use crate::coldcard::ColdcardError;
+
+        assert!(matches!(
+            super::response::show_address(b"refu"),
+            Err(ColdcardError::UserCancelled)
+        ));
+        assert!(matches!(
+            super::response::miniscript_address(b"refu"),
+            Err(ColdcardError::UserCancelled)
+        ));
+        assert!(matches!(
+            super::response::sign_message(b"refu"),
+            Err(ColdcardError::UserCancelled)
+        ));
+        assert!(matches!(
+            super::response::sign_transaction(b"refu"),
+            Err(ColdcardError::UserCancelled)
+        ));
+        assert!(matches!(
+            super::response::signed_transaction(b"refu"),
+            Err(ColdcardError::UserCancelled)
+        ));
+    }
+
+    #[test]
+    fn err_frames_during_signing_polls_are_device_errors() {
+        use crate::coldcard::ColdcardError;
+
+        for result in [
+            super::response::sign_transaction(b"err_No active request").map(|_| ()),
+            super::response::signed_transaction(b"err_No active request").map(|_| ()),
+            super::response::sign_message(b"err_No active request").map(|_| ()),
+        ] {
+            match result {
+                Err(ColdcardError::Device(message)) => assert_eq!(message, "No active request"),
+                other => panic!("expected a device error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn err_frames_keep_the_device_error_prefix() {
+        let error = match super::response::show_address(b"err_boom") {
+            Err(error) => error,
+            Ok(_) => panic!("expected a device error"),
+        };
+        assert_eq!(error.to_string(), "Coldcard Error: boom");
+    }
 }
 
 pub mod response {
@@ -390,7 +441,7 @@ pub mod response {
                 let address = String::from_utf8(data.to_owned())?;
                 Ok(ColdcardResponse::Address(address))
             }
-            (ResponseMessage::Refu, _) => Ok(ColdcardResponse::Ok),
+            (ResponseMessage::Refu, _) => Err(ColdcardError::UserCancelled),
             (ResponseMessage::Err_, data) => Err(ColdcardError::Device(
                 String::from_utf8_lossy(data).into_owned(),
             )),
@@ -407,7 +458,7 @@ pub mod response {
                 let address = String::from_utf8(data.to_owned())?;
                 Ok(ColdcardResponse::Address(address))
             }
-            (ResponseMessage::Refu, _) => Ok(ColdcardResponse::Ok),
+            (ResponseMessage::Refu, _) => Err(ColdcardError::UserCancelled),
             (ResponseMessage::Err_, data) => Err(ColdcardError::Device(
                 String::from_utf8_lossy(data).into_owned(),
             )),
@@ -443,6 +494,10 @@ pub mod response {
         match ResponseHandler::parse_response(res)? {
             (ResponseMessage::Okay, _) => Ok(ColdcardResponse::Ok),
             (ResponseMessage::Busy, _) => Ok(ColdcardResponse::Busy),
+            (ResponseMessage::Refu, _) => Err(ColdcardError::UserCancelled),
+            (ResponseMessage::Err_, data) => Err(ColdcardError::Device(
+                String::from_utf8_lossy(data).into_owned(),
+            )),
             (msg, _) => Err(ColdcardError::unexpected_response_message(
                 msg,
                 &[ResponseMessage::Okay, ResponseMessage::Busy],
@@ -467,6 +522,13 @@ pub mod response {
                     .map_err(|_| ColdcardError::Serialization("signed transaction sha".into()))?;
                 Ok(SignedTransactionStatus::Complete { length, sha })
             }
+            (ResponseMessage::Refu, _) => Err(ColdcardError::UserCancelled),
+            // A refused signing request is cleared on the device; the poll then
+            // reports `err_ No active request`, which upstream surfaces as a
+            // device error rather than a cancellation.
+            (ResponseMessage::Err_, data) => Err(ColdcardError::Device(
+                String::from_utf8_lossy(data).into_owned(),
+            )),
             (msg, _) => Err(ColdcardError::unexpected_response_message(
                 msg,
                 &[
@@ -533,6 +595,10 @@ pub mod response {
     pub fn sign_message(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         match ResponseHandler::parse_response(res)? {
             (ResponseMessage::Okay, _) => Ok(ColdcardResponse::Ok),
+            (ResponseMessage::Refu, _) => Err(ColdcardError::UserCancelled),
+            (ResponseMessage::Err_, data) => Err(ColdcardError::Device(
+                String::from_utf8_lossy(data).into_owned(),
+            )),
             (ResponseMessage::Smrx, data) => {
                 let addr_len = u32::from_le_bytes(data[..4].try_into().map_err(|_| {
                     ColdcardError::Serialization("couldn't parse address length into u32".into())

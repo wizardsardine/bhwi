@@ -148,6 +148,7 @@ impl From<LedgerError> for Error {
             }
             LedgerError::FailedToOpenApp(_) => Self::AuthenticationRefused,
             LedgerError::InvalidPsbt(error) => Self::Serialization(error),
+            LedgerError::UserCancelled => Self::UserCancelled,
         }
     }
 }
@@ -269,6 +270,90 @@ mod tests {
             transmit.payload[1],
             crate::ledger::apdu::BitcoinCommandCode::GetWalletAddress as u8
         );
+    }
+
+    #[test]
+    fn sign_message_refusal_status_words_map_to_user_cancelled() {
+        for status in [[0x69u8, 0x85], [0x69, 0x82]] {
+            let mut interpreter = LedgerInterpreter::default();
+            interpreter
+                .start(Command::SignMessage {
+                    message: b"hello".to_vec(),
+                    path: DerivationPath::from_str("m/84'/1'/0'/0/0").unwrap(),
+                })
+                .unwrap();
+            let err = match interpreter.exchange(status.to_vec()) {
+                Err(err) => err,
+                Ok(_) => panic!("expected an error"),
+            };
+            assert!(matches!(err, Error::UserCancelled), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn policy_display_refusal_maps_to_user_cancelled() {
+        let policy = LedgerWalletPolicy::new("wallet".into(), Version::V2, wallet_policy());
+        let mut interpreter = LedgerInterpreter::default();
+        interpreter
+            .start(Command::DisplayAddress(
+                DisplayAddress::ByDescriptor {
+                    index: 0,
+                    change: false,
+                    display: true,
+                    descriptor_name: "wallet".into(),
+                },
+                Some(DeviceContext::Ledger {
+                    wallet_policy: policy,
+                    wallet_hmac: None,
+                }),
+            ))
+            .unwrap();
+        let err = match interpreter.exchange(vec![0x69, 0x85]) {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(matches!(err, Error::UserCancelled), "{err:?}");
+    }
+
+    #[test]
+    fn sign_psbt_refusal_maps_to_user_cancelled() {
+        use bitcoin::psbt::Psbt;
+        use bitcoin::{
+            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+            absolute::LockTime, transaction::Version as TxVersion,
+        };
+
+        let psbt = Psbt::from_unsigned_tx(Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        })
+        .unwrap();
+        let policy = LedgerWalletPolicy::new("wallet".into(), Version::V2, wallet_policy());
+        let mut interpreter = LedgerInterpreter::default();
+        interpreter
+            .start(Command::SignTx(
+                psbt,
+                Some(DeviceContext::Ledger {
+                    wallet_policy: policy,
+                    wallet_hmac: None,
+                }),
+            ))
+            .unwrap();
+        let err = match interpreter.exchange(vec![0x69, 0x82]) {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(matches!(err, Error::UserCancelled), "{err:?}");
     }
 
     #[test]

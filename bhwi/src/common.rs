@@ -237,6 +237,9 @@ pub enum Error {
     #[error("authentication refused")]
     AuthenticationRefused,
 
+    #[error("action canceled by the user")]
+    UserCancelled,
+
     #[error("unsupported display address: {0}")]
     UnsupportedDisplayAddress(String),
 

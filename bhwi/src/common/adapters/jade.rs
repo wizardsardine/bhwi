@@ -203,6 +203,9 @@ impl From<JadeError> for Error {
         match error {
             JadeError::Cbor => Self::Serialization("cbor".to_string()),
             JadeError::NoErrorOrResult => Self::NoErrorOrResult,
+            JadeError::Rpc(error) if error.code == api::ErrorCode::UserCancelled as i32 => {
+                Self::UserCancelled
+            }
             JadeError::Rpc(error) => Self::Rpc(error.code, error.message),
             JadeError::Serialization(error) => Self::Serialization(error),
             JadeError::UnexpectedResult(message) => Self::unexpected_result(
@@ -274,6 +277,47 @@ mod tests {
                 .all(|signer| signer.path.is_empty())
         );
         assert_eq!(paths, vec![vec![0, 7], vec![0, 7]]);
+    }
+
+    #[test]
+    fn rpc_user_cancel_frame_maps_to_user_cancelled() {
+        use crate::Interpreter;
+        use crate::common::JadeInterpreter;
+
+        let mut interpreter = JadeInterpreter::default();
+        interpreter
+            .start(Command::SignMessage {
+                message: b"hello".to_vec(),
+                path: "m/84'/1'/0'/0/0".parse().unwrap(),
+            })
+            .unwrap();
+        let payload = serde_cbor::to_vec(&api::Response::<String> {
+            id: "1".into(),
+            seqlen: None,
+            seqnum: None,
+            result: None,
+            error: Some(api::Error {
+                code: api::ErrorCode::UserCancelled as i32,
+                message: Some("user declined".into()),
+                data: None,
+            }),
+        })
+        .unwrap();
+        let err = match interpreter.exchange(payload) {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(matches!(err, Error::UserCancelled), "{err:?}");
+    }
+
+    #[test]
+    fn other_rpc_codes_keep_the_rpc_error() {
+        let err = Error::from(JadeError::Rpc(api::Error {
+            code: api::ErrorCode::BadParameters as i32,
+            message: Some("bad params".into()),
+            data: None,
+        }));
+        assert!(matches!(err, Error::Rpc(-32602, _)), "{err:?}");
     }
 
     #[test]

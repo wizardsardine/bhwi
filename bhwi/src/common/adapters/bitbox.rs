@@ -162,9 +162,9 @@ fn simple_type_from_address_format(
         Some(AddressType::P2sh) => Ok(SimpleType::P2wpkhP2sh),
         Some(AddressType::P2wpkh) => Ok(SimpleType::P2wpkh),
         Some(AddressType::P2tr) => Ok(SimpleType::P2tr),
-        Some(AddressType::P2pkh | AddressType::P2wsh) | Some(_) => Err(BitBoxError::InvalidInput(
-            "BitBox does not support this address format",
-        )),
+        Some(AddressType::P2pkh | AddressType::P2wsh) | Some(_) => Err(
+            BitBoxError::UnsupportedDisplayAddress("BitBox does not support this address format"),
+        ),
     }
 }
 
@@ -200,8 +200,11 @@ impl From<BitBoxResponse> for Response {
 impl From<BitBoxError> for Error {
     fn from(error: BitBoxError) -> Self {
         match error {
-            BitBoxError::Device(BitBoxDeviceError::UserAbort)
-            | BitBoxError::NoisePairingRejected => Self::AuthenticationRefused,
+            BitBoxError::Device(BitBoxDeviceError::UserAbort) => Self::UserCancelled,
+            BitBoxError::NoisePairingRejected => Self::AuthenticationRefused,
+            BitBoxError::UnsupportedDisplayAddress(message) => {
+                Self::UnsupportedDisplayAddress(message.to_string())
+            }
             BitBoxError::ProtobufDecode(error) | BitBoxError::ProtobufEncode(error) => {
                 Self::Serialization(error)
             }
@@ -266,7 +269,10 @@ mod tests {
             simple_type_from_address_format(&path, None).unwrap(),
             SimpleType::P2wpkhP2sh
         );
-        assert!(simple_type_from_address_format(&path, Some(AddressType::P2pkh)).is_err());
+        assert!(matches!(
+            simple_type_from_address_format(&path, Some(AddressType::P2pkh)),
+            Err(BitBoxError::UnsupportedDisplayAddress(_))
+        ));
     }
 
     #[test]
@@ -388,6 +394,24 @@ mod tests {
         assert!(matches!(
             Response::from(BitBoxResponse::Backup),
             Response::Backup(DeviceBackup::Complete)
+        ));
+    }
+
+    #[test]
+    fn user_abort_code_maps_to_user_cancelled() {
+        // Device error code 104 is UserAbort in the BitBox protocol.
+        assert!(matches!(
+            BitBoxDeviceError::from_code(104),
+            BitBoxDeviceError::UserAbort
+        ));
+        assert!(matches!(
+            Error::from(BitBoxError::Device(BitBoxDeviceError::UserAbort)),
+            Error::UserCancelled
+        ));
+        // Pairing rejection stays an authentication refusal.
+        assert!(matches!(
+            Error::from(BitBoxError::NoisePairingRejected),
+            Error::AuthenticationRefused
         ));
     }
 

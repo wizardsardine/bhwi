@@ -349,6 +349,7 @@ impl From<ColdcardError> for Error {
             ColdcardError::NoErrorOrResult => Self::NoErrorOrResult,
             ColdcardError::Serialization(error) => Self::Serialization(error),
             ColdcardError::InvalidInput(error) => Self::InvalidInput(error),
+            ColdcardError::UserCancelled => Self::UserCancelled,
             ColdcardError::UnexpectedResponseMessage { got, expected } => Self::unexpected_result(
                 format!("{got:?}").into_bytes(),
                 format!("coldcard unexpected response: expected {expected:?}, got {got:?}"),
