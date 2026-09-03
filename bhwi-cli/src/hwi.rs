@@ -88,8 +88,7 @@ pub enum HwiCliCommand {
     },
     Signmessage {
         message: String,
-        #[arg(value_parser = clap::value_parser!(DerivationPath))]
-        path: DerivationPath,
+        path: String,
     },
     #[command(group(
         ArgGroup::new("address_target")
@@ -98,15 +97,14 @@ pub enum HwiCliCommand {
     ))]
     Displayaddress {
         #[arg(long, conflicts_with = "desc")]
-        path: Option<DerivationPath>,
+        path: Option<String>,
         #[arg(long, conflicts_with = "path")]
         desc: Option<String>,
         #[arg(long = "addr-type", value_enum, default_value = "wit")]
         addr_type: HwiAddressType,
     },
     Getxpub {
-        #[arg(value_parser = clap::value_parser!(DerivationPath))]
-        path: DerivationPath,
+        path: String,
     },
     Getdescriptors {
         #[arg(long, default_value_t = 0)]
@@ -165,8 +163,74 @@ pub enum HwiCliCommand {
 
 #[derive(Debug, Clone)]
 pub struct HwiRequest {
-    pub selector: DeviceSelector,
+    pub selector: HwiSelector,
     pub command: HwiCommand,
+}
+
+/// Device selection as parsed from argv. The device type stays a raw string
+/// until device lookup, matching upstream where an unknown type is a lookup
+/// failure (`-3`), or `-4` only when `get_client` is reached via `-d`.
+#[derive(Debug, Clone)]
+pub struct HwiSelector {
+    pub network: Network,
+    pub fingerprint: Option<Fingerprint>,
+    pub device_type: Option<String>,
+    pub device_path: Option<String>,
+    pub include_emulators: bool,
+    pub passphrase: Option<HostPassphrase>,
+}
+
+impl HwiSelector {
+    fn device_selector(&self, device_type: Option<DeviceType>) -> DeviceSelector {
+        DeviceSelector {
+            network: self.network,
+            fingerprint: self.fingerprint,
+            device_type,
+            device_path: self.device_path.clone(),
+            include_emulators: self.include_emulators,
+            passphrase: self.passphrase.clone(),
+        }
+    }
+}
+
+/// Resolves the raw device type, reproducing upstream's error precedence:
+/// `-1` without type/fingerprint, `-4` for an unknown type with a path, then
+/// `-3` when an unknown type cannot match an enumerated device.
+fn hwi_device_manager(selector: &HwiSelector) -> Result<DeviceManager, HwiError> {
+    if selector.device_type.is_none() && selector.fingerprint.is_none() {
+        return Err(HwiError::new(
+            HwiErrorCode::NoDeviceType,
+            "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+    let device_type = match selector.device_type.as_deref() {
+        None => None,
+        Some(raw) => match parse_device_type(raw) {
+            Ok(device_type) => Some(device_type),
+            Err(err) if selector.device_path.is_some() && selector.fingerprint.is_none() => {
+                return Err(err);
+            }
+            Err(_) => {
+                return Err(HwiError::new(
+                    HwiErrorCode::DeviceConnectionError,
+                    "Could not find device with specified fingerprint or type",
+                ));
+            }
+        },
+    };
+    Ok(DeviceManager::new(selector.device_selector(device_type)))
+}
+
+async fn find_hwi_device(selector: &HwiSelector) -> Result<(DeviceManager, Device), HwiError> {
+    let manager = hwi_device_manager(selector)?;
+    match manager.get_device_with_fingerprint().await {
+        Ok(Some(device)) => Ok((manager, device)),
+        Ok(None) => Err(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            "Could not find device with specified fingerprint or type",
+        )),
+        Err(err) => Err(device_error(err)),
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -181,11 +245,11 @@ pub enum HwiCommand {
     },
     SignMessage {
         message: String,
-        path: DerivationPath,
+        path: String,
     },
     DisplayAddress(HwiDisplayAddressRequest),
     GetXpub {
-        path: DerivationPath,
+        path: String,
         expert: bool,
     },
     GetDescriptors {
@@ -255,7 +319,7 @@ pub enum HwiUnsupportedDeviceAction {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum HwiDisplayAddressRequest {
     Path {
-        path: DerivationPath,
+        path: String,
         addr_type: HwiAddressType,
     },
     Descriptor {
@@ -297,6 +361,7 @@ pub enum HwiErrorCode {
     DeviceNotInitialized,
     HelpText,
     ActionCanceled,
+    InvalidTx,
 }
 
 impl HwiErrorCode {
@@ -316,6 +381,7 @@ impl HwiErrorCode {
             HwiErrorCode::DeviceNotInitialized => -18,
             HwiErrorCode::HelpText => -17,
             HwiErrorCode::ActionCanceled => -14,
+            HwiErrorCode::InvalidTx => -5,
         }
     }
 }
@@ -721,12 +787,14 @@ where
 
 const EMPTY_PASSPHRASE_WARNING: &str = "Passphrase protection enabled but passphrase was not provided. Using default passphrase of the empty string (\"\")";
 
-async fn enumerate(selector: DeviceSelector) -> HwiResponse {
-    let manager = DeviceManager::new(DeviceSelector {
-        device_type: None,
-        device_path: None,
-        ..selector
-    });
+async fn enumerate(selector: HwiSelector) -> HwiResponse {
+    // Upstream enumerate ignores an unrecognized -t entirely; drop the filter
+    // rather than failing so the exit stays 0 with a JSON array.
+    let device_type = selector
+        .device_type
+        .as_deref()
+        .and_then(|raw| parse_device_type(raw).ok());
+    let manager = DeviceManager::new(selector.device_selector(device_type));
     let devices = match manager.enumerate().await {
         Ok(devices) => devices,
         Err(err) => {
@@ -826,28 +894,12 @@ fn install_udev_rules_hwi(location: PathBuf) -> HwiResponse {
 }
 
 async fn unsupported_device_action(
-    selector: DeviceSelector,
+    selector: HwiSelector,
     action: HwiUnsupportedDeviceAction,
 ) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
-
-    let manager = DeviceManager::new(selector);
-    let device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
-        }
+    let (_manager, device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
     };
 
     let error = match action {
@@ -864,30 +916,14 @@ async fn unsupported_device_action(
 }
 
 async fn setup_device(
-    selector: DeviceSelector,
+    selector: HwiSelector,
     interactive: bool,
     label: String,
     backup_passphrase: String,
 ) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
-
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
-        }
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
     };
 
     if !interactive {
@@ -962,26 +998,10 @@ async fn setup_device(
     }
 }
 
-async fn wipe_device(selector: DeviceSelector) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
-
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
-        }
+async fn wipe_device(selector: HwiSelector) -> HwiResponse {
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
     };
 
     if !matches!(
@@ -1009,30 +1029,14 @@ async fn wipe_device(selector: DeviceSelector) -> HwiResponse {
 }
 
 async fn restore_device(
-    selector: DeviceSelector,
+    selector: HwiSelector,
     interactive: bool,
     word_count: i32,
     label: String,
 ) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
-
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
-        }
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
     };
 
     if !interactive {
@@ -1102,26 +1106,10 @@ async fn restore_device(
     }
 }
 
-async fn toggle_passphrase_device(selector: DeviceSelector) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
-
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
-        }
+async fn toggle_passphrase_device(selector: HwiSelector) -> HwiResponse {
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
     };
 
     if !matches!(
@@ -1158,7 +1146,7 @@ pub const PIN_MATRIX_DESCRIPTION: &str =
     1 2 3";
 
 async fn device_for_pin_command(
-    selector: DeviceSelector,
+    selector: HwiSelector,
     action: HwiUnsupportedDeviceAction,
     contact_device: bool,
 ) -> Result<crate::Device, HwiError> {
@@ -1176,7 +1164,7 @@ async fn device_for_pin_command(
         ));
     }
 
-    let manager = DeviceManager::new(selector);
+    let manager = hwi_device_manager(&selector)?;
     let found = if contact_device {
         manager.get_device_with_fingerprint().await
     } else {
@@ -1230,7 +1218,7 @@ fn pin_error(err: impl std::fmt::Display) -> HwiError {
     HwiError::new(HwiErrorCode::DeviceConnectionError, message)
 }
 
-async fn prompt_pin_device(selector: DeviceSelector) -> HwiResponse {
+async fn prompt_pin_device(selector: HwiSelector) -> HwiResponse {
     let mut device =
         match device_for_pin_command(selector, HwiUnsupportedDeviceAction::PromptPin, true).await {
             Ok(device) => device,
@@ -1248,7 +1236,7 @@ async fn prompt_pin_device(selector: DeviceSelector) -> HwiResponse {
     }
 }
 
-async fn send_pin_device(selector: DeviceSelector, pin: String) -> HwiResponse {
+async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
     let pin = match bhwi::trezor::HostPin::new(pin) {
         Ok(pin) => pin,
         Err(err) => {
@@ -1276,29 +1264,13 @@ async fn send_pin_device(selector: DeviceSelector, pin: String) -> HwiResponse {
 }
 
 async fn backup_device(
-    selector: DeviceSelector,
+    selector: HwiSelector,
     label: String,
     backup_passphrase: String,
 ) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
-
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
-        }
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
     };
 
     let device_type = device.device_type();
@@ -1363,7 +1335,7 @@ fn format_hwi_backup_filename<Tz: chrono::TimeZone>(time: chrono::DateTime<Tz>) 
 }
 
 async fn get_master_xpub(
-    selector: DeviceSelector,
+    selector: HwiSelector,
     addr_type: HwiAddressType,
     account: u32,
 ) -> HwiResponse {
@@ -1373,36 +1345,22 @@ async fn get_master_xpub(
             return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
         }
     };
-    get_xpub(selector, path, false).await
+    get_xpub(selector, format!("m/{path}"), false).await
 }
 
-async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
+async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
+    let network = selector.network;
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
+    };
 
+    // Upstream parses the PSBT only once a client exists, then reports an
+    // invalid transaction rather than a generic bad argument.
     let parsed = match Psbt::from_str(psbt.trim()) {
         Ok(psbt) => psbt,
         Err(err) => {
-            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
-        }
-    };
-
-    let network = selector.network;
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::InvalidTx, err.to_string()));
         }
     };
 
@@ -1462,29 +1420,17 @@ async fn sign_tx(selector: DeviceSelector, psbt: String) -> HwiResponse {
     }
 }
 
-async fn sign_message(
-    selector: DeviceSelector,
-    message: String,
-    path: DerivationPath,
-) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
+async fn sign_message(selector: HwiSelector, message: String, path: String) -> HwiResponse {
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
+    };
 
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
+    // Argument validation happens after device lookup, like upstream.
+    let path = match DerivationPath::from_str(&path) {
+        Ok(path) => path,
         Err(err) => {
-            return HwiResponse::Error(device_error(err));
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
         }
     };
 
@@ -1511,33 +1457,23 @@ async fn sign_message(
     }
 }
 
-async fn display_address(
-    selector: DeviceSelector,
-    request: HwiDisplayAddressRequest,
-) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
-
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
-        }
+async fn display_address(selector: HwiSelector, request: HwiDisplayAddressRequest) -> HwiResponse {
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
     };
 
     let display = match request {
         HwiDisplayAddressRequest::Path { path, addr_type } => {
+            let path = match DerivationPath::from_str(&path) {
+                Ok(path) => path,
+                Err(err) => {
+                    return HwiResponse::Error(HwiError::new(
+                        HwiErrorCode::BadArgument,
+                        err.to_string(),
+                    ));
+                }
+            };
             if device.device_type() == DeviceType::Coldcard && addr_type == HwiAddressType::Tap {
                 return HwiResponse::Error(HwiError::new(
                     HwiErrorCode::UnsupportedCommand,
@@ -1704,25 +1640,24 @@ fn message_signature_base64(
     BASE64_STANDARD.encode(payload)
 }
 
-async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
+async fn get_xpub(selector: HwiSelector, path: String, expert: bool) -> HwiResponse {
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
+    };
 
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
+    // Argument validation happens after device lookup, like upstream. The
+    // BitBox backend's get_pubkey_at_path is undecorated upstream, so its
+    // invalid-path failure surfaces as -13 instead of -7.
+    let path = match DerivationPath::from_str(&path) {
+        Ok(path) => path,
         Err(err) => {
-            return HwiResponse::Error(device_error(err));
+            let code = if device.device_type() == DeviceType::BitBox02 {
+                HwiErrorCode::DeviceFailure
+            } else {
+                HwiErrorCode::BadArgument
+            };
+            return HwiResponse::Error(HwiError::new(code, err.to_string()));
         }
     };
 
@@ -1732,26 +1667,10 @@ async fn get_xpub(selector: DeviceSelector, path: DerivationPath, expert: bool) 
     }
 }
 
-async fn get_descriptors(selector: DeviceSelector, account: u32) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
-
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
-        }
+async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
+    let (manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
     };
 
     let fingerprint = match device.fingerprint().await {
@@ -1815,7 +1734,7 @@ struct HwiGetKeypoolRequest {
     path: Option<String>,
 }
 
-async fn get_keypool(selector: DeviceSelector, request: HwiGetKeypoolRequest) -> HwiResponse {
+async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> HwiResponse {
     if selector.device_type.is_none() && selector.fingerprint.is_none() {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::NoDeviceType,
@@ -1829,18 +1748,9 @@ async fn get_keypool(selector: DeviceSelector, request: HwiGetKeypoolRequest) ->
         ));
     }
 
-    let manager = DeviceManager::new(selector);
-    let mut device = match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return HwiResponse::Error(HwiError::new(
-                HwiErrorCode::DeviceConnectionError,
-                "Could not find device with specified fingerprint or type",
-            ));
-        }
-        Err(err) => {
-            return HwiResponse::Error(device_error(err));
-        }
+    let (manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
     };
 
     let fingerprint = match device.fingerprint().await {
@@ -3248,13 +3158,16 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
     let _accepted_python_hwi_globals = (args.debug, args.stdin, args.interactive, args.stdinpass);
     let passphrase = args.password.map(HostPassphrase::new);
     let expert = args.expert;
-    let device_type = args
-        .device_type
-        .as_deref()
-        .map(parse_device_type)
-        .transpose()?;
-    let include_emulators =
-        args.emulators || is_known_emulator_path(device_type, args.device_path.as_deref());
+    // The raw device type stays unparsed until device lookup; upstream only
+    // rejects an unknown type once `get_client` is reached.
+    let device_type = args.device_type;
+    let include_emulators = args.emulators
+        || is_known_emulator_path(
+            device_type
+                .as_deref()
+                .and_then(|raw| parse_device_type(raw).ok()),
+            args.device_path.as_deref(),
+        );
     let network = parse_chain(&args.chain)?;
     let command = match args.command {
         HwiCliCommand::Enumerate => HwiCommand::Enumerate,
@@ -3339,7 +3252,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         }
     };
     Ok(HwiRequest {
-        selector: DeviceSelector {
+        selector: HwiSelector {
             network,
             fingerprint: args.fingerprint,
             device_type,
@@ -3430,7 +3343,7 @@ mod tests {
         .expect("request");
 
         assert_eq!(request.selector.network, Network::Testnet);
-        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
         assert_eq!(
             request.selector.device_path.as_deref(),
             Some("tcp:localhost:9999")
@@ -3474,7 +3387,7 @@ mod tests {
         ])
         .expect("request");
 
-        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
         assert_eq!(
             request.selector.device_path.as_deref(),
             Some("tcp:localhost:9999")
@@ -3498,12 +3411,12 @@ mod tests {
         .expect("request");
 
         assert_eq!(request.selector.network, Network::Testnet);
-        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
         assert!(request.selector.include_emulators);
         assert_eq!(
             request.command,
             HwiCommand::GetXpub {
-                path: DerivationPath::from_str("m/44h/1h/0h/0/3").unwrap(),
+                path: "m/44h/1h/0h/0/3".to_owned(),
                 expert: true,
             }
         );
@@ -3569,7 +3482,7 @@ mod tests {
         .expect("request");
 
         assert_eq!(request.selector.network, Network::Testnet);
-        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
         assert_eq!(
             request.command,
             HwiCommand::SignTx {
@@ -3593,12 +3506,12 @@ mod tests {
         .expect("request");
 
         assert_eq!(request.selector.network, Network::Testnet);
-        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
         assert_eq!(
             request.command,
             HwiCommand::SignMessage {
                 message: "hello".to_owned(),
-                path: DerivationPath::from_str("m/44'/1'/0'/0").unwrap(),
+                path: "m/44'/1'/0'/0".to_owned(),
             }
         );
     }
@@ -3620,11 +3533,11 @@ mod tests {
         .expect("request");
 
         assert_eq!(request.selector.network, Network::Testnet);
-        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
         assert_eq!(
             request.command,
             HwiCommand::DisplayAddress(HwiDisplayAddressRequest::Path {
-                path: DerivationPath::from_str("m/49h/1h/0h/0/0").unwrap(),
+                path: "m/49h/1h/0h/0/0".to_owned(),
                 addr_type: HwiAddressType::ShWit,
             })
         );
@@ -3668,7 +3581,7 @@ mod tests {
         .expect("request");
 
         assert_eq!(request.selector.network, Network::Testnet);
-        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
         assert_eq!(request.command, HwiCommand::GetDescriptors { account: 3 });
     }
 
@@ -3688,7 +3601,7 @@ mod tests {
         .expect("request");
 
         assert_eq!(request.selector.network, Network::Testnet);
-        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
         assert!(request.selector.include_emulators);
         assert_eq!(
             request.command,
@@ -3781,12 +3694,72 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_device_type_as_hwi_error() {
-        let error = parse_args(["hwi", "--device-type", "nonexistent", "enumerate"])
-            .expect_err("unsupported device type");
+    fn unknown_device_type_without_path_reports_no_device_found() {
+        // Upstream find_device never matches an unknown type: -3, not -4.
+        let request = parse_args(["hwi", "-t", "nonexistent", "getxpub", "m/44h/1h/0h"])
+            .expect("unknown type parses");
+        let response = futures::executor::block_on(process_request(request));
+        let HwiResponse::Error(error) = response else {
+            panic!("expected HWI error");
+        };
+        assert_eq!(error.code, HwiErrorCode::DeviceConnectionError.code());
+        assert_eq!(
+            error.error,
+            "Could not find device with specified fingerprint or type"
+        );
+    }
 
+    #[test]
+    fn unknown_device_type_with_path_reports_unknown_device() {
+        // Upstream get_client raises UnknownDeviceError (-4) when -d is given.
+        let request = parse_args([
+            "hwi",
+            "-t",
+            "nonexistent",
+            "-d",
+            "/dev/null",
+            "getxpub",
+            "m/44h/1h/0h",
+        ])
+        .expect("unknown type parses");
+        let response = futures::executor::block_on(process_request(request));
+        let HwiResponse::Error(error) = response else {
+            panic!("expected HWI error");
+        };
         assert_eq!(error.code, HwiErrorCode::UnknownDevice.code());
         assert_eq!(error.error, "Unknown device type specified");
+    }
+
+    #[tokio::test]
+    async fn invalid_arguments_without_device_report_no_device_found() {
+        // Argument validation is deferred until after device lookup; with no
+        // matching device every case collapses to -3 like upstream.
+        for args in [
+            ["hwi", "-t", "trezor", "signtx", "notapsbt"].as_slice(),
+            ["hwi", "-t", "trezor", "getxpub", "not_a_path"].as_slice(),
+            ["hwi", "-t", "trezor", "signmessage", "hello", "bad/path"].as_slice(),
+            [
+                "hwi",
+                "-t",
+                "trezor",
+                "displayaddress",
+                "--path",
+                "bad/path",
+            ]
+            .as_slice(),
+        ] {
+            let request = parse_args(args.iter().copied()).expect("request parses");
+            let response = process_request(request).await;
+            let HwiResponse::Error(error) = response else {
+                panic!("expected HWI error for {args:?}");
+            };
+            assert_eq!(
+                error.code,
+                HwiErrorCode::DeviceConnectionError.code(),
+                "{args:?}: {}",
+                error.error
+            );
+        }
     }
 
     #[test]
@@ -3794,7 +3767,7 @@ mod tests {
         let request =
             parse_args(["hwi", "--device-type", "bitbox02", "enumerate"]).expect("bitbox02 parses");
 
-        assert_eq!(request.selector.device_type, Some(DeviceType::BitBox02));
+        assert_eq!(request.selector.device_type.as_deref(), Some("bitbox02"));
     }
 
     #[test]
@@ -3815,7 +3788,7 @@ mod tests {
         let request =
             parse_args(["hwi", "--device-type", "trezor", "enumerate"]).expect("trezor parses");
 
-        assert_eq!(request.selector.device_type, Some(DeviceType::Trezor));
+        assert_eq!(request.selector.device_type.as_deref(), Some("trezor"));
     }
 
     #[test]
@@ -3836,7 +3809,7 @@ mod tests {
         .expect("setup request");
 
         assert_eq!(request.selector.network, Network::Testnet);
-        assert_eq!(request.selector.device_type, Some(DeviceType::Ledger));
+        assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
         assert_eq!(
             request.command,
             HwiCommand::Setup {
@@ -3852,7 +3825,7 @@ mod tests {
         let request =
             parse_args(["hwi", "--device-type", "bitbox02", "wipe"]).expect("wipe request");
 
-        assert_eq!(request.selector.device_type, Some(DeviceType::BitBox02));
+        assert_eq!(request.selector.device_type.as_deref(), Some("bitbox02"));
         assert_eq!(request.command, HwiCommand::Wipe);
     }
 
@@ -4043,19 +4016,12 @@ mod tests {
 
     #[test]
     fn runtime_errors_keep_their_code_and_exit_zero() {
-        let bad_path = ["hwi", "getxpub", "not_a_path"];
+        let bad_fingerprint = ["hwi", "-f", "not_a_fingerprint", "enumerate"];
         assert_eq!(
-            runtime_error_of(&bad_path).code,
+            runtime_error_of(&bad_fingerprint).code,
             HwiErrorCode::BadArgument.code()
         );
-        assert_eq!(exit_status(&outcome_of(&bad_path)), 0);
-
-        let bad_device = ["hwi", "--device-type", "keepkey", "enumerate"];
-        assert_eq!(
-            runtime_error_of(&bad_device).code,
-            HwiErrorCode::UnknownDevice.code()
-        );
-        assert_eq!(exit_status(&outcome_of(&bad_device)), 0);
+        assert_eq!(exit_status(&outcome_of(&bad_fingerprint)), 0);
     }
 
     #[test]
