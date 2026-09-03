@@ -24,6 +24,9 @@ status are all accounted for.
 
 - Add `bhwi/src/<device>/` with the sans-I/O interpreter and protocol helpers.
 - Export the module from `bhwi/src/lib.rs`.
+- Add a `<device>` Cargo feature to `bhwi` and gate the device module, common
+  adapters, `DeviceContext` variants, interpreter aliases, and other
+  device-specific integration points with `#[cfg(feature = "<device>")]`.
 - Preserve the `Interpreter` flow: `start`, repeated `exchange`, then `end`.
 - Keep device protocol state machines, request encoding, response parsing, and
   device-requested callbacks in the interpreter.
@@ -42,6 +45,9 @@ status are all accounted for.
   outside the core interpreter.
 - Export the async device type from `bhwi-async/src/lib.rs` when it is part of
   the public surface.
+- Add a matching forwarding feature to `bhwi-async`, gate its device module,
+  export, and device-specific transport wiring, and verify both library crates
+  with `--no-default-features --features <device>`.
 - Add `bhwi-cli/src/<device>.rs` with discovery/enumeration and execution
   wiring.
 - Add the device to `DeviceType`, `DeviceType::enumerate`, selector matching,
