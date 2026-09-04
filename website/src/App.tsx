@@ -6,8 +6,9 @@ import ledgerIcon from './assets/devices/ledger-nano.svg';
 import bitboxIcon from './assets/devices/bitbox02.svg';
 import trezorOneIcon from './assets/devices/trezor-one.svg';
 import trezorTIcon from './assets/devices/trezor-model-t.svg';
+import keepkeyIcon from './assets/devices/keepkey.svg';
 
-type DeviceType = 'Coldcard' | 'Jade' | 'Ledger' | 'BitBox02' | 'TrezorOne' | 'TrezorT';
+type DeviceType = 'Coldcard' | 'Jade' | 'Ledger' | 'BitBox02' | 'TrezorOne' | 'TrezorT' | 'KeepKey';
 
 const DEVICE_ICONS: Record<DeviceType, string> = {
     'Coldcard': coldcardIcon,
@@ -16,6 +17,7 @@ const DEVICE_ICONS: Record<DeviceType, string> = {
     'BitBox02': bitboxIcon,
     'TrezorOne': trezorOneIcon,
     'TrezorT': trezorTIcon,
+    'KeepKey': keepkeyIcon,
 };
 type Network = 'bitcoin' | 'testnet';
 
@@ -75,6 +77,9 @@ const App = () => {
     const [jadeNetwork, setJadeNetwork] = useState<Network>('bitcoin');
     const [trezorNetwork, setTrezorNetwork] = useState<Network>('bitcoin');
     const [trezorPassphrase, setTrezorPassphrase] = useState('');
+    const [keepKeyNetwork, setKeepKeyNetwork] = useState<Network>('bitcoin');
+    const [keepKeyPassphrase, setKeepKeyPassphrase] = useState('');
+    const [keepKeyTransport, setKeepKeyTransport] = useState<'webusb' | 'webhid'>('webusb');
     const [derivationPath, setDerivationPath] = useState("m/48'/0'/0'/2'");
     const [xpubResults, setXpubResults] = useState<XpubResult[]>([]);
     const [fetchingXpub, setFetchingXpub] = useState(false);
@@ -133,7 +138,7 @@ const App = () => {
         await client.unlock(network ?? 'bitcoin');
         setPairingCode(null);
 
-        if (type === 'TrezorOne') {
+        if (type === 'TrezorOne' || type === 'KeepKey') {
             const locked = await client.get_info()
                 .then((info) => info.needsPinSent === true)
                 .catch(() => false);
@@ -168,6 +173,9 @@ const App = () => {
         setDerivationPath(`m/48'/${ct}'/0'/2'`);
         setAddressPath(`m/84'/${ct}'/0'/0/0`);
         setSignMsgPath(`m/84'/${ct}'/0'/0/0`);
+        if (type === 'KeepKey' && addressFormat === 'taproot') {
+            setAddressFormat('native-segwit');
+        }
         setDevice({ client, type, masterFingerprint, network: detectedNetwork });
     };
 
@@ -226,6 +234,21 @@ const App = () => {
                     break;
                 case 'BitBox02':
                     await client.connect_bitbox(network ?? 'bitcoin', onCloseCallback, onPairingCodeCallback);
+                    break;
+                case 'KeepKey':
+                    if (keepKeyTransport === 'webusb') {
+                        await client.connect_keepkey_webusb(
+                            network ?? 'bitcoin',
+                            keepKeyPassphrase.length > 0 ? keepKeyPassphrase : undefined,
+                            onCloseCallback,
+                        );
+                    } else {
+                        await client.connect_keepkey_hid(
+                            network ?? 'bitcoin',
+                            keepKeyPassphrase.length > 0 ? keepKeyPassphrase : undefined,
+                            onCloseCallback,
+                        );
+                    }
                     break;
                 case 'TrezorOne':
                     await client.connect_trezor_one(
@@ -453,6 +476,8 @@ const App = () => {
                             {[7, 8, 9, 4, 5, 6, 1, 2, 3].map((position) => (
                                 <button
                                     key={position}
+                                    type="button"
+                                    aria-label={`PIN position ${position}`}
                                     onClick={() => setPinPositions(pinPositions + position)}
                                     className="bg-gray-900 hover:bg-gray-700 rounded-lg py-4 text-xl font-mono transition-colors"
                                 >
@@ -698,7 +723,9 @@ const App = () => {
                                                     <option value="legacy">Legacy (P2PKH) — m/44'/{coinType}'/0'/0/i</option>
                                                     <option value="nested-segwit">Nested SegWit (P2SH-P2WPKH) — m/49'/{coinType}'/0'/0/i</option>
                                                     <option value="native-segwit">Native SegWit (P2WPKH) — m/84'/{coinType}'/0'/0/i</option>
-                                                    <option value="taproot">Taproot (P2TR) — m/86'/{coinType}'/0'/0/i</option>
+                                                    {device.type !== 'KeepKey' && (
+                                                        <option value="taproot">Taproot (P2TR) — m/86'/{coinType}'/0'/0/i</option>
+                                                    )}
                                                 </select>
                                                 <label htmlFor="address-index" className="block text-sm text-gray-400 mb-2">
                                                     Index
@@ -1083,6 +1110,62 @@ const App = () => {
                                     <option value="testnet">Testnet</option>
                                 </select>
                             </label>
+
+                            <div className="flex flex-wrap items-center gap-3 bg-gray-800 px-6 py-3 rounded-lg hover:bg-gray-700 transition-colors">
+                                <input
+                                    id="device-keepkey"
+                                    type="radio"
+                                    name="device"
+                                    checked={selectedDevice === 'KeepKey'}
+                                    onChange={() => setSelectedDevice('KeepKey')}
+                                    className="w-4 h-4 accent-blue-600"
+                                />
+                                <label htmlFor="device-keepkey" className="flex items-center gap-3 cursor-pointer">
+                                    <img src={DEVICE_ICONS['KeepKey']} alt="" className="h-10 w-10 object-contain" />
+                                    <span className="font-medium">KeepKey</span>
+                                </label>
+                                <div className="flex w-full flex-wrap gap-2 sm:ml-auto sm:w-auto">
+                                    <label htmlFor="keepkey-passphrase" className="sr-only">KeepKey passphrase</label>
+                                    <input
+                                        id="keepkey-passphrase"
+                                        type="password"
+                                        value={keepKeyPassphrase}
+                                        placeholder="Passphrase (optional)"
+                                        autoComplete="off"
+                                        onChange={(e) => {
+                                            setKeepKeyPassphrase(e.target.value);
+                                            setSelectedDevice('KeepKey');
+                                        }}
+                                        className="min-w-40 flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-1 text-sm focus:outline-none focus:border-blue-500 sm:w-44 sm:flex-none"
+                                    />
+                                    <label htmlFor="keepkey-network" className="sr-only">KeepKey network</label>
+                                    <select
+                                        id="keepkey-network"
+                                        value={keepKeyNetwork}
+                                        onChange={(e) => {
+                                            setKeepKeyNetwork(e.target.value as Network);
+                                            setSelectedDevice('KeepKey');
+                                        }}
+                                        className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-1 text-sm focus:outline-none focus:border-blue-500 sm:flex-none"
+                                    >
+                                        <option value="bitcoin">Mainnet</option>
+                                        <option value="testnet">Testnet</option>
+                                    </select>
+                                    <label htmlFor="keepkey-transport" className="sr-only">KeepKey transport</label>
+                                    <select
+                                        id="keepkey-transport"
+                                        value={keepKeyTransport}
+                                        onChange={(e) => {
+                                            setKeepKeyTransport(e.target.value as 'webusb' | 'webhid');
+                                            setSelectedDevice('KeepKey');
+                                        }}
+                                        className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-1 text-sm focus:outline-none focus:border-blue-500 sm:flex-none"
+                                    >
+                                        <option value="webusb">WebUSB</option>
+                                        <option value="webhid">WebHID</option>
+                                    </select>
+                                </div>
+                            </div>
                         </div>
 
                         <button
@@ -1092,7 +1175,9 @@ const App = () => {
                                     ? jadeNetwork
                                     : selectedDevice === 'TrezorOne' || selectedDevice === 'TrezorT'
                                         ? trezorNetwork
-                                        : undefined,
+                                        : selectedDevice === 'KeepKey'
+                                            ? keepKeyNetwork
+                                            : undefined,
                             )}
                             disabled={processing}
                             className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3 rounded-lg font-medium transition-colors"

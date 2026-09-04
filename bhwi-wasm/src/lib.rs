@@ -8,17 +8,21 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use bhwi::bitbox::{BITBOX02_PID, BITBOX02_VID};
+use bhwi::keepkey::{
+    KEEPKEY_HID_DEVICE_ID, KEEPKEY_WEBUSB_DEVICE_ID, ManagementContext as KeepKeyManagementContext,
+};
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::miniscript::descriptor::WalletPolicy;
 use bhwi::trezor::{
-    HostPassphrase, HostPin, ManagementContext, TREZOR_DEVICE_ID, TREZOR_ONE_DEVICE_ID,
+    HostPassphrase, HostPin, ManagementContext as TrezorManagementContext, TREZOR_DEVICE_ID,
+    TREZOR_ONE_DEVICE_ID,
 };
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
-    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, Ledger, Trezor, WalletRegistration,
-    bitbox::BitBox, coldcard::Coldcard, transport::bitbox::hid::BitBoxTransportHID,
-    transport::coldcard::hid::ColdcardTransportHID, transport::ledger::hid::LedgerTransportHID,
-    transport::trezor::TrezorTransport,
+    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, KeepKey, Ledger, Trezor,
+    WalletRegistration, bitbox::BitBox, coldcard::Coldcard,
+    transport::bitbox::hid::BitBoxTransportHID, transport::coldcard::hid::ColdcardTransportHID,
+    transport::ledger::hid::LedgerTransportHID, transport::trezor::TrezorTransport,
 };
 use bitcoin::{
     Network,
@@ -80,7 +84,7 @@ pub trait HWI {
     async fn sign_message(&mut self, message: &str, path: &str) -> Result<String, JsValue>;
     async fn get_info(&mut self) -> Result<JsValue, JsValue>;
     async fn prompt_pin(&mut self) -> Result<bool, JsValue>;
-    async fn send_pin(&mut self, positions: &str) -> Result<bool, JsValue>;
+    async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, JsValue>;
 }
 
 #[async_trait(?Send)]
@@ -156,11 +160,8 @@ impl<T: AsyncHWI> HWI for T {
             .map_err(|e| JsValue::from_str(&format!("Failed to prompt PIN: {:?}", e)))
     }
 
-    async fn send_pin(&mut self, positions: &str) -> Result<bool, JsValue> {
-        let pin = HostPin::new(positions.to_owned())
-            .map_err(|e| JsValue::from_str(&format!("Invalid PIN positions: {:?}", e)))?;
-        let context = DeviceContext::TrezorManagement(ManagementContext::Pin(pin));
-        AsyncHWI::send_pin(self, Some(context))
+    async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, JsValue> {
+        AsyncHWI::send_pin(self, context)
             .await
             .map_err(|e| JsValue::from_str(&format!("Failed to send PIN: {:?}", e)))
     }
@@ -206,6 +207,8 @@ pub enum Device {
     BitBox(BitBox<BitBoxTransportHID<webhid::WebHidDevice>>),
     TrezorOne(Trezor<TrezorTransport<webhid::WebHidDevice>>),
     TrezorT(Trezor<TrezorTransport<webusb::WebUsbDevice>>),
+    KeepKeyHid(KeepKey<TrezorTransport<webhid::WebHidDevice>>),
+    KeepKeyWebUsb(KeepKey<TrezorTransport<webusb::WebUsbDevice>>),
 }
 
 impl<'a> AsRef<dyn HWI + 'a> for Device {
@@ -217,6 +220,8 @@ impl<'a> AsRef<dyn HWI + 'a> for Device {
             Device::BitBox(b) => b,
             Device::TrezorOne(t) => t,
             Device::TrezorT(t) => t,
+            Device::KeepKeyHid(k) => k,
+            Device::KeepKeyWebUsb(k) => k,
         }
     }
 }
@@ -230,6 +235,8 @@ impl<'a> AsMut<dyn HWI + 'a> for Device {
             Device::BitBox(b) => b,
             Device::TrezorOne(t) => t,
             Device::TrezorT(t) => t,
+            Device::KeepKeyHid(k) => k,
+            Device::KeepKeyWebUsb(k) => k,
         }
     }
 }
@@ -356,6 +363,54 @@ impl Client {
     }
 
     #[wasm_bindgen]
+    pub async fn connect_keepkey_hid(
+        &mut self,
+        network: &str,
+        passphrase: Option<String>,
+        on_close_cb: JsValue,
+    ) -> Result<(), JsValue> {
+        let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let device = WebHidDevice::get_webhid_device(
+            None,
+            KEEPKEY_HID_DEVICE_ID.vid,
+            KEEPKEY_HID_DEVICE_ID.pid,
+            KEEPKEY_HID_DEVICE_ID.usage_page,
+            on_close_cb,
+        )
+        .await
+        .ok_or(JsValue::from_str("Failed to connect to keepkey via WebHID"))?;
+        self.device = Some(Device::KeepKeyHid(
+            KeepKey::new(TrezorTransport::new(device))
+                .with_network(network)
+                .with_passphrase(passphrase.map(HostPassphrase::new)),
+        ));
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub async fn connect_keepkey_webusb(
+        &mut self,
+        network: &str,
+        passphrase: Option<String>,
+        on_close_cb: JsValue,
+    ) -> Result<(), JsValue> {
+        let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let device = webusb::WebUsbDevice::get_webusb_device(
+            KEEPKEY_WEBUSB_DEVICE_ID.vid,
+            KEEPKEY_WEBUSB_DEVICE_ID.pid,
+            on_close_cb,
+        )
+        .await
+        .ok_or(JsValue::from_str("Failed to connect to keepkey via WebUSB"))?;
+        self.device = Some(Device::KeepKeyWebUsb(
+            KeepKey::new(TrezorTransport::new(device))
+                .with_network(network)
+                .with_passphrase(passphrase.map(HostPassphrase::new)),
+        ));
+        Ok(())
+    }
+
+    #[wasm_bindgen]
     pub async fn connect_jade(
         &mut self,
         network: &str,
@@ -395,10 +450,22 @@ impl Client {
 
     #[wasm_bindgen]
     pub async fn send_pin(&mut self, positions: &str) -> Result<bool, JsValue> {
-        match &mut self.device {
-            Some(d) => d.as_mut().send_pin(positions).await,
-            None => Err(JsValue::from_str("Device not connected")),
-        }
+        let device = self
+            .device
+            .as_mut()
+            .ok_or(JsValue::from_str("Device not connected"))?;
+        let pin = HostPin::new(positions.to_owned())
+            .map_err(|e| JsValue::from_str(&format!("Invalid PIN positions: {:?}", e)))?;
+        let context = match &*device {
+            Device::TrezorOne(_) | Device::TrezorT(_) => Some(DeviceContext::TrezorManagement(
+                TrezorManagementContext::Pin(pin),
+            )),
+            Device::KeepKeyHid(_) | Device::KeepKeyWebUsb(_) => Some(
+                DeviceContext::KeepKeyManagement(KeepKeyManagementContext::Pin(pin)),
+            ),
+            Device::Ledger(_) | Device::Coldcard(_) | Device::Jade(_) | Device::BitBox(_) => None,
+        };
+        device.as_mut().send_pin(context).await
     }
 
     #[wasm_bindgen]
