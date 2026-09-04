@@ -7,11 +7,13 @@ license-file.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bhwi = { workspace = true, features = ["keepkey"] }
 bhwi-async.workspace = true
 bhwi-cli = { path = "../../bhwi-cli" }
 bhwi-e2e-trezor = { path = "../trezor" }
+bhwi-e2e-keepkey = { path = "../keepkey" }
 bitcoin = { workspace = true, features = ["base64"] }
 hex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }

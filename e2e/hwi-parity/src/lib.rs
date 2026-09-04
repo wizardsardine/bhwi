@@ -3,7 +3,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::{Read, Write},
     path::Path,
-    process::{Child, Command, Output, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -19,7 +19,7 @@ pub struct HwiBinary {
     path: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HwiOutput {
     pub status_code: Option<i32>,
     pub stdout: String,
@@ -27,7 +27,7 @@ pub struct HwiOutput {
     pub json: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RawHwiOutput {
     pub status_code: Option<i32>,
     pub stdout: String,
@@ -104,9 +104,23 @@ impl HwiBinary {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_with_stdin_and_envs(args, stdin, &[])
+    }
+
+    fn run_with_stdin_and_envs<I, S>(
+        &self,
+        args: I,
+        stdin: &str,
+        envs: &[(OsString, OsString)],
+    ) -> Result<HwiOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let args = collect_args(args);
         let mut child = Command::new(&self.path)
             .args(&args)
+            .envs(envs.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -158,6 +172,40 @@ where
         .collect()
 }
 
+fn sensitive_command(args: &[OsString]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.to_string_lossy().as_ref(),
+            "signtx"
+                | "sign-psbt"
+                | "--psbt"
+                | "--password"
+                | "-p"
+                | "--backup_passphrase"
+                | "sendpin"
+        )
+    })
+}
+
+fn redacted_args(args: &[OsString]) -> Vec<OsString> {
+    let mut redact_next = false;
+    args.iter()
+        .map(|arg| {
+            if redact_next {
+                redact_next = false;
+                return OsString::from("<redacted>");
+            }
+            if matches!(
+                arg.to_string_lossy().as_ref(),
+                "--password" | "-p" | "--backup_passphrase" | "sendpin" | "signtx" | "--psbt"
+            ) {
+                redact_next = true;
+            }
+            arg.clone()
+        })
+        .collect()
+}
+
 fn command_timeout() -> Duration {
     const DEFAULT_SECS: u64 = 180;
     Duration::from_secs(
@@ -165,6 +213,60 @@ fn command_timeout() -> Duration {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(DEFAULT_SECS),
+    )
+}
+
+/// Waits for `child`, killing and reaping it once the deadline elapses or
+/// `cancelled` asks the owner to stop.
+fn wait_for_child(
+    child: &mut Child,
+    deadline: Instant,
+    mut cancelled: impl FnMut() -> bool,
+) -> std::io::Result<Option<ExitStatus>> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {}
+            Err(error) => {
+                kill_and_reap(child);
+                return Err(error);
+            }
+        }
+        if cancelled() || Instant::now() >= deadline {
+            kill_and_reap(child);
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn timeout_error(
+    label: &str,
+    args: &[OsString],
+    timeout: Duration,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> anyhow::Error {
+    let sensitive = sensitive_command(args);
+    anyhow::anyhow!(
+        "{label} hwi did not exit within {}s and was killed\nargs: {:?}\nstdout so far:\n{}\nstderr so far:\n{}",
+        timeout.as_secs(),
+        redacted_args(args),
+        if sensitive {
+            "<redacted>".to_owned()
+        } else {
+            String::from_utf8_lossy(stdout).into_owned()
+        },
+        if sensitive {
+            "<redacted>".to_owned()
+        } else {
+            String::from_utf8_lossy(stderr).into_owned()
+        }
     )
 }
 
@@ -178,36 +280,17 @@ fn wait_with_timeout(
 ) -> Result<Output> {
     let stdout = reader_thread(child.stdout.take());
     let stderr = reader_thread(child.stderr.take());
-    let deadline = Instant::now() + timeout;
-
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break Some(status);
-        }
-        if Instant::now() >= deadline {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-
-    let Some(status) = status else {
-        let _ = child.kill();
-        let _ = child.wait();
-        let stdout = join_reader(stdout);
-        let stderr = join_reader(stderr);
-        bail!(
-            "{label} hwi did not exit within {}s and was killed\nargs: {:?}\nstdout so far:\n{}\nstderr so far:\n{}",
-            timeout.as_secs(),
-            args,
-            String::from_utf8_lossy(&stdout),
-            String::from_utf8_lossy(&stderr)
-        );
+    let wait = wait_for_child(&mut child, Instant::now() + timeout, || false);
+    let stdout = join_reader(stdout);
+    let stderr = join_reader(stderr);
+    let Some(status) = wait? else {
+        return Err(timeout_error(label, args, timeout, &stdout, &stderr));
     };
 
     Ok(Output {
         status,
-        stdout: join_reader(stdout),
-        stderr: join_reader(stderr),
+        stdout,
+        stderr,
     })
 }
 
@@ -261,12 +344,8 @@ fn parse_output(label: &str, output: Output) -> Result<HwiOutput> {
         .with_context(|| format!("{label} hwi wrote non-utf8 stdout"))?;
     let stderr = String::from_utf8(output.stderr)
         .with_context(|| format!("{label} hwi wrote non-utf8 stderr"))?;
-    let json = serde_json::from_str(stdout.trim()).with_context(|| {
-        format!(
-            "{label} hwi stdout was not JSON\nstatus: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            output.status
-        )
-    })?;
+    let json = serde_json::from_str(stdout.trim())
+        .with_context(|| format!("{label} hwi stdout was not JSON (output redacted)"))?;
 
     Ok(HwiOutput {
         status_code: output.status.code(),
@@ -279,10 +358,8 @@ fn parse_output(label: &str, output: Output) -> Result<HwiOutput> {
 fn assert_success(label: &str, output: &HwiOutput) -> Result<()> {
     if output.status_code != Some(0) {
         bail!(
-            "{label} hwi exited unsuccessfully\nstatus: {:?}\nstdout:\n{}\nstderr:\n{}",
-            output.status_code,
-            output.stdout,
-            output.stderr
+            "{label} hwi exited unsuccessfully with status {:?} (output redacted)",
+            output.status_code
         );
     }
     Ok(())
@@ -295,7 +372,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::{
         fs,
-        io::{Read, Write},
+        io::{BufRead, BufReader, Read, Write},
         net::UdpSocket,
         os::unix::net::UnixDatagram,
         path::{Path, PathBuf},
@@ -303,10 +380,16 @@ mod tests {
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
         },
         time::{Duration, Instant},
     };
 
+    use bhwi_e2e_keepkey::debuglink::{
+        DEFAULT_DEBUGLINK_ADDR as KEEPKEY_DEBUGLINK_ADDR, DEFAULT_MAIN_ADDR as KEEPKEY_MAIN_ADDR,
+        DebugLink as KeepKeyDebugLink, KeepKeyHostInteraction, SYNTHETIC_MNEMONIC,
+        lock_device as lock_keepkey,
+    };
     use bhwi_e2e_trezor::debuglink::{DEFAULT_DEBUGLINK_ADDR, DebugButton, button_reports};
 
     use bitcoin::{
@@ -324,23 +407,112 @@ mod tests {
         transaction::Version as TxVersion,
     };
 
+    const KEEPKEY_FINGERPRINT: &str = "95d8f670";
+    const KEEPKEY_PIN: &str = "1234";
+    const KEEPKEY_XPUB_44: &str = "tpubDCknDegFqAdP4V2AhHhs635DPe8N1aTjfKE9m2UFbdej8zmeNbtqDzK59SxnsYSRSx5uS3AujbwgANUiAk4oHmDNUKoGGkWWUY6c48WgjEx";
+    const KEEPKEY_ENUMERATE_ERROR_PREFIX: &str =
+        "Could not open client or get fingerprint information: ";
+
+    fn normalize_keepkey_enumerate_error(mut value: Value) -> Value {
+        if let Some(devices) = value.as_array_mut() {
+            for device in devices {
+                let Some(device) = device.as_object_mut() else {
+                    continue;
+                };
+                if device.get("type").and_then(Value::as_str) != Some("keepkey") {
+                    continue;
+                }
+                if let Some(Value::String(error)) = device.get_mut("error")
+                    && error.starts_with(KEEPKEY_ENUMERATE_ERROR_PREFIX)
+                {
+                    error.replace_range(..KEEPKEY_ENUMERATE_ERROR_PREFIX.len(), "");
+                }
+            }
+        }
+        value
+    }
+
+    #[test]
+    fn sensitive_hwi_arguments_are_redacted() {
+        let args = ["--password", "secret", "signtx", "raw-psbt"].map(OsString::from);
+        assert!(sensitive_command(&args));
+        assert_eq!(
+            redacted_args(&args),
+            ["--password", "<redacted>", "signtx", "<redacted>"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn normalize_keepkey_enumerate_error_preserves_unrelated_values() {
+        let input = serde_json::json!([
+            {
+                "type": "keepkey",
+                "error": "Could not open client or get fingerprint information: Passphrase too long",
+                "code": -7,
+                "sibling": {
+                    "error": "Could not open client or get fingerprint information: nested"
+                }
+            },
+            {
+                "type": "keepkey",
+                "error": "an unrelated KeepKey error",
+                "code": -13
+            },
+            {
+                "type": "trezor",
+                "error": "Could not open client or get fingerprint information: unchanged",
+                "code": -12
+            },
+            "unchanged"
+        ]);
+        let expected = serde_json::json!([
+            {
+                "type": "keepkey",
+                "error": "Passphrase too long",
+                "code": -7,
+                "sibling": {
+                    "error": "Could not open client or get fingerprint information: nested"
+                }
+            },
+            {
+                "type": "keepkey",
+                "error": "an unrelated KeepKey error",
+                "code": -13
+            },
+            {
+                "type": "trezor",
+                "error": "Could not open client or get fingerprint information: unchanged",
+                "code": -12
+            },
+            "unchanged"
+        ]);
+
+        assert_eq!(normalize_keepkey_enumerate_error(input), expected);
+    }
+
     #[test]
     fn commands_that_never_exit_are_killed() -> Result<()> {
-        let child = Command::new("sh")
-            .args(["-c", "sleep 30"])
+        let mut child = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        let stdout = reader_thread(child.stdout.take());
+        let stderr = reader_thread(child.stderr.take());
 
-        let error = wait_with_timeout(
-            child,
-            "candidate",
-            &[OsString::from("sleep")],
-            Duration::from_millis(200),
-        )
-        .expect_err("a command that never exits must fail");
+        let status = wait_for_child(
+            &mut child,
+            Instant::now() + Duration::from_millis(200),
+            || false,
+        )?;
 
-        assert!(error.to_string().contains("did not exit within"), "{error}");
+        assert!(status.is_none(), "a command that never exits must time out");
+        assert!(
+            child.try_wait()?.is_some(),
+            "timed out child must be reaped"
+        );
+        assert!(join_reader(stdout).is_empty());
+        assert!(join_reader(stderr).is_empty());
         Ok(())
     }
 
@@ -509,6 +681,36 @@ mod tests {
     }
 
     #[test]
+    fn candidate_keepkey_enumerate_contract_is_exact() -> Result<()> {
+        if env::var("HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("keepkey")
+        {
+            return Ok(());
+        }
+        let command = args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            "keepkey",
+            "enumerate",
+        ]);
+        for binary in [HwiBinary::reference()?, HwiBinary::candidate()?] {
+            let output = binary.run(command.clone())?;
+            assert_success(binary.label, &output)?;
+            let device = assert_enumerate_contains_device(binary.label, &output.json, "keepkey")?;
+            assert_eq!(device["type"], "keepkey");
+            assert_eq!(device["model"], "keepkey_simulator");
+            assert_eq!(device["path"], KEEPKEY_MAIN_ADDR);
+            assert_eq!(device["label"], "test");
+            assert_eq!(device["fingerprint"], KEEPKEY_FINGERPRINT);
+            assert_eq!(device["needs_pin_sent"], false);
+            assert_eq!(device["needs_passphrase_sent"], false);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn candidate_enumerate_accepts_python_hwi_global_args() -> Result<()> {
         if env::var("HWI_BIN").is_err() {
             return Ok(());
@@ -598,6 +800,35 @@ mod tests {
             assert_getdescriptors_parity(args.clone())
                 .with_context(|| format!("getdescriptors parity failed for args: {args:?}"))?;
         }
+        if device_type == "keepkey" {
+            let json = assert_json_parity_value(
+                getdescriptors_arg_cases(&device_type)
+                    .into_iter()
+                    .next()
+                    .expect("KeepKey descriptor case"),
+            )?;
+            for field in ["receive", "internal"] {
+                let descriptors = json[field]
+                    .as_array()
+                    .context("KeepKey descriptor list is not an array")?;
+                assert_eq!(descriptors.len(), 3, "{field} KeepKey descriptors");
+                for prefix in ["pkh(", "sh(wpkh(", "wpkh("] {
+                    assert!(
+                        descriptors
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|descriptor| descriptor.starts_with(prefix)),
+                        "missing KeepKey {prefix} descriptor"
+                    );
+                }
+                assert!(
+                    descriptors
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .all(|descriptor| !descriptor.starts_with("tr("))
+                );
+            }
+        }
 
         Ok(())
     }
@@ -655,6 +886,25 @@ mod tests {
             let mixed = build_ledger_mixed_policy_signtx_case(&device_type)?;
             assert_signtx_parity(signtx_args(&device_type, &mixed.psbt), &mixed)
                 .context("signtx Ledger mixed-policy parity failed")?;
+        } else if device_type == "keepkey" {
+            for wrapper in [
+                LedgerSinglesigWrapper::Legacy,
+                LedgerSinglesigWrapper::ShWit,
+                LedgerSinglesigWrapper::Wit,
+            ] {
+                let case = build_singlesig_signtx_case(&device_type, wrapper)?;
+                assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case)
+                    .with_context(|| format!("signtx KeepKey {wrapper:?} parity failed"))?;
+            }
+            for wrapper in LedgerMultisigWrapper::ALL {
+                let case = build_keepkey_multisig_signtx_case(&device_type, wrapper)?;
+                assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case).with_context(
+                    || format!("signtx KeepKey {wrapper:?} multisig parity failed"),
+                )?;
+            }
+            let mixed = build_mixed_singlesig_signtx_case(&device_type)?;
+            assert_signtx_parity(signtx_args(&device_type, &mixed.psbt), &mixed)
+                .context("signtx KeepKey mixed legacy/SegWit parity failed")?;
         } else {
             let singlesig = build_singlesig_signtx_case(&device_type, LedgerSinglesigWrapper::Wit)?;
             assert_signtx_parity(signtx_args(&device_type, &singlesig.psbt), &singlesig)
@@ -720,7 +970,7 @@ mod tests {
         };
         // Jade and BitBox reject automation is not wired; their cancel paths
         // are covered by protocol unit tests (docs/HWI_PARITY.md).
-        if device_type != "ledger" && device_type != "coldcard" {
+        if !matches!(device_type.as_str(), "ledger" | "coldcard" | "keepkey") {
             return Ok(());
         }
 
@@ -737,6 +987,40 @@ mod tests {
                 displayaddress_path_args(&device_type, "wit", "m/84h/1h/0h/0/0"),
             ),
         ];
+
+        if device_type == "keepkey" {
+            for (command, case) in cases {
+                let refusal = spawn_debug_approval(
+                    KEEPKEY_DEBUGLINK_ADDR,
+                    DebugButton::No,
+                    Instant::now() + command_timeout(),
+                );
+                let output = HwiBinary::candidate()?.run(case)?;
+                drop(refusal);
+                assert_success("candidate", &output)?;
+                assert_eq!(
+                    output.json,
+                    ExpectedHwiError {
+                        code: -14,
+                        error: "authentication refused",
+                    }
+                    .json(),
+                    "{command} refusal"
+                );
+                let healthy = HwiBinary::candidate()?.run(args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    "keepkey",
+                    "getxpub",
+                    "m/44h/1h/0h",
+                ]))?;
+                assert_success("candidate", &healthy)?;
+                assert_eq!(healthy.json["xpub"], KEEPKEY_XPUB_44);
+            }
+            return Ok(());
+        }
 
         // Pinned upstream behavior per device/command: Ledger's DenyError
         // bypasses ledger_exception (-13). A refused Coldcard signtx is
@@ -969,6 +1253,669 @@ mod tests {
                 .map(str::to_owned)
                 .collect::<Vec<_>>(),
         )?;
+        Ok(())
+    }
+
+    struct KeepKeyPassphraseStateGuard {
+        armed: bool,
+    }
+
+    impl KeepKeyPassphraseStateGuard {
+        fn restore(mut self) -> Result<()> {
+            self.restore_keepkey_passphrase_disabled()?;
+            self.armed = false;
+            Ok(())
+        }
+
+        fn restore_keepkey_passphrase_disabled(&self) -> Result<()> {
+            let output = HwiBinary::reference()?.run(keepkey_enumerate_args(None))?;
+            assert_success("reference", &output)?;
+            let device = assert_enumerate_contains_device("reference", &output.json, "keepkey")?;
+            let single_device = output
+                .json
+                .as_array()
+                .is_some_and(|devices| devices.len() == 1);
+            let passphrase_required = single_device
+                && device.get("code").and_then(Value::as_i64) == Some(-12)
+                && device.get("error").and_then(Value::as_str)
+                    == Some(
+                        "Could not open client or get fingerprint information: Passphrase needs to be specified before the fingerprint information can be retrieved",
+                    )
+                && device.get("needs_pin_sent").and_then(Value::as_bool) == Some(false)
+                && device.get("needs_passphrase_sent").and_then(Value::as_bool) == Some(true)
+                && device.get("fingerprint").is_none();
+            if passphrase_required {
+                let toggle = run_candidate_keepkey_approved(&["-p", "", "togglepassphrase"])?;
+                if toggle.json != serde_json::json!({"success": true}) {
+                    bail!("candidate hwi failed to disable KeepKey passphrases");
+                }
+                return Ok(());
+            }
+
+            let already_disabled = single_device
+                && device.get("code").is_none()
+                && device.get("error").is_none()
+                && device.get("fingerprint").and_then(Value::as_str).is_some()
+                && device.get("needs_pin_sent").and_then(Value::as_bool) == Some(false)
+                && device.get("needs_passphrase_sent").and_then(Value::as_bool) == Some(false);
+            if !already_disabled {
+                bail!("could not establish the KeepKey passphrase state during cleanup");
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for KeepKeyPassphraseStateGuard {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = self.restore_keepkey_passphrase_disabled();
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_keepkey_management_matches_reference() -> Result<()> {
+        if env::var("HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("keepkey")
+        {
+            return Ok(());
+        }
+        let base = ["--emulators", "--chain", "test", "--device-type", "keepkey"];
+        for command in [
+            vec!["setup"],
+            vec!["--interactive", "setup", "--label", "Already initialized"],
+            vec!["restore"],
+            vec!["--interactive", "restore", "--word_count", "12"],
+            vec!["promptpin"],
+            vec!["sendpin", "1234"],
+            vec!["backup"],
+        ] {
+            assert_error_json_parity(base.into_iter().chain(command).map(str::to_owned).collect())?;
+        }
+
+        let toggle = base
+            .into_iter()
+            .chain(["togglepassphrase"])
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let reference = HwiBinary::reference()?.run(toggle)?;
+        let cleanup = KeepKeyPassphraseStateGuard { armed: true };
+        assert_success("reference", &reference)?;
+        assert_eq!(reference.json, serde_json::json!({"success": true}));
+
+        let mut passphrase_fingerprints = Vec::new();
+        for (index, password) in [
+            None,
+            Some(""),
+            Some("fixture-passphrase-one"),
+            Some("fixture-passphrase-two"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let enumerate = keepkey_enumerate_args(password);
+            let reference_enumerate = HwiBinary::reference()?.run(enumerate.clone())?;
+            let approval = spawn_debug_approval(
+                KEEPKEY_DEBUGLINK_ADDR,
+                DebugButton::Yes,
+                Instant::now() + command_timeout(),
+            );
+            let candidate_enumerate = HwiBinary::candidate()
+                .and_then(|binary| binary.run(enumerate))
+                .with_context(|| format!("candidate passphrase case {index}"))?;
+            drop(approval);
+            assert_success("reference", &reference_enumerate)?;
+            assert_success("candidate", &candidate_enumerate)?;
+            assert_enumerate_array("reference", &reference_enumerate.json)?;
+            assert_enumerate_array("candidate", &candidate_enumerate.json)?;
+            assert_eq!(
+                normalize_keepkey_enumerate_error(reference_enumerate.json.clone()),
+                normalize_keepkey_enumerate_error(candidate_enumerate.json.clone()),
+                "KeepKey passphrase enumerate case {index}"
+            );
+
+            let device = assert_enumerate_contains_device(
+                "candidate",
+                &candidate_enumerate.json,
+                "keepkey",
+            )?;
+            if password.is_none() {
+                let reference_device = assert_enumerate_contains_device(
+                    "reference",
+                    &reference_enumerate.json,
+                    "keepkey",
+                )?;
+                assert_eq!(reference_device["code"], -12);
+                assert_eq!(
+                    reference_device["error"],
+                    "Could not open client or get fingerprint information: Passphrase needs to be specified before the fingerprint information can be retrieved"
+                );
+                assert_eq!(device["code"], -12);
+                assert_eq!(
+                    device["error"],
+                    "Passphrase needs to be specified before the fingerprint information can be retrieved"
+                );
+            } else {
+                passphrase_fingerprints
+                    .push(assert_string_field("candidate", device, "fingerprint")?.to_owned());
+            }
+        }
+        assert_eq!(passphrase_fingerprints[0], KEEPKEY_FINGERPRINT);
+        assert_ne!(passphrase_fingerprints[1], passphrase_fingerprints[0]);
+        assert_ne!(passphrase_fingerprints[2], passphrase_fingerprints[0]);
+        assert_ne!(passphrase_fingerprints[1], passphrase_fingerprints[2]);
+
+        let too_long = "x".repeat(51);
+        let enumerate = keepkey_enumerate_args(Some(&too_long));
+        let reference_error = HwiBinary::reference()?.run(enumerate.clone())?;
+        let candidate_error = HwiBinary::candidate()?.run(enumerate)?;
+        assert_success("reference", &reference_error)?;
+        assert_success("candidate", &candidate_error)?;
+        assert_enumerate_array("reference", &reference_error.json)?;
+        assert_enumerate_array("candidate", &candidate_error.json)?;
+        assert_eq!(
+            normalize_keepkey_enumerate_error(reference_error.json.clone()),
+            normalize_keepkey_enumerate_error(candidate_error.json.clone()),
+            "51-byte KeepKey passphrase enumerate"
+        );
+        let reference_device =
+            assert_enumerate_contains_device("reference", &reference_error.json, "keepkey")?;
+        assert_eq!(reference_device["code"], -7);
+        assert_eq!(
+            reference_device["error"],
+            "Could not open client or get fingerprint information: Passphrase too long"
+        );
+        let device =
+            assert_enumerate_contains_device("candidate", &candidate_error.json, "keepkey")?;
+        assert_eq!(device["code"], -7);
+        assert_eq!(device["error"], "Passphrase too long");
+
+        cleanup.restore()
+    }
+
+    struct KeepKeyInteractiveOutput {
+        output: HwiOutput,
+        pin_kinds: Vec<bhwi::common::PinMatrixRequestKind>,
+        recovery_requests: usize,
+    }
+
+    fn keepkey_runtime() -> Result<tokio::runtime::Runtime> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build KeepKey parity runtime")
+    }
+
+    fn keepkey_args(command: &[&str]) -> Vec<String> {
+        [
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            "keepkey",
+            "--device-path",
+            KEEPKEY_MAIN_ADDR,
+        ]
+        .into_iter()
+        .chain(command.iter().copied())
+        .map(str::to_owned)
+        .collect()
+    }
+
+    fn keepkey_prompt_request(line: &str) -> Result<Option<bhwi::common::HostRequest>> {
+        use bhwi::common::{HostRequest, PinMatrixRequestKind};
+
+        let request = match line {
+            "Enter current PIN positions:" => Some(HostRequest::PinMatrix {
+                kind: PinMatrixRequestKind::Current,
+            }),
+            "Enter new PIN positions:" => Some(HostRequest::PinMatrix {
+                kind: PinMatrixRequestKind::NewFirst,
+            }),
+            "Re-enter new PIN positions:" => Some(HostRequest::PinMatrix {
+                kind: PinMatrixRequestKind::NewSecond,
+            }),
+            _ => None,
+        };
+        const PIN_DESCRIPTION: &str =
+            "Use the numeric keypad to describe number positions. The layout is:
+    7 8 9
+    4 5 6
+    1 2 3";
+        if request.is_some() || PIN_DESCRIPTION.lines().any(|known| known == line) {
+            return Ok(request);
+        }
+        const PREFIX: &str = "Recovery word ";
+        const MIDDLE: &str = ", character ";
+        const SUFFIX: &str = " (letter/space/backspace/done):";
+        if let Some(value) = line
+            .strip_prefix(PREFIX)
+            .and_then(|line| line.strip_suffix(SUFFIX))
+        {
+            let (word, character) = value
+                .split_once(MIDDLE)
+                .context("invalid KeepKey recovery prompt")?;
+            return Ok(Some(HostRequest::RecoveryCharacter {
+                word_position: word.parse().context("invalid recovery word position")?,
+                character_position: character
+                    .parse()
+                    .context("invalid recovery character position")?,
+            }));
+        }
+        bail!("unexpected KeepKey host prompt")
+    }
+
+    fn run_candidate_keepkey_interactive(command: &[&str]) -> Result<KeepKeyInteractiveOutput> {
+        let binary = HwiBinary::candidate()?;
+        let args = keepkey_args(command);
+        let runtime = keepkey_runtime()?;
+        let mut interaction = runtime.block_on(KeepKeyHostInteraction::connect_default(
+            KEEPKEY_PIN,
+            SYNTHETIC_MNEMONIC,
+        ))?;
+        let mut child = Command::new(&binary.path)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawn candidate KeepKey hwi")?;
+        let timeout = command_timeout();
+        let deadline = Instant::now() + timeout;
+        let approval = spawn_debug_approval(KEEPKEY_DEBUGLINK_ADDR, DebugButton::Yes, deadline);
+        let mut stdin = child.stdin.take().context("missing candidate hwi stdin")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("missing candidate hwi stdout")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("missing candidate hwi stderr")?;
+        let stdout = reader_thread(Some(stdout));
+        let (prompt_status_tx, prompt_status_rx) = mpsc::channel();
+        let prompt = std::thread::spawn(move || {
+            let interaction_result = (|| -> Result<_> {
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                let mut pin_kinds = Vec::new();
+                let mut recovery_requests = 0;
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line)? == 0 {
+                        return Ok((pin_kinds, recovery_requests));
+                    }
+                    let line = line.trim_end_matches(['\r', '\n']);
+                    let Some(request) = keepkey_prompt_request(line)? else {
+                        continue;
+                    };
+                    match &request {
+                        bhwi::common::HostRequest::PinMatrix { kind } => pin_kinds.push(*kind),
+                        bhwi::common::HostRequest::RecoveryCharacter { .. } => {
+                            recovery_requests += 1;
+                        }
+                    }
+                    let response = runtime
+                        .block_on(interaction.response_line(&request))
+                        .map_err(|_| anyhow::anyhow!("failed to answer KeepKey host prompt"))?;
+                    stdin
+                        .write_all(response.as_bytes())
+                        .context("write KeepKey host response")?;
+                    stdin.flush().context("flush KeepKey host response")?;
+                }
+            })();
+            let _ = prompt_status_tx.send(interaction_result.is_err());
+            interaction_result
+        });
+
+        let mut prompt_reported = false;
+        let mut prompt_cancelled = false;
+        let wait = wait_for_child(&mut child, deadline, || {
+            if prompt_reported {
+                return prompt_cancelled;
+            }
+            match prompt_status_rx.try_recv() {
+                Ok(failed) => {
+                    prompt_reported = true;
+                    prompt_cancelled = failed;
+                    failed
+                }
+                Err(mpsc::TryRecvError::Empty) => false,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    prompt_cancelled = true;
+                    true
+                }
+            }
+        });
+        drop(approval);
+        let stdout_bytes = join_reader(stdout);
+        let interaction_result = match prompt.join() {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("candidate KeepKey prompt worker panicked")),
+        };
+        let status = wait.context("wait for candidate KeepKey hwi")?;
+        let status = match status {
+            Some(status) => status,
+            None if prompt_cancelled => match interaction_result {
+                Err(error) => return Err(error),
+                Ok(_) => bail!("candidate KeepKey prompt worker stopped"),
+            },
+            None => {
+                let diagnostic_args = args
+                    .iter()
+                    .map(|arg| OsString::from(arg.as_str()))
+                    .collect::<Vec<_>>();
+                return Err(timeout_error(
+                    "candidate",
+                    &diagnostic_args,
+                    timeout,
+                    &stdout_bytes,
+                    &[],
+                ));
+            }
+        };
+        let (pin_kinds, recovery_requests) = interaction_result?;
+        let output = parse_output(
+            "candidate",
+            Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: Vec::new(),
+            },
+        )?;
+        assert_success("candidate", &output)?;
+
+        Ok(KeepKeyInteractiveOutput {
+            output,
+            pin_kinds,
+            recovery_requests,
+        })
+    }
+
+    fn run_candidate_keepkey_approved(command: &[&str]) -> Result<HwiOutput> {
+        let approval = spawn_debug_approval(
+            KEEPKEY_DEBUGLINK_ADDR,
+            DebugButton::Yes,
+            Instant::now() + command_timeout(),
+        );
+        let output = HwiBinary::candidate()?.run(keepkey_args(command));
+        drop(approval);
+        let output = output?;
+        assert_success("candidate", &output)?;
+        Ok(output)
+    }
+
+    fn keepkey_debug_pin() -> Result<String> {
+        keepkey_runtime()?.block_on(async {
+            KeepKeyDebugLink::connect_default()
+                .await?
+                .pin_positions(KEEPKEY_PIN)
+                .await
+                .map_err(anyhow::Error::from)
+        })
+    }
+
+    fn lock_keepkey_device() -> Result<()> {
+        keepkey_runtime()?.block_on(lock_keepkey(KEEPKEY_MAIN_ADDR))?;
+        Ok(())
+    }
+
+    fn candidate_keepkey_send_pin(positions: String) -> Result<HwiOutput> {
+        let mut args = keepkey_args(&["sendpin"]);
+        args.push(positions);
+        let output = HwiBinary::candidate()?.run(args)?;
+        assert_success("candidate", &output)?;
+        Ok(output)
+    }
+
+    fn keepkey_enumerate_args(password: Option<&str>) -> Vec<String> {
+        let mut args = args(["--emulators", "--chain", "test"]);
+        if let Some(password) = password {
+            args.extend(["--password".to_owned(), password.to_owned()]);
+        }
+        args.extend([
+            "--device-type".to_owned(),
+            "keepkey".to_owned(),
+            "--device-path".to_owned(),
+            KEEPKEY_MAIN_ADDR.to_owned(),
+            "enumerate".to_owned(),
+        ]);
+        args
+    }
+
+    fn candidate_keepkey_enumerate(password: Option<&str>) -> Result<HwiOutput> {
+        let approval = spawn_debug_approval(
+            KEEPKEY_DEBUGLINK_ADDR,
+            DebugButton::Yes,
+            Instant::now() + command_timeout(),
+        );
+        let output = HwiBinary::candidate()?.run(keepkey_enumerate_args(password));
+        drop(approval);
+        let output = output?;
+        assert_success("candidate", &output)?;
+        Ok(output)
+    }
+
+    #[test]
+    fn keepkey_prompt_markers_are_exact() -> Result<()> {
+        use bhwi::common::{HostRequest, PinMatrixRequestKind};
+        assert_eq!(
+            keepkey_prompt_request("Enter new PIN positions:")?,
+            Some(HostRequest::PinMatrix {
+                kind: PinMatrixRequestKind::NewFirst,
+            })
+        );
+        assert_eq!(
+            keepkey_prompt_request("Recovery word 3, character 4 (letter/space/backspace/done):")?,
+            Some(HostRequest::RecoveryCharacter {
+                word_position: 3,
+                character_position: 4,
+            })
+        );
+        assert!(keepkey_prompt_request("unexpected").is_err());
+        Ok(())
+    }
+    fn candidate_keepkey_fingerprint(output: &HwiOutput) -> Result<&str> {
+        let device = assert_enumerate_contains_device("candidate", &output.json, "keepkey")?;
+        assert_string_field("candidate", device, "fingerprint")
+    }
+
+    #[test]
+    #[ignore = "requires a fresh KeepKey emulator image"]
+    fn candidate_keepkey_management_lifecycle() -> Result<()> {
+        use bhwi::common::PinMatrixRequestKind;
+
+        if env::var("HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("keepkey")
+        {
+            return Ok(());
+        }
+        let setup = run_candidate_keepkey_interactive(&[
+            "--interactive",
+            "setup",
+            "--label",
+            "BHWI KeepKey Parity",
+        ])?;
+        assert_success("candidate", &setup.output)?;
+        assert_eq!(setup.output.json, serde_json::json!({"success": true}));
+        assert_eq!(
+            setup.pin_kinds.as_slice(),
+            &[
+                PinMatrixRequestKind::NewFirst,
+                PinMatrixRequestKind::NewSecond
+            ]
+        );
+        let enumerated = candidate_keepkey_enumerate(None)?;
+        let device = assert_enumerate_contains_device("candidate", &enumerated.json, "keepkey")?;
+        assert_eq!(device["label"], "BHWI KeepKey Parity");
+
+        let wiped = run_candidate_keepkey_approved(&["wipe"])?;
+        assert_success("candidate", &wiped)?;
+        assert_eq!(wiped.json, serde_json::json!({"success": true}));
+        let restored = run_candidate_keepkey_interactive(&[
+            "--interactive",
+            "restore",
+            "--label",
+            "BHWI KeepKey Parity Restored",
+            "--word_count",
+            "12",
+        ])?;
+        assert_success("candidate", &restored.output)?;
+        assert_eq!(restored.output.json, serde_json::json!({"success": true}));
+        assert_eq!(
+            restored.pin_kinds.as_slice(),
+            &[
+                PinMatrixRequestKind::NewFirst,
+                PinMatrixRequestKind::NewSecond
+            ]
+        );
+        assert!(restored.recovery_requests >= 12);
+        let enumerated = candidate_keepkey_enumerate(None)?;
+        let device = assert_enumerate_contains_device("candidate", &enumerated.json, "keepkey")?;
+        assert_eq!(device["fingerprint"], KEEPKEY_FINGERPRINT);
+        assert_eq!(device["label"], "BHWI KeepKey Parity Restored");
+
+        lock_keepkey_device()?;
+        let locked = candidate_keepkey_enumerate(None)?;
+        let device = assert_enumerate_contains_device("candidate", &locked.json, "keepkey")?;
+        assert_eq!(device["code"], -12);
+        assert_eq!(
+            device["error"],
+            "Keepkey is locked. Unlock by using 'promptpin' and then 'sendpin'."
+        );
+        let prompt = HwiBinary::candidate()?.run(keepkey_args(&["promptpin"]))?;
+        assert_success("candidate", &prompt)?;
+        assert_eq!(prompt.json, serde_json::json!({"success": true}));
+        let correct = candidate_keepkey_send_pin(keepkey_debug_pin()?)?;
+        assert_success("candidate", &correct)?;
+        assert_eq!(correct.json, serde_json::json!({"success": true}));
+
+        lock_keepkey_device()?;
+        let toggle = run_candidate_keepkey_approved(&["togglepassphrase"])?;
+        assert_eq!(toggle.json, serde_json::json!({"success": true}));
+        let correct = candidate_keepkey_send_pin(keepkey_debug_pin()?)?;
+        assert_success("candidate", &correct)?;
+        assert_eq!(correct.json, serde_json::json!({"success": true}));
+        let missing = candidate_keepkey_enumerate(None)?;
+        let device = assert_enumerate_contains_device("candidate", &missing.json, "keepkey")?;
+        assert_eq!(device["code"], -12);
+        assert_eq!(
+            device["error"],
+            "Passphrase needs to be specified before the fingerprint information can be retrieved"
+        );
+        let empty = candidate_keepkey_enumerate(Some(""))?;
+        let first = candidate_keepkey_enumerate(Some("fixture-passphrase-one"))?;
+        let second = candidate_keepkey_enumerate(Some("fixture-passphrase-two"))?;
+        assert_success("candidate", &empty)?;
+        assert_success("candidate", &first)?;
+        assert_success("candidate", &second)?;
+        assert_eq!(candidate_keepkey_fingerprint(&empty)?, KEEPKEY_FINGERPRINT);
+        assert_ne!(candidate_keepkey_fingerprint(&first)?, KEEPKEY_FINGERPRINT);
+        assert_ne!(candidate_keepkey_fingerprint(&second)?, KEEPKEY_FINGERPRINT);
+        assert_ne!(
+            candidate_keepkey_fingerprint(&first)?,
+            candidate_keepkey_fingerprint(&second)?
+        );
+
+        lock_keepkey_device()?;
+        let toggle = run_candidate_keepkey_approved(&["togglepassphrase"])?;
+        assert_eq!(toggle.json, serde_json::json!({"success": true}));
+        let correct = candidate_keepkey_send_pin(keepkey_debug_pin()?)?;
+        assert_success("candidate", &correct)?;
+        assert_eq!(correct.json, serde_json::json!({"success": true}));
+        let final_state = candidate_keepkey_enumerate(Some("ignored-when-disabled"))?;
+        assert_eq!(
+            candidate_keepkey_fingerprint(&final_state)?,
+            KEEPKEY_FINGERPRINT
+        );
+        lock_keepkey_device()?;
+        let prompt = HwiBinary::candidate()?.run(keepkey_args(&["promptpin"]))?;
+        assert_success("candidate", &prompt)?;
+        assert_eq!(prompt.json, serde_json::json!({"success": true}));
+        let wrong = candidate_keepkey_send_pin("1111".into())?;
+        assert_success("candidate", &wrong)?;
+        assert_eq!(wrong.json, serde_json::json!({"success": false}));
+
+        lock_keepkey_device()?;
+        let prompt = HwiBinary::candidate()?.run(keepkey_args(&["promptpin"]))?;
+        assert_success("candidate", &prompt)?;
+        assert_eq!(prompt.json, serde_json::json!({"success": true}));
+        let correct = candidate_keepkey_send_pin(keepkey_debug_pin()?)?;
+        assert_success("candidate", &correct)?;
+        assert_eq!(correct.json, serde_json::json!({"success": true}));
+        let recovered = candidate_keepkey_enumerate(None)?;
+        let device = assert_enumerate_contains_device("candidate", &recovered.json, "keepkey")?;
+        assert_eq!(device["fingerprint"], KEEPKEY_FINGERPRINT);
+        assert_eq!(device["needs_pin_sent"], false);
+
+        Ok(())
+    }
+
+    struct RemoveDirectoryOnDrop(PathBuf);
+
+    impl Drop for RemoveDirectoryOnDrop {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a fresh uninitialized KeepKey emulator"]
+    fn reference_keepkey_restore_probe() -> Result<()> {
+        if env::var("REFERENCE_HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("keepkey")
+        {
+            return Ok(());
+        }
+
+        let expected_uninitialized = serde_json::json!([{
+            "type": "keepkey",
+            "model": "keepkey_simulator",
+            "path": KEEPKEY_MAIN_ADDR,
+            "label": null,
+            "needs_pin_sent": false,
+            "needs_passphrase_sent": false,
+            "error": "Not initialized",
+            "code": -18
+        }]);
+        let reference = HwiBinary::reference()?;
+        let before = reference.run(keepkey_enumerate_args(None))?;
+        assert_success("reference", &before)?;
+        assert_eq!(before.json, expected_uninitialized);
+
+        let hook_dir = RemoveDirectoryOnDrop(temp_path("reference-keepkey-pin-hook")?);
+        fs::write(
+            hook_dir.0.join("sitecustomize.py"),
+            r#"from hwilib.devices.trezorlib.debuglink import TrezorClientDebugLink
+
+_original_init = TrezorClientDebugLink.__init__
+
+def _init_with_pin_sequence(self, *args, **kwargs):
+    _original_init(self, *args, **kwargs)
+    self.use_pin_sequence(("1", "1"))
+
+TrezorClientDebugLink.__init__ = _init_with_pin_sequence
+"#,
+        )
+        .context("write pinned HWI KeepKey debug PIN hook")?;
+        let mut python_paths = vec![hook_dir.0.clone()];
+        if let Some(existing) = env::var_os("PYTHONPATH") {
+            python_paths.extend(env::split_paths(&existing));
+        }
+        let pythonpath = env::join_paths(python_paths).context("build pinned HWI Python path")?;
+        let process_env = [(OsString::from("PYTHONPATH"), pythonpath)];
+        let recovery_words = format!("{}\n", SYNTHETIC_MNEMONIC.replace(' ', "\n"));
+        let output = reference.run_with_stdin_and_envs(
+            keepkey_args(&["--interactive", "restore", "--word_count", "12"]),
+            &recovery_words,
+            &process_env,
+        )?;
+        assert_success("reference", &output)?;
+        assert_eq!(output.json, serde_json::json!({"error": "80", "code": -13}));
+
+        let after = reference.run(keepkey_enumerate_args(None))?;
+        assert_success("reference", &after)?;
+        assert_eq!(after.json, expected_uninitialized);
         Ok(())
     }
 
@@ -1274,19 +2221,37 @@ mod tests {
         let approval = prepare_displayaddress_case_run(case)?;
         let reference = HwiBinary::reference()?.run(case.args.clone())?;
         drop(approval);
-        assert_displayaddress_result("reference", &reference, case.expect)?;
+        assert_displayaddress_result(
+            "reference",
+            &reference,
+            if case.candidate_only_error.is_some() {
+                ExpectedResult::Success
+            } else {
+                case.expect
+            },
+        )?;
 
         let approval = prepare_displayaddress_case_run(case)?;
         let candidate = HwiBinary::candidate()?.run(case.args.clone())?;
         drop(approval);
-        assert_displayaddress_result("candidate", &candidate, case.expect)?;
-
-        if reference.json != candidate.json {
-            bail!(
-                "HWI displayaddress JSON mismatch\nreference:\n{}\ncandidate:\n{}",
-                serde_json::to_string_pretty(&reference.json)?,
-                serde_json::to_string_pretty(&candidate.json)?
-            );
+        if let Some(expected) = case.candidate_only_error {
+            assert_success("candidate", &candidate)?;
+            if candidate.json != expected.json() {
+                bail!(
+                    "candidate hwi displayaddress error mismatch\nexpected:\n{}\ngot:\n{}",
+                    serde_json::to_string_pretty(&expected.json())?,
+                    serde_json::to_string_pretty(&candidate.json)?
+                );
+            }
+        } else {
+            assert_displayaddress_result("candidate", &candidate, case.expect)?;
+            if reference.json != candidate.json {
+                bail!(
+                    "HWI displayaddress JSON mismatch\nreference:\n{}\ncandidate:\n{}",
+                    serde_json::to_string_pretty(&reference.json)?,
+                    serde_json::to_string_pretty(&candidate.json)?
+                );
+            }
         }
 
         Ok(())
@@ -1316,6 +2281,9 @@ mod tests {
         assert_success("reference", &reference)?;
         assert_signtx_shape("reference", &reference.json)?;
         let reference_psbt = assert_signed_psbt("reference", &reference.json, case)?;
+        if arg_value(&args, "--device-type") == Some("keepkey") {
+            separate_keepkey_signtx_runs()?;
+        }
 
         let approval = prepare_signtx_run(&args, case)?;
         let candidate = HwiBinary::candidate()?.run(args)?;
@@ -1328,6 +2296,46 @@ mod tests {
         signature::assert_psbt_parity(&reference_psbt, &candidate_psbt)
             .context("reference and candidate signed PSBTs diverged")?;
 
+        Ok(())
+    }
+
+    // KeepKey retains its transaction-input digest after internal-change and canceled
+    // confirmations. Separate reference and candidate signing with two external outputs;
+    // the second amount differs whether the first reset succeeds or hits retained state.
+    fn separate_keepkey_signtx_runs() -> Result<()> {
+        let mut separator = build_singlesig_signtx_case("keepkey", LedgerSinglesigWrapper::Legacy)?;
+        separator
+            .original
+            .outputs
+            .first_mut()
+            .context("KeepKey signing separator has no output map")?
+            .bip32_derivation
+            .clear();
+
+        for (attempt, value) in [48_000, 47_000].into_iter().enumerate() {
+            separator
+                .original
+                .unsigned_tx
+                .output
+                .first_mut()
+                .context("KeepKey signing separator has no transaction output")?
+                .value = Amount::from_sat(value);
+            separator.psbt = separator.original.to_string();
+            let args = signtx_args("keepkey", &separator.psbt);
+            let approval = prepare_signtx_run(&args, &separator)?;
+            let output = HwiBinary::candidate()?.run(args);
+            drop(approval);
+            let output = output?;
+            assert_success("candidate", &output)?;
+            if attempt == 0
+                && output.json
+                    == serde_json::json!({"error": "authentication refused", "code": -14})
+            {
+                continue;
+            }
+            assert_signtx_shape("candidate", &output.json)?;
+            assert_signed_psbt("candidate", &output.json, &separator)?;
+        }
         Ok(())
     }
 
@@ -1494,23 +2502,30 @@ mod tests {
     }
 
     fn assert_signtx_shape(label: &str, json: &Value) -> Result<()> {
-        assert_exact_keys(label, "signtx", json, &["psbt", "signed"])?;
-        assert_string_json_field(label, json, "psbt")?;
+        let object = json
+            .as_object()
+            .with_context(|| format!("{label} hwi signtx output was not an object"))?;
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        if keys != ["psbt", "signed"] {
+            bail!("{label} hwi signtx keys did not match");
+        }
+        if json
+            .get("psbt")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            bail!("{label} hwi signtx field \"psbt\" was not a nonempty string");
+        }
         if json.get("signed").and_then(Value::as_bool).is_none() {
-            bail!(
-                "{label} hwi signtx field \"signed\" was not a bool:\n{}",
-                serde_json::to_string_pretty(json)?
-            );
+            bail!("{label} hwi signtx field \"signed\" was not a bool");
         }
         Ok(())
     }
 
     fn assert_signed_psbt(label: &str, json: &Value, case: &SigntxCase) -> Result<Psbt> {
         if json.get("signed").and_then(Value::as_bool) != Some(true) {
-            bail!(
-                "{label} hwi signtx did not report signed=true:\n{}",
-                serde_json::to_string_pretty(json)?
-            );
+            bail!("{label} hwi signtx did not report signed=true");
         }
         let signed_psbt = assert_string_json_field(label, json, "psbt")?;
         let signed_psbt = Psbt::from_str(signed_psbt)
@@ -2205,6 +3220,116 @@ mod tests {
         })
     }
 
+    fn build_keepkey_multisig_signtx_case(
+        device_type: &str,
+        wrapper: LedgerMultisigWrapper,
+    ) -> Result<SigntxCase> {
+        let fingerprint = reference_fingerprint(device_type)?;
+        let account_path = DerivationPath::from_str("m/48'/1'/0'/0'")?;
+        let device_xpub = reference_xpub(device_type, "m/48'/1'/0'/0'")?;
+        let secp = Secp256k1::new();
+        let receive_suffix = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(0)?,
+            ChildNumber::from_normal_idx(0)?,
+        ]);
+        let change_suffix = DerivationPath::from(vec![
+            ChildNumber::from_normal_idx(1)?,
+            ChildNumber::from_normal_idx(0)?,
+        ]);
+        let cosigner_root = Xpriv::new_master(Network::Testnet, &[9u8; 32])?;
+        let cosigner_fingerprint = cosigner_root.fingerprint(&secp);
+        let cosigner_xpub =
+            Xpub::from_priv(&secp, &cosigner_root.derive_priv(&secp, &account_path)?);
+        let receive = sorted_multisig_keys(
+            &secp,
+            device_xpub,
+            fingerprint,
+            cosigner_xpub,
+            cosigner_fingerprint,
+            &account_path,
+            &receive_suffix,
+        )?;
+        let change = sorted_multisig_keys(
+            &secp,
+            device_xpub,
+            fingerprint,
+            cosigner_xpub,
+            cosigner_fingerprint,
+            &account_path,
+            &change_suffix,
+        )?;
+        let input_script = multisig_script(2, &receive);
+        let change_script = multisig_script(2, &change);
+        let input_script_pubkey = multisig_script_pubkey(wrapper, &input_script);
+        let change_script_pubkey = multisig_script_pubkey(wrapper, &change_script);
+        let mut psbt = spending_psbt(input_script_pubkey.clone(), change_script_pubkey);
+
+        psbt.inputs[0] = Input {
+            non_witness_utxo: Some(previous_tx(input_script_pubkey.clone())),
+            witness_utxo: (!matches!(wrapper, LedgerMultisigWrapper::Legacy)).then_some(TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: input_script_pubkey,
+            }),
+            redeem_script: match wrapper {
+                LedgerMultisigWrapper::Legacy => Some(input_script.clone()),
+                LedgerMultisigWrapper::ShWit => Some(input_script.to_p2wsh()),
+                LedgerMultisigWrapper::Wit => None,
+            },
+            witness_script: (!matches!(wrapper, LedgerMultisigWrapper::Legacy))
+                .then_some(input_script),
+            bip32_derivation: [
+                (
+                    receive[0].inner,
+                    (receive[0].fingerprint, receive[0].derivation_path.clone()),
+                ),
+                (
+                    receive[1].inner,
+                    (receive[1].fingerprint, receive[1].derivation_path.clone()),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        psbt.outputs[0] = PsbtOutput {
+            redeem_script: match wrapper {
+                LedgerMultisigWrapper::Legacy => Some(change_script.clone()),
+                LedgerMultisigWrapper::ShWit => Some(change_script.to_p2wsh()),
+                LedgerMultisigWrapper::Wit => None,
+            },
+            witness_script: (!matches!(wrapper, LedgerMultisigWrapper::Legacy))
+                .then_some(change_script),
+            bip32_derivation: [
+                (
+                    change[0].inner,
+                    (change[0].fingerprint, change[0].derivation_path.clone()),
+                ),
+                (
+                    change[1].inner,
+                    (change[1].fingerprint, change[1].derivation_path.clone()),
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        let expected_pubkey = receive
+            .iter()
+            .find(|key| key.fingerprint == fingerprint)
+            .map(|key| PublicKey::new(key.inner))
+            .context("missing KeepKey multisig pubkey")?;
+        Ok(SigntxCase {
+            psbt: psbt.to_string(),
+            original: psbt,
+            expected_signatures: vec![ExpectedSignature {
+                input_index: 0,
+                pubkey: expected_pubkey,
+                kind: ExpectedSignatureKind::Ecdsa,
+            }],
+            ledger_registers_wallet: false,
+            verify_signatures: true,
+        })
+    }
+
     fn multisig_script_pubkey(wrapper: LedgerMultisigWrapper, script: &ScriptBuf) -> ScriptBuf {
         match wrapper {
             LedgerMultisigWrapper::Legacy => script.to_p2sh(),
@@ -2254,6 +3379,46 @@ mod tests {
             original: psbt,
             expected_signatures,
             ledger_registers_wallet: true,
+            verify_signatures: true,
+        })
+    }
+
+    fn build_mixed_singlesig_signtx_case(device_type: &str) -> Result<SigntxCase> {
+        let legacy = build_singlesig_signtx_case(device_type, LedgerSinglesigWrapper::Legacy)?;
+        let witness = build_singlesig_signtx_case(device_type, LedgerSinglesigWrapper::Wit)?;
+        let unsigned_tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![
+                legacy.original.unsigned_tx.input[0].clone(),
+                witness.original.unsigned_tx.input[0].clone(),
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(99_000),
+                script_pubkey: witness.original.unsigned_tx.output[0].script_pubkey.clone(),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)?;
+        psbt.inputs = vec![
+            legacy.original.inputs[0].clone(),
+            witness.original.inputs[0].clone(),
+        ];
+        psbt.outputs = vec![witness.original.outputs[0].clone()];
+        let expected_signatures = vec![
+            ExpectedSignature {
+                input_index: 0,
+                ..legacy.expected_signatures[0]
+            },
+            ExpectedSignature {
+                input_index: 1,
+                ..witness.expected_signatures[0]
+            },
+        ];
+        Ok(SigntxCase {
+            psbt: psbt.to_string(),
+            original: psbt,
+            expected_signatures,
+            ledger_registers_wallet: false,
             verify_signatures: true,
         })
     }
@@ -2435,7 +3600,7 @@ mod tests {
             "bitbox02" => "m/49'/1'/0'/0/10",
             "ledger" => "m/44'/1'/0'/0",
             "jade" | "coldcard" => "m/44'/1'/0'",
-            "trezor" => "m/44'/1'/0'/0/0",
+            "trezor" | "keepkey" => "m/44'/1'/0'/0/0",
             _ => bail!("unsupported signmessage device type {device_type:?}"),
         };
         let pubkey = PublicKey::new(reference_xpub(device_type, path)?.public_key);
@@ -2515,6 +3680,9 @@ mod tests {
             device_type,
             &format!("wpkh([{fingerprint}/84h/1h/0h]not_an_xpub/0/0)"),
         )));
+        if device_type == "keepkey" {
+            cases.extend(keepkey_multisig_display_cases(device_type, &fingerprint)?);
+        }
         if device_type == "coldcard" {
             for wallet in coldcard_multisig_display_wallets(device_type, &fingerprint)? {
                 let args = displayaddress_desc_args(device_type, &wallet.display_descriptor);
@@ -2524,6 +3692,58 @@ mod tests {
         }
 
         Ok(cases)
+    }
+
+    fn keepkey_multisig_display_cases(
+        device_type: &str,
+        fingerprint: &str,
+    ) -> Result<Vec<DisplayAddressCase>> {
+        const ORIGIN: &str = "48h/1h/0h/0h";
+        let secp = Secp256k1::new();
+        let account_path: DerivationPath = "m/48'/1'/0'/0'".parse()?;
+        let child_path: DerivationPath = "m/0/0".parse()?;
+        let device_xpub = reference_xpub(device_type, "m/48'/1'/0'/0'")?;
+        let device_child = device_xpub.derive_pub(&secp, &child_path)?;
+        let cosigner_root = Xpriv::new_master(Network::Testnet, &[9u8; 32])?;
+        let cosigner_fingerprint = cosigner_root.fingerprint(&secp);
+        let cosigner_xpub =
+            Xpub::from_priv(&secp, &cosigner_root.derive_priv(&secp, &account_path)?);
+        let cosigner_child = cosigner_xpub.derive_pub(&secp, &child_path)?;
+        let derived = format!(
+            "[{fingerprint}/{ORIGIN}/0/0]{},[{cosigner_fingerprint}/{ORIGIN}/0/0]{}",
+            device_child.public_key, cosigner_child.public_key
+        );
+        let extended = format!(
+            "[{fingerprint}/{ORIGIN}]{device_xpub}/0/0,[{cosigner_fingerprint}/{ORIGIN}]{cosigner_xpub}/0/0"
+        );
+        Ok(vec![
+            DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &format!("sh(sortedmulti(2,{derived}))"),
+            )),
+            DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &format!("sh(wsh(sortedmulti(2,{derived})))"),
+            )),
+            DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &format!("wsh(sortedmulti(2,{derived}))"),
+            )),
+            DisplayAddressCase::candidate_error(
+                displayaddress_desc_args(device_type, &format!("wsh(sortedmulti(2,{extended}))")),
+                ExpectedHwiError {
+                    code: -9,
+                    error: "unsupported display address: KeepKey multisig address display requires fully-derived public keys",
+                },
+            ),
+            DisplayAddressCase::candidate_error(
+                displayaddress_desc_args(device_type, &format!("wsh(multi(2,{derived}))")),
+                ExpectedHwiError {
+                    code: -9,
+                    error: "unsupported display address: KeepKey does not support unsorted multisig address display",
+                },
+            ),
+        ])
     }
 
     fn coldcard_multisig_display_wallets(
@@ -2632,6 +3852,11 @@ mod tests {
                 Ok(None)
             }
             "trezor" => Ok(Some(spawn_trezor_approval())),
+            "keepkey" => Ok(Some(spawn_debug_approval(
+                KEEPKEY_DEBUGLINK_ADDR,
+                DebugButton::Yes,
+                Instant::now() + command_timeout(),
+            ))),
             _ => Ok(None),
         }
     }
@@ -2647,6 +3872,11 @@ mod tests {
                 Ok(None)
             }
             "trezor" => Ok(Some(spawn_trezor_approval())),
+            "keepkey" => Ok(Some(spawn_debug_approval(
+                KEEPKEY_DEBUGLINK_ADDR,
+                DebugButton::Yes,
+                Instant::now() + command_timeout(),
+            ))),
             _ => Ok(None),
         }
     }
@@ -2760,6 +3990,11 @@ mod tests {
                 Ok(None)
             }
             "trezor" => Ok(Some(spawn_trezor_approval())),
+            "keepkey" => Ok(Some(spawn_debug_approval(
+                KEEPKEY_DEBUGLINK_ADDR,
+                DebugButton::Yes,
+                Instant::now() + command_timeout(),
+            ))),
             _ => Ok(None),
         }
     }
@@ -2906,13 +4141,20 @@ mod tests {
         }
     }
 
-    fn spawn_trezor_approval() -> TrezorApproval {
+    fn spawn_debug_approval(
+        addr: &'static str,
+        button: DebugButton,
+        deadline: Instant,
+    ) -> TrezorApproval {
         let stop = Arc::new(AtomicBool::new(false));
         let pressing = stop.clone();
         let presser = std::thread::spawn(move || {
-            while !pressing.load(Ordering::Relaxed) {
+            while !pressing.load(Ordering::Relaxed) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(250));
-                if pressing.load(Ordering::Relaxed) || send_trezor_approval().is_err() {
+                if pressing.load(Ordering::Relaxed)
+                    || Instant::now() >= deadline
+                    || send_debug_decision(addr, button).is_err()
+                {
                     return;
                 }
             }
@@ -2923,10 +4165,18 @@ mod tests {
         }
     }
 
-    fn send_trezor_approval() -> Result<()> {
+    fn spawn_trezor_approval() -> TrezorApproval {
+        spawn_debug_approval(
+            DEFAULT_DEBUGLINK_ADDR,
+            DebugButton::Yes,
+            Instant::now() + command_timeout(),
+        )
+    }
+
+    fn send_debug_decision(addr: &str, button: DebugButton) -> Result<()> {
         let socket = UdpSocket::bind("127.0.0.1:0")?;
-        socket.connect(DEFAULT_DEBUGLINK_ADDR)?;
-        for report in button_reports(DebugButton::Yes) {
+        socket.connect(addr)?;
+        for report in button_reports(button) {
             socket.send(&report)?;
         }
         Ok(())
@@ -3189,6 +4439,18 @@ mod tests {
         Error,
     }
 
+    #[derive(Clone, Copy)]
+    struct ExpectedHwiError {
+        code: i64,
+        error: &'static str,
+    }
+
+    impl ExpectedHwiError {
+        fn json(self) -> Value {
+            serde_json::json!({"error": self.error, "code": self.code})
+        }
+    }
+
     struct CommandCase {
         args: Vec<String>,
         expect: ExpectedResult,
@@ -3197,6 +4459,7 @@ mod tests {
     struct DisplayAddressCase {
         args: Vec<String>,
         expect: ExpectedResult,
+        candidate_only_error: Option<ExpectedHwiError>,
         coldcard_setup: ColdcardDisplaySetup,
     }
 
@@ -3205,6 +4468,7 @@ mod tests {
             Self {
                 args,
                 expect,
+                candidate_only_error: None,
                 coldcard_setup: ColdcardDisplaySetup::None,
             }
         }
@@ -3217,10 +4481,20 @@ mod tests {
             Self::new(args, ExpectedResult::Error)
         }
 
+        fn candidate_error(args: Vec<String>, expected: ExpectedHwiError) -> Self {
+            Self {
+                args,
+                expect: ExpectedResult::Error,
+                candidate_only_error: Some(expected),
+                coldcard_setup: ColdcardDisplaySetup::None,
+            }
+        }
+
         fn registered(args: Vec<String>, wallet: ColdcardDisplayWallet) -> Self {
             Self {
                 args,
                 expect: ExpectedResult::Success,
+                candidate_only_error: None,
                 coldcard_setup: ColdcardDisplaySetup::Registered(wallet),
             }
         }
@@ -3229,6 +4503,7 @@ mod tests {
             Self {
                 args,
                 expect: ExpectedResult::Error,
+                candidate_only_error: None,
                 coldcard_setup: ColdcardDisplaySetup::Unregistered,
             }
         }
@@ -3477,7 +4752,7 @@ mod tests {
             });
         }
 
-        if device_type == "trezor" {
+        if matches!(device_type, "trezor" | "keepkey") {
             cases.retain(|case| {
                 !case
                     .args
@@ -3578,7 +4853,7 @@ mod tests {
             ];
         }
 
-        if device_type == "trezor" {
+        if matches!(device_type, "trezor" | "keepkey") {
             return vec![CommandCase {
                 args: args([
                     "--emulators",
@@ -3600,7 +4875,7 @@ mod tests {
         device_path: &str,
         fingerprint: &str,
     ) -> Vec<Vec<String>> {
-        vec![
+        let mut cases = vec![
             args(["--emulators", "--device-type", device_type, "enumerate"]),
             args(["--emulators", "-t", device_type, "enumerate"]),
             args([
@@ -3687,7 +4962,18 @@ mod tests {
                 device_type,
                 "enumerate",
             ]),
-        ]
+        ];
+        if device_type == "keepkey" {
+            cases.push(args([
+                "--emulators",
+                "--device-type",
+                device_type,
+                "--device-path",
+                device_path.strip_prefix("udp:").unwrap_or(device_path),
+                "enumerate",
+            ]));
+        }
+        cases
     }
 
     fn args<const N: usize>(items: [&str; N]) -> Vec<String> {
@@ -3708,7 +4994,11 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn write_fake_command(path: &Path, exit_code: i32) -> Result<()> {
-        fs::write(path, format!("#!/bin/sh\nexit {exit_code}\n"))
+        let shell = env::split_paths(&env::var_os("PATH").unwrap_or_default())
+            .map(|directory| directory.join("sh"))
+            .find(|candidate| candidate.is_file())
+            .context("could not find sh on PATH")?;
+        fs::write(path, format!("#!{}\nexit {exit_code}\n", shell.display()))
             .with_context(|| format!("failed to write {}", path.display()))?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("failed to chmod {}", path.display()))?;
@@ -3757,7 +5047,7 @@ mod tests {
     fn normalize_device_type(device_type: &str) -> Result<String> {
         let device_type = device_type.to_ascii_lowercase();
         match device_type.as_str() {
-            "bitbox02" | "coldcard" | "jade" | "ledger" | "trezor" => Ok(device_type),
+            "bitbox02" | "coldcard" | "jade" | "keepkey" | "ledger" | "trezor" => Ok(device_type),
             _ => bail!("unsupported HWI_PARITY_DEVICE_TYPE {device_type:?}"),
         }
     }
