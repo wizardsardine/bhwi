@@ -28,13 +28,15 @@ where
     fn components(
         &mut self,
     ) -> (
-        &mut dyn Transport<Error = Self::TransportError>,
-        &dyn HttpClient<Error = Self::HttpClientError>,
+        &mut (dyn Transport<Error = Self::TransportError> + '_),
+        &(dyn HttpClient<Error = Self::HttpClientError> + '_),
+        Option<&mut (dyn crate::HostInteraction + 'static)>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     ) {
         (
             &mut self.transport,
             &DummyClient {},
+            None,
             LedgerInterpreter::default(),
         )
     }
