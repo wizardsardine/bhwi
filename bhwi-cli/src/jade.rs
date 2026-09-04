@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -129,10 +129,22 @@ fn is_macos_dialin(port_name: &str) -> bool {
     port_name.starts_with("/dev/tty.")
 }
 
+fn require_linux_tty_sysfs(is_linux: bool, sysfs_exists: bool) -> Result<()> {
+    if is_linux && !sysfs_exists {
+        anyhow::bail!("serial port enumeration unavailable: /sys/class/tty is missing");
+    }
+    Ok(())
+}
+
 #[async_trait(?Send)]
 impl DeviceEnumerator for JadeDevice {
     async fn enumerate(selector: &DeviceSelector) -> Result<Vec<Device>> {
-        let mut devices: Vec<Device> = iter(available_ports()?.into_iter().map(Ok))
+        require_linux_tty_sysfs(
+            cfg!(target_os = "linux"),
+            Path::new("/sys/class/tty").exists(),
+        )?;
+        let ports = available_ports()?;
+        let mut devices: Vec<Device> = iter(ports.into_iter().map(Ok))
             .try_filter_map(|info| async move {
                 match info.port_type {
                     SerialPortType::UsbPort(usb)
@@ -211,5 +223,21 @@ impl CborStream for TcpClient {
     }
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         Ok(self.stream.read(buf).await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_linux_tty_sysfs;
+
+    #[test]
+    fn absent_linux_tty_sysfs_errors_before_port_enumeration() {
+        let result: anyhow::Result<()> =
+            require_linux_tty_sysfs(true, false).map(|_| panic!("enumerator invoked"));
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "serial port enumeration unavailable: /sys/class/tty is missing"
+        );
     }
 }

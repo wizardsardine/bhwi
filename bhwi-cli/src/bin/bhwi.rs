@@ -7,10 +7,10 @@ use bhwi_cli::{
     address::AddressTarget,
     config::DeviceSelector,
     get_descriptors::GetKeypoolOptions,
-    hwi::PIN_MATRIX_DESCRIPTION,
+    hwi::{PIN_MATRIX_DESCRIPTION, SEND_PIN_INSTRUCTION},
     management::{
-        bitbox_restore_context, bitbox_setup_context, trezor_pin_context, trezor_restore_context,
-        trezor_setup_context,
+        bitbox_restore_context, bitbox_setup_context, keepkey_pin_context, keepkey_restore_context,
+        keepkey_setup_context, trezor_pin_context, trezor_restore_context, trezor_setup_context,
     },
     udev::{UdevRuleSelection, install_udev_rules},
 };
@@ -398,6 +398,7 @@ async fn main() -> Result<()> {
                 let context = match device.device_type() {
                     DeviceType::BitBox02 => bitbox_setup_context(device.is_emulated())?,
                     DeviceType::Trezor => trezor_setup_context(),
+                    DeviceType::KeepKey => keepkey_setup_context(),
                     other => anyhow::bail!("device setup is not supported for {other}"),
                 };
                 let success = device
@@ -422,7 +423,7 @@ async fn main() -> Result<()> {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
                 if !matches!(
                     device.device_type(),
-                    DeviceType::BitBox02 | DeviceType::Trezor
+                    DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
                 ) {
                     anyhow::bail!("device wipe is not supported for {}", device.device_type());
                 }
@@ -439,6 +440,7 @@ async fn main() -> Result<()> {
                 let context = match device.device_type() {
                     DeviceType::BitBox02 => bitbox_restore_context()?,
                     DeviceType::Trezor => trezor_restore_context()?,
+                    DeviceType::KeepKey => keepkey_restore_context()?,
                     device_type => {
                         anyhow::bail!("device restore is not supported for {device_type}")
                     }
@@ -457,9 +459,11 @@ async fn main() -> Result<()> {
         }
         Commands::Device(DeviceCommands::TogglePassphrase) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+                let needs_pin_sent = device.device_type() == DeviceType::KeepKey
+                    && device.info().await?.needs_pin_sent == Some(true);
                 if !matches!(
                     device.device_type(),
-                    DeviceType::BitBox02 | DeviceType::Trezor
+                    DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
                 ) {
                     anyhow::bail!(
                         "device toggle-passphrase is not supported for {}",
@@ -472,16 +476,24 @@ async fn main() -> Result<()> {
                 if let Some(OutputFormat::Json) = format {
                     println!("{}", serde_json::json!({ "success": true }));
                 }
+                if needs_pin_sent {
+                    eprintln!("{SEND_PIN_INSTRUCTION}");
+                    eprintln!("{PIN_MATRIX_DESCRIPTION}");
+                }
             }
         }
         Commands::Device(DeviceCommands::PromptPin) => {
             if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
-                if device.device_type() != DeviceType::Trezor {
+                if !matches!(
+                    device.device_type(),
+                    DeviceType::KeepKey | DeviceType::Trezor
+                ) {
                     anyhow::bail!(
                         "device prompt-pin is not supported for {}",
                         device.device_type()
                     );
                 }
+                eprintln!("{SEND_PIN_INSTRUCTION}");
                 eprintln!("{PIN_MATRIX_DESCRIPTION}");
                 if !device.device().prompt_pin().await? {
                     anyhow::bail!("device did not ask for a PIN");
@@ -494,13 +506,20 @@ async fn main() -> Result<()> {
         Commands::Device(DeviceCommands::SendPin { positions }) => {
             // Nothing may be sent to a device waiting for a PIN, so this lookup stays quiet.
             if let Some(mut device) = dev_man.get_device_without_contacting().await? {
-                if device.device_type() != DeviceType::Trezor {
+                if !matches!(
+                    device.device_type(),
+                    DeviceType::KeepKey | DeviceType::Trezor
+                ) {
                     anyhow::bail!(
                         "device send-pin is not supported for {}",
                         device.device_type()
                     );
                 }
-                let context = trezor_pin_context(positions)?;
+                let context = match device.device_type() {
+                    DeviceType::KeepKey => keepkey_pin_context(positions)?,
+                    DeviceType::Trezor => trezor_pin_context(positions)?,
+                    _ => unreachable!("PIN support checked above"),
+                };
                 if !device.device().send_pin(Some(context)).await? {
                     anyhow::bail!("device rejected the PIN");
                 }
@@ -525,6 +544,7 @@ async fn main() -> Result<()> {
                 UdevRuleSelection::Devices(vec![
                     bhwi_cli::DeviceType::Coldcard,
                     bhwi_cli::DeviceType::Trezor,
+                    bhwi_cli::DeviceType::KeepKey,
                     bhwi_cli::DeviceType::Jade,
                     bhwi_cli::DeviceType::Ledger,
                 ])
@@ -883,6 +903,24 @@ mod tests {
 
         assert_eq!(args.device_type, Some(DeviceType::BitBox02));
         assert_eq!(args.device_path.as_deref(), Some("tcp:127.0.0.1:15423"));
+    }
+
+    #[test]
+    fn native_cli_accepts_keepkey_canonical_name_and_alias() {
+        for name in ["keepkey", "keep-key"] {
+            let args = Args::try_parse_from([
+                "bhwi",
+                "--device-type",
+                name,
+                "--device-path",
+                "127.0.0.1:11044",
+                "device",
+                "list",
+            ])
+            .expect("KeepKey selector parses");
+            assert_eq!(args.device_type, Some(DeviceType::KeepKey));
+            assert_eq!(args.device_path.as_deref(), Some("127.0.0.1:11044"));
+        }
     }
 
     #[test]

@@ -42,10 +42,10 @@ pub trait Interpreter {
 }
 ```
 
-`bhwi-async` is one such driver: it pumps the common interpreter (coldcard,
-ledger, jade, bitbox, trezor) over HID, TCP, UDP or the browser and routes each
-`Transmit` to the device transport or to the Jade PIN server via its
-`Recipient`.
+`bhwi-async` is one such driver: it pumps the common interpreter (BitBox02,
+Coldcard, Jade, KeepKey, Ledger, and Trezor) over HID, TCP, UDP, or the browser
+and routes each `Transmit` to the device transport, the Jade PIN server, or a
+typed host-interaction provider via its `Recipient`.
 
 ## Workspace
 
@@ -61,15 +61,16 @@ ledger, jade, bitbox, trezor) over HID, TCP, UDP or the browser and routes each
 - [BitBox02](https://github.com/digitalbitbox/bitbox02-firmware)
 - [Coldcard](https://github.com/Coldcard/firmware)
 - [Jade](https://github.com/Blockstream/Jade)
+- [KeepKey](https://github.com/keepkey/keepkey-firmware)
 - [Ledger](https://github.com/LedgerHQ/app-bitcoin-new)
 - [Trezor](https://github.com/trezor/trezor-firmware) (Model One and Model T)
 
 Every device implements the full [`HWI` trait](bhwi-async/src/lib.rs): `unlock`,
 `get_info`, `get_master_fingerprint`, `get_extended_pubkey`, `sign_message`,
 `display_address`, `register_wallet` and `sign_tx`. Two capability gaps remain:
-`backup_device` is supported on BitBox02 and Coldcard but not on Jade, Ledger or
-Trezor, and `register_wallet` is unsupported on Trezor, which verifies a
-multisig descriptor at display and signing time instead.
+`backup_device` is supported on BitBox02 and Coldcard but not on Jade, KeepKey,
+Ledger, or Trezor, and `register_wallet` is unsupported on KeepKey and Trezor,
+which verify supported multisig descriptors at display and signing time instead.
 
 ## CLI
 

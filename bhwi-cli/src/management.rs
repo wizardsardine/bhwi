@@ -26,6 +26,26 @@ pub fn trezor_restore_context() -> Result<DeviceContext> {
     ))
 }
 
+pub fn keepkey_setup_context() -> DeviceContext {
+    let mut host_entropy = [0; 32];
+    OsRng.fill_bytes(&mut host_entropy);
+    DeviceContext::KeepKeyManagement(bhwi::keepkey::ManagementContext::Setup { host_entropy })
+}
+
+pub fn keepkey_pin_context(positions: String) -> Result<DeviceContext> {
+    let pin = bhwi::keepkey::HostPin::new(positions)?;
+    Ok(DeviceContext::KeepKeyManagement(
+        bhwi::keepkey::ManagementContext::Pin(pin),
+    ))
+}
+
+pub fn keepkey_restore_context() -> Result<DeviceContext> {
+    let u2f_counter = u2f_counter_from(Local::now().timestamp())?;
+    Ok(DeviceContext::KeepKeyManagement(
+        bhwi::keepkey::ManagementContext::Restore { u2f_counter },
+    ))
+}
+
 fn u2f_counter_from(timestamp: i64) -> Result<u32> {
     u32::try_from(timestamp).context("current timestamp does not fit in u32")
 }
@@ -102,5 +122,24 @@ mod tests {
             DeviceContext::BitBoxManagement(ManagementContext::Restore { timestamp, .. })
                 if timestamp > 0
         ));
+    }
+
+    #[test]
+    fn keepkey_contexts_use_keepkey_management_variants() {
+        assert!(matches!(
+            keepkey_setup_context(),
+            DeviceContext::KeepKeyManagement(bhwi::keepkey::ManagementContext::Setup { .. })
+        ));
+        assert!(matches!(
+            keepkey_restore_context().unwrap(),
+            DeviceContext::KeepKeyManagement(bhwi::keepkey::ManagementContext::Restore {
+                u2f_counter
+            }) if u2f_counter > 0
+        ));
+        assert!(matches!(
+            keepkey_pin_context("7913".to_owned()).unwrap(),
+            DeviceContext::KeepKeyManagement(bhwi::keepkey::ManagementContext::Pin(_))
+        ));
+        assert!(keepkey_pin_context("not-a-pin".to_owned()).is_err());
     }
 }
