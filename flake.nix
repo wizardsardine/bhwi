@@ -19,6 +19,14 @@
       url = "github:Blockstream/blind_pin_server/0205d38e75cb47f187db2efda5846cc898a85039";
       flake = false;
     };
+    keepkey-firmware = {
+      url = "git+https://github.com/keepkey/keepkey-firmware?rev=d54797ee604f12c82ac6e5e02490b62dc04bf2dd&submodules=1";
+      flake = false;
+    };
+    keepkey-nanopb = {
+      url = "github:nanopb/nanopb/493adf3616bee052649c63c473f8355630c2797f";
+      flake = false;
+    };
     python-hwi = {
       url = "github:bitcoin-core/HWI/3.2.0";
       flake = false;
@@ -42,6 +50,8 @@
     coldcard-firmware,
     jade-firmware,
     jade-pinserver,
+    keepkey-firmware,
+    keepkey-nanopb,
     python-hwi,
     trezor-firmware,
     nixpkgs,
@@ -61,6 +71,7 @@
         };
         coldcardPkgs = import nixpkgs-coldcard {inherit system;};
         emulatorSystem = system == "x86_64-linux" || system == "aarch64-darwin";
+        keepkeySystem = system == "x86_64-linux";
         isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
         coldcardRuntimeLibraryPath = coldcardPkgs.lib.makeLibraryPath (
           [
@@ -307,6 +318,16 @@
             pkgs.python311Packages.virtualenv
           ];
         jadeInputs = jadeQemuInputs ++ jadePinserverInputs;
+        keepkeyInputs =
+          emulatorInputs
+          ++ [
+            pkgs.cmake
+            pkgs.gcc
+            pkgs.gnumake
+            pkgs.patch
+            pkgs.protobuf
+            hwiPython
+          ];
         mkApp = program: {
           type = "app";
           program = pkgs.lib.getExe program;
@@ -326,6 +347,22 @@
           export CFLAGS="-I${coldcardPkgs.pcsclite.dev}/include/PCSC ''${CFLAGS:-}"
           export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
           export RUST_TEST_THREADS=1
+        '';
+        keepkeyBuildEnv = ''
+          export PATH="${hwiPython}/bin:$PATH"
+          export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+          export KEEPKEY_BUILD_TOOLCHAIN="${pkgs.runtimeShell}:${pkgs.lib.makeBinPath [
+            pkgs.cmake pkgs.gcc pkgs.gnumake pkgs.patch pkgs.protobuf hwiPython
+          ]}"
+          export KEEPKEY_FIRMWARE_SRC="${keepkey-firmware}"
+          export KEEPKEY_FIRMWARE_REV="${keepkey-firmware.rev or "d54797ee604f12c82ac6e5e02490b62dc04bf2dd"}"
+          export KEEPKEY_NANOPB_SRC="${keepkey-nanopb}"
+          export KEEPKEY_NANOPB_REV="${keepkey-nanopb.rev or "493adf3616bee052649c63c473f8355630c2797f"}"
+          export KEEPKEY_BUILD_PATCH="${python-hwi}/test/data/keepkey-build.patch"
+          export KEEPKEY_GOOGLETEST_PATCH="${python-hwi}/test/data/keepkey-googletest.patch"
+          export KEEPKEY_NANOPB_PATCH="${python-hwi}/test/data/nanopb-deprecated-mode.patch"
+          export KEEPKEY_CMAKE_PATCH="${./nix/patches/keepkey/cmake-minimum.patch}"
+          export KEEPKEY_PROTOC="${pkgs.protobuf}/bin/protoc"
         '';
         mkHwiParityRunner = name: device: runtimeInputs: env:
           pkgs.writeShellApplication {
@@ -548,6 +585,14 @@
         trezorTRunner =
           mkTrezorRunner "trezor-t" "core"
           "${trezorCoreEmulator}/bin/trezor-emu-core";
+        keepkeyRunner =
+          mkRunner "bhwi-start-keepkey" keepkeyInputs keepkeyBuildEnv
+          ./nix/scripts/start-keepkey.sh;
+        keepkeyInitRunner =
+          mkRunner "bhwi-init-keepkey" [hwiPython] ''
+            export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
+          ''
+          ./nix/scripts/init-keepkey.sh;
         hwiReference = pkgs.writeShellApplication {
           name = "hwi-reference";
           runtimeInputs = [hwiPython];
@@ -559,7 +604,7 @@
         hwiReferenceBhwiMain = pkgs.writeText "hwi-reference-bhwi.py" ''
           from hwilib import commands
 
-          commands.all_devs = ["ledger", "coldcard", "jade", "bitbox02", "trezor"]
+          commands.all_devs = ["ledger", "coldcard", "jade", "bitbox02", "trezor", "keepkey"]
 
           from hwilib._cli import main
 
@@ -580,12 +625,14 @@
             ++ ledgerInputs
             ++ coldcardInputs
             ++ jadeQemuInputs
+            ++ keepkeyInputs
             ++ [
               hwiPython
               pkgs.bitcoin
             ];
           text = ''
             ${commonE2eEnv}
+            ${keepkeyBuildEnv}
             unset C_INCLUDE_PATH
             unset CPLUS_INCLUDE_PATH
             unset LIBRARY_PATH
@@ -598,6 +645,7 @@
             export HWI_BITBOX02_SIMULATOR="''${HWI_BITBOX02_SIMULATOR:-${bitboxSimulator}/bin/bitbox02-simulator}"
             export HWI_LEDGER_SPECULOS_BIN="''${HWI_LEDGER_SPECULOS_BIN:-${speculos}/bin/speculos}"
             export LEDGER_BUILD_APP_SCRIPT="''${LEDGER_BUILD_APP_SCRIPT:-${./nix/scripts/build-ledger-app.sh}}"
+            export HWI_KEEPKEY_PREPARE_SCRIPT="${keepkeyRunner}/bin/bhwi-start-keepkey"
             export APP_BITCOIN_NEW_SRC="${app-bitcoin-new}"
             export APP_BITCOIN_NEW_REV="${app-bitcoin-new.rev or "locked"}"
             export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
@@ -657,7 +705,7 @@
                 export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
                 export HWI_BIN="''${HWI_BIN:-''${CARGO_TARGET_DIR:-$PWD/target}/debug/hwi}"
 
-                cargo build -p bhwi-cli --bin hwi
+                cargo build ${pkgs.lib.optionalString (device == "keepkey") "--manifest-path ${self}/Cargo.toml "}-p bhwi-cli --bin hwi
                 exec ${pkgs.bash}/bin/bash ${./nix/scripts/run-hwi-upstream-suite.sh} ${device} "$@"
               '';
           };
@@ -727,11 +775,18 @@
               export GIT_CONFIG_SYSTEM="$IDF_PATH/etc/gitconfig"
             fi
           '';
+        hwiUpstreamKeepKey =
+          mkHwiUpstreamDevice "hwi-upstream-keepkey" "keepkey" (inputs ++ keepkeyInputs ++ [hwiPython pkgs.bitcoin]) ''
+            export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/target}"
+            ${keepkeyBuildEnv}
+            export HWI_KEEPKEY_PREPARE_SCRIPT="${keepkeyRunner}/bin/bhwi-start-keepkey"
+          '';
         hwiParityColdcard = mkHwiParityRunner "bhwi-hwi-parity-coldcard" "coldcard" (coldcardInputs ++ inputs) coldcardE2eEnv;
         hwiParityLedger = mkHwiParityRunner "bhwi-hwi-parity-ledger" "ledger" (ledgerInputs ++ inputs) commonE2eEnv;
         hwiParityJade = mkHwiParityRunner "bhwi-hwi-parity-jade" "jade" (jadeInputs ++ inputs) commonE2eEnv;
         hwiParityBitbox = mkHwiParityRunner "bhwi-hwi-parity-bitbox" "bitbox02" inputs commonE2eEnv;
         hwiParityTrezor = mkHwiParityRunner "bhwi-hwi-parity-trezor" "trezor" inputs commonE2eEnv;
+        hwiParityKeepKey = mkHwiParityRunner "bhwi-hwi-parity-keepkey" "keepkey" inputs commonE2eEnv;
         linuxPackages = pkgs.lib.optionalAttrs emulatorSystem (
           {
             inherit speculos;
@@ -771,6 +826,12 @@
             hwi-parity-jade = mkApp hwiParityJade;
             hwi-parity-trezor = mkApp hwiParityTrezor;
           }
+          // pkgs.lib.optionalAttrs keepkeySystem {
+            keepkey = mkApp keepkeyRunner;
+            keepkey-init = mkApp keepkeyInitRunner;
+            hwi-parity-keepkey = mkApp hwiParityKeepKey;
+            hwi-upstream-keepkey = mkApp hwiUpstreamKeepKey;
+          }
         );
         linuxShells = pkgs.lib.optionalAttrs emulatorSystem {
           bitbox = pkgs.mkShell {
@@ -793,6 +854,12 @@
             packages = inputs;
             shellHook = commonE2eEnv;
           };
+        }
+        // pkgs.lib.optionalAttrs keepkeySystem {
+          keepkey = pkgs.mkShell {
+            packages = inputs ++ keepkeyInputs;
+            shellHook = commonE2eEnv + keepkeyBuildEnv;
+          };
         };
         linuxChecks = pkgs.lib.optionalAttrs emulatorSystem {
           emulator-scripts = pkgs.runCommand "bhwi-emulator-scripts" {} ''
@@ -804,7 +871,9 @@
             test -f ${./nix/scripts/init-jade.sh}
             test -f ${./nix/scripts/start-trezor.sh}
             test -f ${./nix/scripts/init-trezor.sh}
-            test -f ${./nix/scripts/wait-for-trezor.sh}
+            test -f ${./nix/scripts/start-keepkey.sh}
+            test -f ${./nix/scripts/init-keepkey.sh}
+            test -f ${./nix/scripts/wait-for-udp-emulator.sh}
             test -f ${./nix/scripts/emit-gh-error-log.sh}
             test -f ${./nix/scripts/run-hwi-upstream-suite.sh}
             test -f ${./nix/scripts/stop-emulator.sh}
@@ -838,6 +907,9 @@
             hwi-upstream-trezor = hwiUpstreamTrezor;
             hwi-upstream-trezor-t = hwiUpstreamTrezorT;
           }
+          // pkgs.lib.optionalAttrs keepkeySystem {
+            hwi-upstream-keepkey = hwiUpstreamKeepKey;
+          }
           // linuxPackages;
 
         devShells =
@@ -862,7 +934,9 @@
                 export PATH="${pkgs.lib.makeBinPath [pkgs.nodejs_22 pkgs.corepack_22]}:$PATH"
                 rm -rf website/pkg
                 cp -rL --no-preserve=mode,ownership ${bhwi-wasm-pkg} website/pkg
-                cd website && npm install && npm run dev
+                cd website
+                npm install
+                node node_modules/vite/bin/vite.js
               '');
             };
             # Publish the wasm-bindgen bundle to npm, once per name.

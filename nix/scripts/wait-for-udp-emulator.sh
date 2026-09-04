@@ -32,11 +32,11 @@ while ((SECONDS < deadline)); do
     exit 0
   fi
   if [[ -n "$pid" ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
-    echo "Process $pid exited before $host:$port answered" >&2
+    echo "UDP emulator process $pid exited before $host:$port answered" >&2
     exit 1
   fi
   sleep 1
 done
 
-echo "Timed out waiting for Trezor emulator on $host:$port after ${timeout}s" >&2
+echo "Timed out waiting for UDP emulator on $host:$port after ${timeout}s" >&2
 exit 1

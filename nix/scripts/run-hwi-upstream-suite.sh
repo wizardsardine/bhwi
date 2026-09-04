@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: run-hwi-upstream-suite.sh <bitbox02|coldcard|ledger|jade|trezor|trezor-t> [extra run_tests.py args...]
+usage: run-hwi-upstream-suite.sh <bitbox02|coldcard|ledger|jade|keepkey|trezor|trezor-t> [extra run_tests.py args...]
 
 Required:
   HWI_BIN                     Path to the BHWI hwi binary under test.
@@ -15,6 +15,7 @@ Optional device inputs:
   HWI_JADE_SIMULATOR_DIR      Prepared HWI-compatible Jade directory.
   HWI_BITBOX02_SIMULATOR      BitBox02 simulator binary.
   HWI_TREZOR_EMULATOR         Prebuilt Trezor One emulator (otherwise uses its prepare script).
+  HWI_KEEPKEY_EMULATOR        Prepared KeepKey emulator; relative paths use the invocation directory.
   HWI_BITCOIND                Path to bitcoind. Defaults to bitcoind on PATH.
 
 The runner executes Bitcoin Core HWI's upstream test suite in --interface=cli
@@ -39,6 +40,7 @@ if [[ ! -x "$HWI_BIN" ]]; then
   exit 2
 fi
 
+invocation_dir="$PWD"
 upstream_src="${HWI_UPSTREAM_SRC:?HWI_UPSTREAM_SRC must point to upstream HWI sources}"
 work="$(mktemp -d "${TMPDIR:-/tmp}/bhwi-hwi-upstream.XXXXXXXXXX")"
 cleanup() {
@@ -51,7 +53,7 @@ chmod -R u+w "$work/HWI"
 
 mkdir -p "$work/bin"
 cat > "$work/bin/hwi" <<EOF
-#!/usr/bin/env bash
+#!$BASH
 exec "$HWI_BIN" "\$@"
 EOF
 chmod +x "$work/bin/hwi"
@@ -137,27 +139,49 @@ SH
     fi
     "$python" run_tests.py "${common_args[@]}" --jade --jade-path "$simulator_dir" "$@"
     ;;
-  trezor | trezor-t)
-    emulator="${HWI_TREZOR_EMULATOR:-}"
-    if [[ -z "$emulator" ]]; then
-      emulator="$(bash \
-        "${HWI_TREZOR_PREPARE_SCRIPT:?HWI_TREZOR_PREPARE_SCRIPT must be set}" \
-        --prepare-hwi |
-        tail -n 1)"
-    fi
-    if [[ "$device" == trezor-t ]]; then
-      emulator_name="trezor-emu-core"
-      model_args=(--trezor-t --trezor-t-path)
+  keepkey | trezor | trezor-t)
+    if [[ "$device" == keepkey ]]; then
+      emulator="${HWI_KEEPKEY_EMULATOR:-}"
+      if [[ -n "$emulator" && "$emulator" != /* ]]; then
+        emulator="$invocation_dir/$emulator"
+      fi
+      if [[ -z "$emulator" ]]; then
+        emulator="$(bash \
+          "${HWI_KEEPKEY_PREPARE_SCRIPT:?HWI_KEEPKEY_PREPARE_SCRIPT must be set}" \
+          --prepare-hwi)"
+      fi
+      emulator_name="kkemu"
+      model_args=(--keepkey --keepkey-path)
+      debug_port=11045
+      compat_dir="$work/keepkey-compat"
     else
-      emulator_name="trezor-emu-legacy"
-      model_args=(--trezor-1 --trezor-1-path)
+      emulator="${HWI_TREZOR_EMULATOR:-}"
+      if [[ -z "$emulator" ]]; then
+        emulator="$(bash \
+          "${HWI_TREZOR_PREPARE_SCRIPT:?HWI_TREZOR_PREPARE_SCRIPT must be set}" \
+          --prepare-hwi |
+          tail -n 1)"
+      fi
+      debug_port=21325
+      compat_dir="$work/trezor-compat"
+      if [[ "$device" == trezor-t ]]; then
+        emulator_name="trezor-emu-core"
+        model_args=(--trezor-t --trezor-t-path)
+      else
+        emulator_name="trezor-emu-legacy"
+        model_args=(--trezor-1 --trezor-1-path)
+      fi
     fi
-    trezor_dir="$work/trezor-compat"
-    mkdir -p "$trezor_dir"
-    ln -s "$emulator" "$trezor_dir/$emulator_name"
-    emulator="$trezor_dir/$emulator_name"
+    if [[ ! -x "$emulator" ]]; then
+      echo "emulator is not executable: $emulator" >&2
+      exit 2
+    fi
+    emulator="$(realpath "$emulator")"
+    mkdir -p "$compat_dir"
+    ln -s "$emulator" "$compat_dir/$emulator_name"
+    emulator="$compat_dir/$emulator_name"
 
-    cat > "$work/trezor-press.py" <<'PY'
+    cat > "$work/debuglink-press.py" <<'PY'
 import os
 import socket
 import time
@@ -173,7 +197,7 @@ report[0] = 0x3F
 report[1 : 1 + len(frame)] = frame
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.connect(("127.0.0.1", 21325))
+sock.connect(("127.0.0.1", int(os.environ["HWI_DEBUGLINK_PORT"])))
 parent = os.getppid()
 started = time.monotonic()
 while os.getppid() == parent and time.monotonic() - started < DEADLINE:
@@ -184,8 +208,9 @@ while os.getppid() == parent and time.monotonic() - started < DEADLINE:
         pass
 PY
 
+    export HWI_DEBUGLINK_PORT="$debug_port"
     cat > "$work/bin/hwi" <<EOF
-#!/usr/bin/env bash
+#!$BASH
 press=0
 case " \$* " in
   *" wipe "* | *" signtx "* | *" signmessage "* | *" displayaddress "* | *" togglepassphrase "* | *" setup "* | *" restore "*) press=1 ;;
@@ -195,7 +220,7 @@ case " \$* " in
 esac
 case "\$press" in
   1)
-    "$python" "$work/trezor-press.py" &
+    "$python" "$work/debuglink-press.py" &
     presser=\$!
     trap 'kill "\$presser" 2>/dev/null || true' EXIT HUP INT TERM
     "$HWI_BIN" "\$@"
@@ -209,7 +234,16 @@ exec "$HWI_BIN" "\$@"
 EOF
     chmod +x "$work/bin/hwi"
 
-    "$python" run_tests.py "${common_args[@]}" "${model_args[@]}" "$emulator" "$@"
+    if "$python" run_tests.py "${common_args[@]}" "${model_args[@]}" "$emulator" "$@"; then
+      :
+    else
+      status=$?
+      if [[ "$device" == keepkey && -f keepkey-emulator.stdout ]]; then
+        echo "KeepKey emulator log:" >&2
+        cat keepkey-emulator.stdout >&2
+      fi
+      exit "$status"
+    fi
     ;;
   *)
     echo "unsupported upstream HWI suite device: $device" >&2

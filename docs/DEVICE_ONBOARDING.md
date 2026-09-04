@@ -173,6 +173,48 @@ nix run .#trezor-init
 nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1
 ```
 
+## KeepKey
+
+- Local code (gated behind the `keepkey` cargo feature):
+  - [Interpreter](../bhwi/src/keepkey/interpreter.rs)
+  - [Protocol profile and messages](../bhwi/src/keepkey)
+  - [Shared protocol-v1 transport](../bhwi-async/src/transport/trezor/mod.rs)
+  - [Emulator and test notes](KEEPKEY.md)
+- Upstream references:
+  - [KeepKey firmware](https://github.com/keepkey/keepkey-firmware) pinned to
+    v7.10.0 commit `d54797ee604f12c82ac6e5e02490b62dc04bf2dd`
+  - [KeepKey device protocol](https://github.com/keepkey/device-protocol) pinned
+    through the firmware submodule at
+    `323802f17dd44165a5100357df771348c8b49672`
+  - [Bitcoin Core HWI 3.2.0 KeepKey backend](https://github.com/bitcoin-core/HWI/blob/3.2.0/hwilib/devices/keepkey.py)
+- Onboarding notes:
+  - KeepKey shares Trezor's protocol-v1 report framing, but it is a separate
+    profile with its own protobuf deltas, command rules, USB IDs, emulator,
+    host passphrase behavior, management state machine, and capability limits.
+  - Native discovery uses HID `2b24:0001` on usage page `0xff00`, WebUSB
+    `2b24:0002`, and emulator UDP `127.0.0.1:11044`; the debug link is UDP
+    `11045`.
+  - PIN entry and recovery-character entry are host interactions. Restore uses
+    KeepKey firmware's character cipher; pinned Python HWI has no working
+    reference-tested restore flow.
+  - The recursively pinned firmware and separately pinned nanopb tree are
+    copied to a writable cache and patched with HWI's
+    `test/data/keepkey-build.patch` at the firmware root,
+    `test/data/keepkey-googletest.patch` at the firmware's
+    `deps/googletest` root, and `test/data/nanopb-deprecated-mode.patch` at
+    the nanopb root. BHWI additionally applies
+    [`nix/patches/keepkey/cmake-minimum.patch`](../nix/patches/keepkey/cmake-minimum.patch)
+    at the firmware root. The emulator outputs are currently `x86_64-linux`
+    only.
+  - Use these commands for emulator-backed tests:
+
+```sh
+nix run .#keepkey
+nix run .#keepkey-init
+nix develop .#keepkey -c cargo test -p bhwi-e2e-keepkey -- --test-threads=1
+nix run .#hwi-upstream-keepkey
+```
+
 ## Adding a Device
 
 - Start from `bhwi/src/common.rs` and map each supported common command to the

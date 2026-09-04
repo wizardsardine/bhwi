@@ -1,11 +1,12 @@
 # Nix
 
-BHWI uses Nix flake outputs to run emulator-backed e2e tests for the currently
-supported devices: Coldcard, Ledger, and Jade.
+BHWI uses Nix flake outputs to run emulator-backed e2e tests for its supported
+devices.
 
-The emulator outputs build on `x86_64-linux` and `aarch64-darwin` (Apple
-Silicon), and are intended for GitHub Actions first, with the same commands
-available locally.
+Most emulator outputs build on `x86_64-linux` and `aarch64-darwin` (Apple
+Silicon). KeepKey's source-built emulator outputs are currently
+`x86_64-linux` only. All are intended for GitHub Actions first, with the same
+commands available locally.
 
 ## Platforms
 
@@ -25,8 +26,10 @@ Linux-only outputs:
 
 - `bitbox02-simulator` (the prebuilt release binary).
 - The HWI parity and upstream suites (`hwi-parity-*`, `hwi-upstream-*`), which
-  need the linux-amd64 prebuilt simulator and a toolchain that does not build on
-  darwin.
+  need Linux emulator toolchains.
+- `keepkey`, `keepkey-init`, `hwi-parity-keepkey`,
+  `hwi-upstream-keepkey`, and the `keepkey` development shell and package
+  outputs additionally require `x86_64-linux`.
 
 The macOS emulator run is not part of PR CI and is intended for a separate
 on-demand workflow.
@@ -42,12 +45,17 @@ on-demand workflow.
 - `cargo test -p bhwi-e2e-ledger -- --test-threads=1`
 - `cargo test -p bhwi-e2e-jade -- --test-threads=1`
 - `cargo test -p bhwi-e2e-trezor -- --test-threads=1`, once per model
+- `cargo test -p bhwi-e2e-keepkey -- --test-threads=1`, its native CLI and
+  differential HWI parity suites, three fresh-profile management lifecycles,
+  and the 90-minute `hwi-upstream-keepkey` final gate
 
 CI uses:
 
 - Determinate Systems Nix installer
 - `actions/cache` for mutable emulator build caches under
-  `$XDG_CACHE_HOME/bhwi`
+  `$XDG_CACHE_HOME/bhwi`. The KeepKey cache key includes runner OS and
+  architecture, the exact `flake.lock` hash, and the build-input hash; its sole
+  restore prefix retains the OS, architecture, and exact lock hash.
 
 This avoids committing firmware binaries while preventing heavy emulator
 artifacts from rebuilding on every PR once the cache is warm. Nix store paths
@@ -66,12 +74,16 @@ Apps:
 - `nix run .#hwi-upstream-coldcard`
 - `nix run .#hwi-upstream-ledger`
 - `nix run .#hwi-upstream-jade`
+- `nix run .#hwi-upstream-keepkey`
+- `nix run .#hwi-parity-keepkey`
 - `nix run .#jade-pinserver`
 - `nix run .#jade`
 - `nix run .#jade-init`
 - `nix run .#trezor-one`
 - `nix run .#trezor-t`
 - `nix run .#trezor-init`
+- `nix run .#keepkey`
+- `nix run .#keepkey-init`
 
 Development shells:
 
@@ -80,6 +92,7 @@ Development shells:
 - `nix develop .#ledger`
 - `nix develop .#jade`
 - `nix develop .#trezor`
+- `nix develop .#keepkey`
 
 Packages/checks:
 
@@ -88,6 +101,7 @@ Packages/checks:
 - `nix build .#coldcard-simulator`
 - `nix build .#hwi-reference`
 - `nix build .#hwi-upstream-suite`
+- `nix build .#hwi-upstream-keepkey`
 - `nix build .#ledger-app`
 - `nix build .#jade-qemu`
 - `nix build .#checks.x86_64-linux.emulator-scripts`
@@ -159,13 +173,27 @@ nix run .#trezor-init
 nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1
 ```
 
+KeepKey. The main and debug UDP endpoints are 11044 and 11045.
+
+```sh
+# Terminal 1
+nix run .#keepkey
+
+# Terminal 2, after the emulator answers
+nix run .#keepkey-init
+
+# Terminal 2
+nix develop .#keepkey -c cargo test -p bhwi-e2e-keepkey -- --test-threads=1
+```
+
 Useful readiness checks:
 
 ```sh
 test -S /tmp/ckcc-simulator.sock
 nc -z localhost 9999 && nc -z localhost 5000
 nc -z localhost 8096 && nc -z localhost 30121
-bash nix/scripts/wait-for-trezor.sh 127.0.0.1 21324 60
+bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 21324 60
+bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 11044 60
 ```
 
 ## Upstream HWI Suite
@@ -185,6 +213,9 @@ nix run .#hwi-upstream-bitbox
 nix run .#hwi-upstream-coldcard
 nix run .#hwi-upstream-ledger
 nix run .#hwi-upstream-jade
+nix run .#hwi-upstream-keepkey
+nix run .#hwi-upstream-trezor
+nix run .#hwi-upstream-trezor-t
 ```
 
 The generic dispatcher is also available:
@@ -194,12 +225,20 @@ nix run .#hwi-upstream-suite -- bitbox02
 nix run .#hwi-upstream-suite -- coldcard
 nix run .#hwi-upstream-suite -- ledger
 nix run .#hwi-upstream-suite -- jade
+nix run .#hwi-upstream-suite -- keepkey
+nix run .#hwi-upstream-suite -- trezor
+nix run .#hwi-upstream-suite -- trezor-t
 ```
 
 The runner uses the pinned HWI Python interpreter and unmodified HWI 3.2.0
 tests. It accepts `HWI_BIN` and `HWI_BITCOIND` overrides,
-`HWI_LEDGER_APP_ELF` for a prebuilt Ledger app, and pre-prepared
-`HWI_COLDCARD_SIMULATOR` or `HWI_JADE_SIMULATOR_DIR` paths for debugging.
+`HWI_LEDGER_APP_ELF` for a prebuilt Ledger app, pre-prepared
+`HWI_COLDCARD_SIMULATOR` or `HWI_JADE_SIMULATOR_DIR` paths, and
+`HWI_KEEPKEY_EMULATOR` for a prepared `kkemu`. A relative
+`HWI_KEEPKEY_EMULATOR` path is resolved from the runner's invocation directory.
+Without that override the generic and tailored KeepKey runners invoke
+`HWI_KEEPKEY_PREPARE_SCRIPT` with `--prepare-hwi` and the same pinned source,
+patch, compiler, and protobuf environment as `nix run .#keepkey`.
 
 ## Device Details
 
@@ -261,11 +300,44 @@ Trezor:
   one model can run at a time.
 - `trezor-init` loads the e2e mnemonic. `TREZOR_MNEMONIC` overrides it.
 
+KeepKey:
+
+- Uses recursively pinned KeepKey firmware v7.10.0 commit
+  `d54797ee604f12c82ac6e5e02490b62dc04bf2dd`, including device-protocol
+  `323802f17dd44165a5100357df771348c8b49672`, and nanopb
+  `493adf3616bee052649c63c473f8355630c2797f`.
+- Copies the read-only sources to
+  `${XDG_CACHE_HOME:-$HOME/.cache}/bhwi/keepkey/build`, applies HWI 3.2.0's
+  `keepkey-build.patch`, `keepkey-googletest.patch`, and
+  `nanopb-deprecated-mode.patch`, then applies BHWI's source-only
+  `nix/patches/keepkey/cmake-minimum.patch` for current CMake. It creates local
+  Bash launchers for GNU Make and nanopb because NixOS has no `/bin/sh`, then
+  builds `bin/kkemu` with Nix `protoc`. The `recipe=9` build key contains both
+  revisions, the firmware and nanopb Nix store paths, all four patch checksums,
+  and the exact toolchain identity
+  `${pkgs.runtimeShell}:${pkgs.lib.makeBinPath [ pkgs.cmake pkgs.gcc pkgs.gnumake pkgs.patch pkgs.protobuf hwiPython ]}`.
+- Runs from
+  `${KEEPKEY_PROFILE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/bhwi/keepkey/profile}`
+  so the relative `emulator.img` is isolated. Before entering the profile, the
+  launcher sets umask `077` and creates or repairs the directory to mode
+  `0700`. `KEEPKEY_EMULATOR_BIN` selects a prepared executable.
+- Listens on UDP `127.0.0.1:11044`, with its debug link on `11045`.
+  `keepkey-init` loads the documented synthetic fixture without printing its
+  mnemonic, PIN, or passphrase settings.
+- The generic and tailored upstream suites symlink the binary as a temporary
+  `kkemu`, let upstream create a fresh image per test, drive confirmations on
+  debug port 11045, and surface `keepkey-emulator.stdout` on failure. Stop a
+  shared emulator before running either upstream gate.
+- Emulator outputs are `x86_64-linux` only. Physical HID/WebUSB and browser
+  WebHID/WebUSB support remain available on their existing platforms. See
+  [KEEPKEY](KEEPKEY.md).
+
 ## Notes
 
 - Emulator tests must run serially. Pass `-- --test-threads=1`; this is not set
   in `.cargo/config.toml`.
-- Emulator outputs build on `x86_64-linux` and `aarch64-darwin`. See Platforms
-  for the macOS specifics and the Linux-only outputs.
+- Most emulator outputs build on `x86_64-linux` and `aarch64-darwin`; KeepKey
+  emulator outputs are `x86_64-linux` only. See Platforms for the other
+  platform specifics.
 - The first CI run for a changed emulator source may be slow. Follow-up runs
   should hit Magic Nix Cache and the `$XDG_CACHE_HOME/bhwi` artifact cache.
