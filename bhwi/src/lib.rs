@@ -9,6 +9,8 @@ pub mod common;
 pub mod device;
 #[cfg(feature = "jade")]
 pub mod jade;
+#[cfg(feature = "keepkey")]
+pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
 pub mod policy;

@@ -133,10 +133,10 @@ impl From<TrezorError> for Error {
         match e {
             TrezorError::Decode(err) => Error::Serialization(err.to_string()),
             TrezorError::MalformedFrame => {
-                Error::Serialization("malformed trezor message frame".into())
+                Error::Serialization("malformed device message frame".into())
             }
             TrezorError::UnexpectedMessage(t, ctx) => {
-                Error::unexpected_result(t.to_be_bytes().to_vec(), format!("trezor: {ctx}"))
+                Error::unexpected_result(t.to_be_bytes().to_vec(), ctx)
             }
             TrezorError::Failure(code, msg) => Error::Rpc(code, Some(msg)),
             TrezorError::Locked(ctx) => Error::Device(ctx.into()),
@@ -158,9 +158,7 @@ impl From<TrezorError> for Error {
 }
 
 fn device_info(info: TrezorDeviceInfo) -> Info {
-    // Only the Model One takes the passphrase from the host; later models use
-    // their own screen. A device that reports no model is a Model One.
-    let is_model_one = info.model.as_deref().unwrap_or("1") == "1";
+    let needs_host_passphrase = !info.on_device_passphrase_entry && info.passphrase_protection;
     Info {
         version: info.version,
         networks: vec![info.network],
@@ -169,7 +167,7 @@ fn device_info(info: TrezorDeviceInfo) -> Info {
         label: info.label,
         on_device_passphrase_entry: Some(info.on_device_passphrase_entry),
         needs_pin_sent: Some(info.needs_pin_sent),
-        needs_passphrase_sent: Some(is_model_one && info.passphrase_protection),
+        needs_passphrase_sent: Some(needs_host_passphrase),
     }
 }
 

@@ -4,6 +4,8 @@ use crate::bitbox;
 use crate::coldcard;
 #[cfg(feature = "jade")]
 use crate::jade;
+#[cfg(feature = "keepkey")]
+use crate::keepkey;
 #[cfg(feature = "ledger")]
 use crate::ledger;
 use crate::miniscript::descriptor::{DescriptorPublicKey, WalletPolicy};
@@ -138,6 +140,9 @@ pub enum DeviceContext {
     /// Required context for Trezor setup.
     #[cfg(feature = "trezor")]
     TrezorManagement(trezor::ManagementContext),
+    /// Required context for KeepKey management commands.
+    #[cfg(feature = "keepkey")]
+    KeepKeyManagement(keepkey::ManagementContext),
 }
 
 pub enum Response {
@@ -194,9 +199,115 @@ pub struct Info {
     pub needs_passphrase_sent: Option<bool>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HostRequest {
+    PinMatrix {
+        kind: PinMatrixRequestKind,
+    },
+    RecoveryCharacter {
+        word_position: u32,
+        character_position: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PinMatrixRequestKind {
+    Current,
+    NewFirst,
+    NewSecond,
+    Unknown(i32),
+}
+
+#[derive(Eq, PartialEq)]
+pub enum HostResponse {
+    PinPositions(String),
+    RecoveryCharacter(char),
+    RecoveryDelete,
+    RecoveryNextWord,
+    RecoveryDone,
+}
+
+impl core::fmt::Debug for HostResponse {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PinPositions(_) => f.write_str("PinPositions(<redacted>)"),
+            Self::RecoveryCharacter(_) => f.write_str("RecoveryCharacter(<redacted>)"),
+            Self::RecoveryDelete => f.write_str("RecoveryDelete"),
+            Self::RecoveryNextWord => f.write_str("RecoveryNextWord"),
+            Self::RecoveryDone => f.write_str("RecoveryDone"),
+        }
+    }
+}
+
+fn zeroize_string(value: &mut String) {
+    zeroize::Zeroize::zeroize(value);
+}
+
+impl HostResponse {
+    pub fn into_bytes_for(self, request: &HostRequest) -> Result<Vec<u8>, Error> {
+        match (request, self) {
+            (HostRequest::PinMatrix { .. }, Self::PinPositions(mut positions)) => {
+                if positions.is_empty() || !positions.bytes().all(|byte| byte.is_ascii_digit()) {
+                    zeroize_string(&mut positions);
+                    return Err(Error::InvalidInput(
+                        "PIN positions must contain ASCII digits".into(),
+                    ));
+                }
+                Ok(positions.into_bytes())
+            }
+            (HostRequest::RecoveryCharacter { .. }, Self::RecoveryCharacter(character)) => {
+                if !character.is_ascii_lowercase() {
+                    return Err(Error::InvalidInput(
+                        "recovery cipher response must be one lowercase ASCII character".into(),
+                    ));
+                }
+                Ok(vec![character as u8])
+            }
+            (
+                HostRequest::RecoveryCharacter {
+                    word_position,
+                    character_position,
+                },
+                action,
+            ) => {
+                let byte = match action {
+                    Self::RecoveryDelete if *word_position != 0 || *character_position != 0 => 0x08,
+                    Self::RecoveryNextWord if *character_position >= 3 => b' ',
+                    Self::RecoveryDone
+                        if matches!(*word_position, 11 | 17 | 23) && *character_position >= 3 =>
+                    {
+                        b'\n'
+                    }
+                    Self::RecoveryDelete | Self::RecoveryNextWord | Self::RecoveryDone => {
+                        return Err(Error::InvalidInput(
+                            "recovery action is not valid at this position".into(),
+                        ));
+                    }
+                    Self::PinPositions(mut positions) => {
+                        zeroize_string(&mut positions);
+                        return Err(Error::InvalidInput(
+                            "host response does not match request".into(),
+                        ));
+                    }
+                    Self::RecoveryCharacter(_) => {
+                        return Err(Error::InvalidInput(
+                            "host response does not match request".into(),
+                        ));
+                    }
+                };
+                Ok(vec![byte])
+            }
+            _ => Err(Error::InvalidInput(
+                "host response does not match request".into(),
+            )),
+        }
+    }
+}
+
 pub enum Recipient {
     Device,
     PinServer { url: String },
+    Host(HostRequest),
 }
 
 pub struct Transmit {
@@ -264,6 +375,8 @@ pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Er
 pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
 #[cfg(feature = "trezor")]
 pub type TrezorInterpreter = trezor::TrezorInterpreter<Command, Transmit, Response, Error>;
+#[cfg(feature = "keepkey")]
+pub type KeepKeyInterpreter = keepkey::KeepKeyInterpreter<Command, Transmit, Response, Error>;
 
 impl From<Vec<u8>> for Transmit {
     fn from(payload: Vec<u8>) -> Transmit {
@@ -275,27 +388,160 @@ impl From<Vec<u8>> for Transmit {
     }
 }
 
+impl From<HostRequest> for Transmit {
+    fn from(request: HostRequest) -> Self {
+        Self {
+            recipient: Recipient::Host(request),
+            payload: Vec::new(),
+            encrypted: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Interpreter;
 
-    #[cfg(all(feature = "jade", feature = "ledger"))]
-    #[test]
-    fn common_interpreter_is_satisfied() {
-        let interpreters: Vec<
-            Box<
-                dyn Interpreter<
-                        Command = super::Command,
-                        Transmit = super::Transmit,
-                        Response = super::Response,
-                        Error = super::Error,
-                    >,
+    fn assert_interpreter<I>()
+    where
+        I: Interpreter<
+                Command = super::Command,
+                Transmit = super::Transmit,
+                Response = super::Response,
+                Error = super::Error,
             >,
-        > = vec![
-            Box::<LedgerInterpreter>::default(),
-            Box::<JadeInterpreter>::default(),
-        ];
-        assert_eq!(interpreters.len(), 2);
+    {
+    }
+
+    #[test]
+    fn common_interpreters_are_satisfied() {
+        #[cfg(feature = "bitbox")]
+        assert_interpreter::<BitBoxInterpreter<'static>>();
+        #[cfg(feature = "coldcard")]
+        assert_interpreter::<ColdcardInterpreter<'static>>();
+        #[cfg(feature = "jade")]
+        assert_interpreter::<JadeInterpreter>();
+        #[cfg(feature = "keepkey")]
+        assert_interpreter::<KeepKeyInterpreter>();
+        #[cfg(feature = "ledger")]
+        assert_interpreter::<LedgerInterpreter>();
+        #[cfg(feature = "trezor")]
+        assert_interpreter::<TrezorInterpreter>();
+    }
+
+    #[test]
+    fn host_response_validation_and_encoding() {
+        let pin = HostRequest::PinMatrix {
+            kind: PinMatrixRequestKind::Current,
+        };
+        assert_eq!(
+            HostResponse::PinPositions("123".into())
+                .into_bytes_for(&pin)
+                .unwrap(),
+            b"123"
+        );
+        assert!(matches!(
+            HostResponse::PinPositions("".into()).into_bytes_for(&pin),
+            Err(Error::InvalidInput(message))
+                if message == "PIN positions must contain ASCII digits"
+        ));
+        assert!(matches!(
+            HostResponse::PinPositions("１２３".into()).into_bytes_for(&pin),
+            Err(Error::InvalidInput(message))
+                if message == "PIN positions must contain ASCII digits"
+        ));
+
+        let first = HostRequest::RecoveryCharacter {
+            word_position: 0,
+            character_position: 0,
+        };
+        assert_eq!(
+            HostResponse::RecoveryCharacter('a')
+                .into_bytes_for(&first)
+                .unwrap(),
+            b"a"
+        );
+        assert!(matches!(
+            HostResponse::RecoveryCharacter('A').into_bytes_for(&first),
+            Err(Error::InvalidInput(message))
+                if message
+                    == "recovery cipher response must be one lowercase ASCII character"
+        ));
+        assert!(matches!(
+            HostResponse::RecoveryDelete.into_bytes_for(&first),
+            Err(Error::InvalidInput(message))
+                if message == "recovery action is not valid at this position"
+        ));
+        for request in [
+            HostRequest::RecoveryCharacter {
+                word_position: 0,
+                character_position: 1,
+            },
+            HostRequest::RecoveryCharacter {
+                word_position: 1,
+                character_position: 0,
+            },
+        ] {
+            assert_eq!(
+                HostResponse::RecoveryDelete
+                    .into_bytes_for(&request)
+                    .unwrap(),
+                [0x08]
+            );
+        }
+
+        let middle = HostRequest::RecoveryCharacter {
+            word_position: 1,
+            character_position: 3,
+        };
+        assert_eq!(
+            HostResponse::RecoveryDelete
+                .into_bytes_for(&middle)
+                .unwrap(),
+            [0x08]
+        );
+        assert_eq!(
+            HostResponse::RecoveryNextWord
+                .into_bytes_for(&middle)
+                .unwrap(),
+            b" "
+        );
+        assert!(HostResponse::RecoveryDone.into_bytes_for(&middle).is_err());
+        let too_early = HostRequest::RecoveryCharacter {
+            word_position: 1,
+            character_position: 2,
+        };
+        assert!(matches!(
+            HostResponse::RecoveryNextWord.into_bytes_for(&too_early),
+            Err(Error::InvalidInput(message))
+                if message == "recovery action is not valid at this position"
+        ));
+
+        let last = HostRequest::RecoveryCharacter {
+            word_position: 11,
+            character_position: 3,
+        };
+        assert_eq!(
+            HostResponse::RecoveryDone.into_bytes_for(&last).unwrap(),
+            b"\n"
+        );
+        assert!(matches!(
+            HostResponse::PinPositions("1".into()).into_bytes_for(&last),
+            Err(Error::InvalidInput(message))
+                if message == "host response does not match request"
+        ));
+    }
+
+    #[test]
+    fn host_response_debug_is_redacted() {
+        assert_eq!(
+            format!("{:?}", HostResponse::PinPositions("8675309".into())),
+            "PinPositions(<redacted>)"
+        );
+        assert_eq!(
+            format!("{:?}", HostResponse::RecoveryCharacter('q')),
+            "RecoveryCharacter(<redacted>)"
+        );
     }
 }

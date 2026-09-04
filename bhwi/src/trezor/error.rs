@@ -2,9 +2,9 @@
 pub enum TrezorError {
     #[error("protobuf decode error: {0}")]
     Decode(#[from] prost::DecodeError),
-    #[error("malformed trezor message frame")]
+    #[error("malformed device message frame")]
     MalformedFrame,
-    #[error("unexpected trezor message type {0} while {1}")]
+    #[error("unexpected device message type {0} while {1}")]
     UnexpectedMessage(u16, &'static str),
     #[error("device failure: {1}")]
     Failure(i32, String),
