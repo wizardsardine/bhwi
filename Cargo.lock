@@ -335,8 +335,10 @@ name = "bhwi-e2e-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bhwi",
  "bhwi-async",
  "bhwi-cli",
+ "bhwi-e2e-keepkey",
  "bhwi-e2e-trezor",
  "bitcoin",
  "hex",
@@ -365,9 +367,12 @@ name = "bhwi-e2e-hwi-parity"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bhwi",
+ "bhwi-e2e-keepkey",
  "bhwi-e2e-trezor",
  "bitcoin",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -383,6 +388,18 @@ dependencies = [
  "miniscript",
  "reqwest",
  "serde_cbor",
+ "tokio",
+]
+
+[[package]]
+name = "bhwi-e2e-keepkey"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bhwi",
+ "bhwi-async",
+ "bhwi-cli",
+ "prost",
  "tokio",
 ]
 

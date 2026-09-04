@@ -471,7 +471,7 @@ jobs:
           echo $! > trezor.pid
           tail -n +1 -F trezor.log &
           echo $! > trezor-tail.pid
-          bash nix/scripts/wait-for-trezor.sh 127.0.0.1 21324 1800 "$(cat trezor.pid)" || {
+          bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 21324 1800 "$(cat trezor.pid)" || {
             bash nix/scripts/emit-gh-error-log.sh "Trezor startup log" trezor.log
             cat trezor.log || true
             exit 1
@@ -513,3 +513,157 @@ jobs:
       - name: Stop Trezor emulator
         if: always()
         run: bash nix/scripts/stop-emulator.sh trezor.pid
+
+  keepkey-e2e:
+    needs: nix-flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.XDG_CACHE_HOME }}/bhwi/keepkey/build
+          key: keepkey-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ hashFiles('flake.nix', 'nix/scripts/start-keepkey.sh', 'nix/patches/keepkey/cmake-minimum.patch') }}
+          restore-keys: |
+            keepkey-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
+      - name: Start KeepKey emulator
+        run: |
+          nix run .#keepkey > keepkey.log 2>&1 &
+          echo $! > keepkey.pid
+          tail -n +1 -F keepkey.log &
+          echo $! > keepkey-tail.pid
+          bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 11044 1800 "$(cat keepkey.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey startup log" keepkey.log
+            cat keepkey.log || true
+            exit 1
+          }
+          kill "$(cat keepkey-tail.pid)" || true
+      - name: Initialize KeepKey
+        run: |
+          nix run .#keepkey-init > keepkey-init.log 2>&1 || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey init log" keepkey-init.log
+            cat keepkey-init.log || true
+            exit 1
+          }
+      - name: Run KeepKey e2e
+        run: |
+          set -o pipefail
+          nix develop .#keepkey -c cargo test -p bhwi-e2e-keepkey -- --test-threads=1 2>&1 | tee keepkey-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey e2e log" keepkey-e2e.log
+            cat keepkey-e2e.log || true
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey emulator log" keepkey.log
+            cat keepkey.log || true
+            exit 1
+          }
+      - name: Build bhwi CLI
+        run: nix develop .#keepkey -c cargo build -p bhwi-cli --bins
+      - name: Run KeepKey CLI e2e
+        run: |
+          set -o pipefail
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#keepkey -c cargo test -p bhwi-e2e-cli keepkey -- --test-threads=1 2>&1 | tee keepkey-cli-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey CLI e2e log" keepkey-cli-e2e.log
+            cat keepkey-cli-e2e.log || true
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey emulator log" keepkey.log
+            cat keepkey.log || true
+            exit 1
+          }
+      - name: Run KeepKey HWI parity tests
+        run: |
+          set -o pipefail
+          timeout 20m nix run .#hwi-parity-keepkey -- -- --test-threads=1 2>&1 | tee keepkey-hwi-parity.log || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey HWI parity log" keepkey-hwi-parity.log
+            cat keepkey-hwi-parity.log || true
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey emulator log" keepkey.log
+            cat keepkey.log || true
+            exit 1
+          }
+      - name: Stop shared KeepKey emulator
+        run: bash nix/scripts/stop-emulator.sh keepkey.pid
+      - name: Start fresh KeepKey emulator for direct lifecycle
+        run: |
+          profile="$RUNNER_TEMP/keepkey-direct-profile"
+          rm -rf "$profile"
+          mkdir -p "$profile"
+          KEEPKEY_PROFILE_DIR="$profile" nix run .#keepkey > keepkey-direct-lifecycle-emulator.log 2>&1 &
+          echo $! > keepkey.pid
+          bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 11044 120 "$(cat keepkey.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey direct lifecycle startup log" keepkey-direct-lifecycle-emulator.log
+            cat keepkey-direct-lifecycle-emulator.log || true
+            exit 1
+          }
+      - name: Run KeepKey direct management lifecycle
+        run: |
+          set -o pipefail
+          nix develop .#keepkey -c cargo test -p bhwi-e2e-keepkey tests::keepkey_management_lifecycle -- --ignored --exact --test-threads=1 2>&1 | tee keepkey-direct-lifecycle.log || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey direct lifecycle log" keepkey-direct-lifecycle.log
+            cat keepkey-direct-lifecycle.log || true
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey direct lifecycle emulator log" keepkey-direct-lifecycle-emulator.log
+            cat keepkey-direct-lifecycle-emulator.log || true
+            exit 1
+          }
+      - name: Stop KeepKey direct lifecycle emulator
+        run: bash nix/scripts/stop-emulator.sh keepkey.pid
+      - name: Start fresh KeepKey emulator for CLI lifecycle
+        run: |
+          profile="$RUNNER_TEMP/keepkey-cli-profile"
+          rm -rf "$profile"
+          mkdir -p "$profile"
+          KEEPKEY_PROFILE_DIR="$profile" nix run .#keepkey > keepkey-cli-lifecycle-emulator.log 2>&1 &
+          echo $! > keepkey.pid
+          bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 11044 120 "$(cat keepkey.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey CLI lifecycle startup log" keepkey-cli-lifecycle-emulator.log
+            cat keepkey-cli-lifecycle-emulator.log || true
+            exit 1
+          }
+      - name: Run KeepKey CLI management lifecycle
+        run: |
+          set -o pipefail
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#keepkey -c cargo test -p bhwi-e2e-cli keepkey::keepkey_management_lifecycle -- --ignored --exact --test-threads=1 2>&1 | tee keepkey-cli-lifecycle.log || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey CLI lifecycle log" keepkey-cli-lifecycle.log
+            cat keepkey-cli-lifecycle.log || true
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey CLI lifecycle emulator log" keepkey-cli-lifecycle-emulator.log
+            cat keepkey-cli-lifecycle-emulator.log || true
+            exit 1
+          }
+      - name: Stop KeepKey CLI lifecycle emulator
+        run: bash nix/scripts/stop-emulator.sh keepkey.pid
+      - name: Start fresh KeepKey emulator for HWI lifecycle
+        run: |
+          profile="$RUNNER_TEMP/keepkey-hwi-profile"
+          rm -rf "$profile"
+          mkdir -p "$profile"
+          KEEPKEY_PROFILE_DIR="$profile" nix run .#keepkey > keepkey-hwi-lifecycle-emulator.log 2>&1 &
+          echo $! > keepkey.pid
+          bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 11044 120 "$(cat keepkey.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey HWI lifecycle startup log" keepkey-hwi-lifecycle-emulator.log
+            cat keepkey-hwi-lifecycle-emulator.log || true
+            exit 1
+          }
+      - name: Run KeepKey candidate HWI management lifecycle
+        run: |
+          set -o pipefail
+          nix run .#hwi-parity-keepkey -- tests::candidate_keepkey_management_lifecycle -- --ignored --exact --test-threads=1 2>&1 | tee keepkey-hwi-lifecycle.log || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey HWI lifecycle log" keepkey-hwi-lifecycle.log
+            cat keepkey-hwi-lifecycle.log || true
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey HWI lifecycle emulator log" keepkey-hwi-lifecycle-emulator.log
+            cat keepkey-hwi-lifecycle-emulator.log || true
+            exit 1
+          }
+      - name: Stop KeepKey HWI lifecycle emulator
+        run: bash nix/scripts/stop-emulator.sh keepkey.pid
+      - name: Run upstream HWI KeepKey suite
+        run: |
+          set -o pipefail
+          timeout 90m nix run .#hwi-upstream-keepkey 2>&1 | tee keepkey-hwi-upstream.log || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey upstream HWI log" keepkey-hwi-upstream.log
+            cat keepkey-hwi-upstream.log || true
+            exit 1
+          }
+      - name: Stop KeepKey emulator
+        if: always()
+        run: |
+          if [[ -f keepkey-tail.pid ]]; then
+            kill "$(cat keepkey-tail.pid)" 2>/dev/null || true
+          fi
+          bash nix/scripts/stop-emulator.sh keepkey.pid

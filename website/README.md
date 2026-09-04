@@ -2,9 +2,9 @@
 
 Demo web application for [BHWI](../README.md) using WebAssembly.
 
-Supports connecting to Coldcard, Jade, Ledger, and BitBox02 devices via
-WebHID/WebSerial: fetching xpubs, displaying addresses, registering
-wallets, signing PSBTs, and signing messages.
+Supports Coldcard, Ledger, BitBox02, and Trezor One via WebHID; Trezor Model T
+via WebUSB; Jade via WebSerial; and KeepKey via WebUSB (default) or WebHID.
+Available operations depend on the connected device; the demo can fetch xpubs, display supported addresses, register wallets where supported, sign supported PSBTs, and sign messages.
 
 Requires a Chromium-based browser (Chrome, Edge, etc.).
 

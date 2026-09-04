@@ -1,0 +1,18 @@
+diff --git a/deps/googletest/CMakeLists.txt b/deps/googletest/CMakeLists.txt
+--- a/deps/googletest/CMakeLists.txt
++++ b/deps/googletest/CMakeLists.txt
+@@ -1 +1 @@
+-cmake_minimum_required(VERSION 2.6.4)
++cmake_minimum_required(VERSION 3.5)
+diff --git a/deps/googletest/googlemock/CMakeLists.txt b/deps/googletest/googlemock/CMakeLists.txt
+--- a/deps/googletest/googlemock/CMakeLists.txt
++++ b/deps/googletest/googlemock/CMakeLists.txt
+@@ -46 +46 @@
+-cmake_minimum_required(VERSION 2.6.4)
++cmake_minimum_required(VERSION 3.5)
+diff --git a/deps/googletest/googletest/CMakeLists.txt b/deps/googletest/googletest/CMakeLists.txt
+--- a/deps/googletest/googletest/CMakeLists.txt
++++ b/deps/googletest/googletest/CMakeLists.txt
+@@ -53 +53 @@
+-cmake_minimum_required(VERSION 2.6.4)
++cmake_minimum_required(VERSION 3.5)

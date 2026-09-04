@@ -6,7 +6,7 @@ pub mod coldcard;
 pub mod jade;
 #[cfg(feature = "ledger")]
 pub mod ledger;
-#[cfg(feature = "trezor")]
+#[cfg(any(feature = "trezor", feature = "keepkey"))]
 pub mod trezor;
 
 use async_trait::async_trait;

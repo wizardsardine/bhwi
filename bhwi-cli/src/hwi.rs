@@ -10,6 +10,7 @@ use std::{
 use bhwi::{
     bitcoin::psbt::Psbt,
     common::{MultisigAddressType, MultisigDisplayAddress},
+    keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED},
     ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
     trezor::HostPassphrase,
 };
@@ -38,7 +39,8 @@ use crate::{
     config::DeviceSelector,
     get_descriptors::GetDescriptorOptions,
     management::{
-        bitbox_restore_context, bitbox_setup_context, trezor_restore_context, trezor_setup_context,
+        bitbox_restore_context, bitbox_setup_context, keepkey_restore_context,
+        keepkey_setup_context, trezor_restore_context, trezor_setup_context,
     },
     udev::{UdevRuleSelection, install_udev_rules},
 };
@@ -192,6 +194,22 @@ impl HwiSelector {
         }
     }
 }
+fn hwi_selector_matches_device(
+    raw: Option<&str>,
+    device_type: DeviceType,
+    model: &str,
+    is_emulated: bool,
+) -> bool {
+    let Some(raw) = raw else {
+        return true;
+    };
+    let Ok(selected_type) = parse_device_type(raw) else {
+        return false;
+    };
+    selected_type == device_type
+        && (!raw.eq_ignore_ascii_case("keepkey_simulator")
+            || (model == "keepkey_simulator" && is_emulated))
+}
 
 /// Resolves the raw device type, reproducing upstream's error precedence:
 /// `-1` without type/fingerprint, `-4` for an unknown type with a path, then
@@ -224,12 +242,21 @@ fn hwi_device_manager(selector: &HwiSelector) -> Result<DeviceManager, HwiError>
 async fn find_hwi_device(selector: &HwiSelector) -> Result<(DeviceManager, Device), HwiError> {
     let manager = hwi_device_manager(selector)?;
     match manager.get_device_with_fingerprint().await {
-        Ok(Some(device)) => Ok((manager, device)),
-        Ok(None) => Err(HwiError::new(
+        Ok(Some(device))
+            if hwi_selector_matches_device(
+                selector.device_type.as_deref(),
+                device.device_type(),
+                device.model(),
+                device.is_emulated(),
+            ) =>
+        {
+            Ok((manager, device))
+        }
+        Ok(Some(_)) | Ok(None) => Err(HwiError::new(
             HwiErrorCode::DeviceConnectionError,
             "Could not find device with specified fingerprint or type",
         )),
-        Err(err) => Err(device_error(err)),
+        Err(err) => Err(classify_anyhow_device_error(&err)),
     }
 }
 
@@ -786,6 +813,8 @@ where
 }
 
 const EMPTY_PASSPHRASE_WARNING: &str = "Passphrase protection enabled but passphrase was not provided. Using default passphrase of the empty string (\"\")";
+const KEEPKEY_PASSPHRASE_REQUIRED: &str =
+    "Passphrase needs to be specified before the fingerprint information can be retrieved";
 
 async fn enumerate(selector: HwiSelector) -> HwiResponse {
     // Upstream enumerate ignores an unrecognized -t entirely; drop the filter
@@ -794,6 +823,7 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
         .device_type
         .as_deref()
         .and_then(|raw| parse_device_type(raw).ok());
+    let raw_device_type = device_type.and(selector.device_type.as_deref());
     let manager = DeviceManager::new(selector.device_selector(device_type));
     let devices = match manager.enumerate().await {
         Ok(devices) => devices,
@@ -803,6 +833,14 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
     };
     let mut response = Vec::with_capacity(devices.len());
     for mut device in devices {
+        if !hwi_selector_matches_device(
+            raw_device_type,
+            device.device_type(),
+            device.model(),
+            device.is_emulated(),
+        ) {
+            continue;
+        }
         let mut error = None;
         let mut code = None;
         let mut info = None;
@@ -832,28 +870,48 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
                     .and_then(|info| info.needs_passphrase_sent)
                     .unwrap_or(false);
                 if needs_pin_sent {
-                    error = Some(bhwi::trezor::TrezorError::LOCKED.to_owned());
+                    let locked = if device.device_type() == DeviceType::KeepKey {
+                        KEEPKEY_LOCKED
+                    } else {
+                        bhwi::trezor::TrezorError::LOCKED
+                    };
+                    error = Some(locked.to_owned());
                     code = Some(HwiErrorCode::DeviceNotReady.code());
                 } else if error.is_none() {
                     if needs_passphrase_sent && manager.selector.passphrase.is_none() {
-                        warnings.push(vec![EMPTY_PASSPHRASE_WARNING.to_owned()]);
-                    }
-                    match device.fingerprint().await {
-                        Ok(device_fingerprint) => {
-                            fingerprint = Some(device_fingerprint);
-                            // Deriving it required the passphrase, so it has been sent.
-                            needs_passphrase_sent = false;
+                        if device.device_type() == DeviceType::KeepKey {
+                            error = Some(KEEPKEY_PASSPHRASE_REQUIRED.to_owned());
+                            code = Some(HwiErrorCode::DeviceNotReady.code());
+                        } else {
+                            warnings.push(vec![EMPTY_PASSPHRASE_WARNING.to_owned()]);
                         }
-                        Err(err) => {
-                            error = Some(err.to_string());
-                            code = Some(HwiErrorCode::DeviceConnectionError.code());
+                    }
+                    if error.is_none()
+                        && info.as_ref().and_then(|info| info.initialized) == Some(false)
+                    {
+                        error = Some("Not initialized".to_owned());
+                        code = Some(HwiErrorCode::DeviceNotInitialized.code());
+                    }
+                    if error.is_none() {
+                        match device.fingerprint().await {
+                            Ok(device_fingerprint) => {
+                                fingerprint = Some(device_fingerprint);
+                                // Deriving it required the passphrase, so it has been sent.
+                                needs_passphrase_sent = false;
+                            }
+                            Err(err) => {
+                                let classified = classify_anyhow_device_error(&err);
+                                error = Some(classified.error);
+                                code = Some(classified.code);
+                            }
                         }
                     }
                 }
             }
             Err(err) => {
-                error = Some(err.to_string());
-                code = Some(HwiErrorCode::DeviceConnectionError.code());
+                let classified = classify_device_error(&err);
+                error = Some(classified.error);
+                code = Some(classified.code);
             }
         }
         let label = info.as_ref().and_then(|info| info.label.clone());
@@ -932,8 +990,10 @@ async fn setup_device(
             "setup requires interactive mode",
         ));
     }
-    if device.device_type() == DeviceType::Trezor
-        && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
+    if matches!(
+        device.device_type(),
+        DeviceType::KeepKey | DeviceType::Trezor
+    ) && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
     {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::DeviceAlreadyInitialized,
@@ -942,7 +1002,7 @@ async fn setup_device(
     }
     if !matches!(
         device.device_type(),
-        DeviceType::BitBox02 | DeviceType::Trezor
+        DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
     ) {
         let action = HwiUnsupportedDeviceAction::Setup {
             interactive,
@@ -969,10 +1029,10 @@ async fn setup_device(
         ));
     }
 
-    let context = if device.device_type() == DeviceType::Trezor {
-        trezor_setup_context()
-    } else {
-        match bitbox_setup_context(device.is_emulated()) {
+    let context = match device.device_type() {
+        DeviceType::KeepKey => keepkey_setup_context(),
+        DeviceType::Trezor => trezor_setup_context(),
+        DeviceType::BitBox02 => match bitbox_setup_context(device.is_emulated()) {
             Ok(context) => context,
             Err(err) => {
                 return HwiResponse::Error(HwiError::new(
@@ -980,7 +1040,8 @@ async fn setup_device(
                     err.to_string(),
                 ));
             }
-        }
+        },
+        _ => unreachable!("setup support checked above"),
     };
     match device
         .device()
@@ -1006,7 +1067,7 @@ async fn wipe_device(selector: HwiSelector) -> HwiResponse {
 
     if !matches!(
         device.device_type(),
-        DeviceType::BitBox02 | DeviceType::Trezor
+        DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
     ) {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
@@ -1045,8 +1106,10 @@ async fn restore_device(
             "restore requires interactive mode",
         ));
     }
-    if device.device_type() == DeviceType::Trezor
-        && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
+    if matches!(
+        device.device_type(),
+        DeviceType::KeepKey | DeviceType::Trezor
+    ) && device.info().await.ok().and_then(|info| info.initialized) == Some(true)
     {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::DeviceFailure,
@@ -1055,7 +1118,7 @@ async fn restore_device(
     }
     if !matches!(
         device.device_type(),
-        DeviceType::BitBox02 | DeviceType::Trezor
+        DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
     ) {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
@@ -1086,7 +1149,12 @@ async fn restore_device(
             }
         }
     } else {
-        match trezor_restore_context() {
+        let context = if device.device_type() == DeviceType::KeepKey {
+            keepkey_restore_context()
+        } else {
+            trezor_restore_context()
+        };
+        match context {
             Ok(context) => Some(context),
             Err(err) => {
                 return HwiResponse::Error(HwiError::new(
@@ -1111,10 +1179,17 @@ async fn toggle_passphrase_device(selector: HwiSelector) -> HwiResponse {
         Ok(found) => found,
         Err(err) => return HwiResponse::Error(err),
     };
+    let needs_pin_sent = device.device_type() == DeviceType::KeepKey
+        && device
+            .info()
+            .await
+            .ok()
+            .and_then(|info| info.needs_pin_sent)
+            == Some(true);
 
     if !matches!(
         device.device_type(),
-        DeviceType::BitBox02 | DeviceType::Trezor
+        DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
     ) {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
@@ -1134,7 +1209,14 @@ async fn toggle_passphrase_device(selector: HwiSelector) -> HwiResponse {
     }
 
     match device.device().toggle_passphrase().await {
-        Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        Ok(success) => {
+            if success && needs_pin_sent {
+                eprintln!("Confirm the action by entering your PIN");
+                eprintln!("{SEND_PIN_INSTRUCTION}");
+                eprintln!("{PIN_MATRIX_DESCRIPTION}");
+            }
+            HwiResponse::Success(HwiSuccessResponse { success })
+        }
         Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
 }
@@ -1144,6 +1226,7 @@ pub const PIN_MATRIX_DESCRIPTION: &str =
     7 8 9
     4 5 6
     1 2 3";
+pub const SEND_PIN_INSTRUCTION: &str = "Use 'sendpin' to provide the number positions for the PIN as displayed on your device's screen";
 
 async fn device_for_pin_command(
     selector: HwiSelector,
@@ -1179,11 +1262,14 @@ async fn device_for_pin_command(
             ));
         }
         Err(err) => {
-            return Err(device_error(err));
+            return Err(classify_anyhow_device_error(&err));
         }
     };
 
-    if device.device_type() != DeviceType::Trezor {
+    if !matches!(
+        device.device_type(),
+        DeviceType::KeepKey | DeviceType::Trezor
+    ) {
         return Err(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             hwi_unavailable_action_message(device.device_type(), &action),
@@ -1192,20 +1278,22 @@ async fn device_for_pin_command(
     Ok(device)
 }
 
+fn locked_device_error(message: &str) -> Option<HwiError> {
+    [bhwi::trezor::TrezorError::LOCKED, KEEPKEY_LOCKED]
+        .into_iter()
+        .find(|locked| message.contains(*locked))
+        .map(|locked| HwiError::new(HwiErrorCode::DeviceNotReady, locked))
+}
+
 /// A device waiting for its PIN reports being locked rather than failing to connect.
 fn device_error(err: impl std::fmt::Display) -> HwiError {
     let message = err.to_string();
-    if message.contains(bhwi::trezor::TrezorError::LOCKED) {
-        return HwiError::new(
-            HwiErrorCode::DeviceNotReady,
-            bhwi::trezor::TrezorError::LOCKED,
-        );
-    }
-    HwiError::new(HwiErrorCode::DeviceConnectionError, message)
+    locked_device_error(&message)
+        .unwrap_or_else(|| HwiError::new(HwiErrorCode::DeviceConnectionError, message))
 }
 
 /// Reports the bare device message rather than the wrapped transport error.
-fn pin_error(err: impl std::fmt::Display) -> HwiError {
+fn pin_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
     let message = err.to_string();
     for known in [
         bhwi::trezor::TrezorError::NO_PIN_NEEDED,
@@ -1215,7 +1303,34 @@ fn pin_error(err: impl std::fmt::Display) -> HwiError {
             return HwiError::new(HwiErrorCode::DeviceAlreadyUnlocked, known);
         }
     }
+    if let Some(bhwi::common::Error::Rpc(7, detail)) = common_device_error(err) {
+        return HwiError::new(
+            HwiErrorCode::BadArgument,
+            detail.as_deref().unwrap_or("Invalid PIN"),
+        );
+    }
     HwiError::new(HwiErrorCode::DeviceConnectionError, message)
+}
+
+fn send_pin_error_response(err: &(dyn std::error::Error + 'static)) -> HwiResponse {
+    let mut source = Some(err);
+    while let Some(current) = source {
+        let action_cancelled = matches!(
+            current.downcast_ref::<bhwi::trezor::TrezorError>(),
+            Some(bhwi::trezor::TrezorError::ActionCancelled)
+        );
+        // The common KeepKey adapter converts the same protocol error before
+        // the async HWI boundary sees it.
+        let converted_action_cancelled = matches!(
+            current.downcast_ref::<bhwi::common::Error>(),
+            Some(bhwi::common::Error::AuthenticationRefused)
+        );
+        if action_cancelled || converted_action_cancelled {
+            return HwiResponse::Success(HwiSuccessResponse { success: false });
+        }
+        source = current.source();
+    }
+    HwiResponse::Error(pin_error(err))
 }
 
 async fn prompt_pin_device(selector: HwiSelector) -> HwiResponse {
@@ -1225,14 +1340,12 @@ async fn prompt_pin_device(selector: HwiSelector) -> HwiResponse {
             Err(error) => return HwiResponse::Error(error),
         };
 
-    eprintln!(
-        "Use 'sendpin' to provide the number positions for the PIN as displayed on your device's screen"
-    );
+    eprintln!("{SEND_PIN_INSTRUCTION}");
     eprintln!("{PIN_MATRIX_DESCRIPTION}");
 
     match device.device().prompt_pin().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(pin_error(err)),
+        Err(err) => HwiResponse::Error(pin_error(&err)),
     }
 }
 
@@ -1255,11 +1368,18 @@ async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
         Err(error) => return HwiResponse::Error(error),
     };
 
-    let context =
-        bhwi::common::DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Pin(pin));
+    let context = match device.device_type() {
+        DeviceType::KeepKey => bhwi::common::DeviceContext::KeepKeyManagement(
+            bhwi::keepkey::ManagementContext::Pin(pin),
+        ),
+        DeviceType::Trezor => {
+            bhwi::common::DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Pin(pin))
+        }
+        _ => unreachable!("PIN support checked above"),
+    };
     match device.device().send_pin(Some(context)).await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
-        Err(err) => HwiResponse::Error(pin_error(err)),
+        Err(err) => send_pin_error_response(&err),
     }
 }
 
@@ -1284,7 +1404,7 @@ async fn backup_device(
             }
         }
         DeviceType::Coldcard => {}
-        DeviceType::Ledger | DeviceType::Jade | DeviceType::Trezor => {
+        DeviceType::KeepKey | DeviceType::Ledger | DeviceType::Jade | DeviceType::Trezor => {
             let unsupported = HwiUnsupportedDeviceAction::Backup {
                 label,
                 backup_passphrase,
@@ -1458,6 +1578,21 @@ async fn sign_message(selector: HwiSelector, message: String, path: String) -> H
 }
 
 async fn display_address(selector: HwiSelector, request: HwiDisplayAddressRequest) -> HwiResponse {
+    if matches!(
+        &request,
+        HwiDisplayAddressRequest::Path {
+            addr_type: HwiAddressType::Tap,
+            ..
+        }
+    ) && selector.device_type.as_deref().is_some_and(|raw| {
+        raw.eq_ignore_ascii_case("keepkey") || raw.eq_ignore_ascii_case("keepkey_simulator")
+    }) {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            "This device does not support displaying Taproot addresses",
+        ));
+    }
+
     let (_manager, mut device) = match find_hwi_device(&selector).await {
         Ok(found) => found,
         Err(err) => return HwiResponse::Error(err),
@@ -1495,7 +1630,10 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
                 Err(single_sig_error) => {
                     if matches!(
                         device.device_type(),
-                        DeviceType::Coldcard | DeviceType::Jade | DeviceType::Trezor
+                        DeviceType::Coldcard
+                            | DeviceType::Jade
+                            | DeviceType::KeepKey
+                            | DeviceType::Trezor
                     ) {
                         match multisig_display_address_from_descriptor(&descriptor) {
                             Ok(address) => Ok(DisplayAddress::ByMultisig(address)),
@@ -1663,7 +1801,7 @@ async fn get_xpub(selector: HwiSelector, path: String, expert: bool) -> HwiRespo
 
     match device.device().get_extended_pubkey(path, false).await {
         Ok(xpub) => HwiResponse::GetXpub(get_xpub_response(xpub, expert)),
-        Err(err) => HwiResponse::Error(device_error(err)),
+        Err(err) => HwiResponse::Error(classify_anyhow_device_error(&anyhow::Error::new(err))),
     }
 }
 
@@ -1676,7 +1814,7 @@ async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(device_error(err));
+            return HwiResponse::Error(classify_anyhow_device_error(&err));
         }
     };
     let device_type = device.device_type();
@@ -1700,7 +1838,7 @@ async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
             let descriptor = match manager.get_descriptor(device.device(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(device_error(err));
+                    return HwiResponse::Error(classify_anyhow_device_error(&err));
                 }
             };
             let descriptor = match hwi_descriptor_string(&descriptor) {
@@ -1747,6 +1885,17 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
             "keypool start index must be less than or equal to end index",
         ));
     }
+    if !request.all
+        && request.addr_type == HwiAddressType::Tap
+        && selector.device_type.as_deref().is_some_and(|raw| {
+            raw.eq_ignore_ascii_case("keepkey") || raw.eq_ignore_ascii_case("keepkey_simulator")
+        })
+    {
+        return HwiResponse::Error(HwiError::new(
+            HwiErrorCode::UnsupportedCommand,
+            "Device does not support Taproot",
+        ));
+    }
 
     let (manager, mut device) = match find_hwi_device(&selector).await {
         Ok(found) => found,
@@ -1756,7 +1905,7 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(device_error(err));
+            return HwiResponse::Error(classify_anyhow_device_error(&err));
         }
     };
     let device_type = device.device_type();
@@ -1806,7 +1955,7 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
             let descriptor = match manager.get_descriptor(device.device(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(device_error(err));
+                    return HwiResponse::Error(classify_anyhow_device_error(&err));
                 }
             };
             let desc = match hwi_descriptor_string(&descriptor) {
@@ -2576,7 +2725,7 @@ async fn singlesig_display_address_from_descriptor(
     let fingerprint = device
         .fingerprint()
         .await
-        .map_err(|err| HwiError::new(HwiErrorCode::DeviceConnectionError, err.to_string()))?;
+        .map_err(|err| classify_anyhow_device_error(&err))?;
     if parsed.fingerprint != fingerprint {
         return Err(HwiError::new(
             HwiErrorCode::BadArgument,
@@ -2588,7 +2737,7 @@ async fn singlesig_display_address_from_descriptor(
         .device()
         .get_extended_pubkey(parsed.origin_path.clone(), false)
         .await
-        .map_err(|err| HwiError::new(HwiErrorCode::DeviceConnectionError, err.to_string()))?;
+        .map_err(|err| classify_anyhow_device_error(&anyhow::Error::new(err)))?;
 
     if !descriptor_key_matches_xpub(&parsed.key, xpub) {
         return Err(HwiError::new(
@@ -2811,22 +2960,48 @@ fn descriptor_key_matches_xpub(key: &str, xpub: Xpub) -> bool {
 /// codes. Walks the `source()` chain for a `bhwi::common::Error` so cancels
 /// and argument refusals stop flattening to `-3`; unclassified failures keep
 /// the full message with `-3`.
-fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+fn common_device_error<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a bhwi::common::Error> {
+    let mut source = Some(err);
     while let Some(current) = source {
         if let Some(error) = current.downcast_ref::<bhwi::common::Error>() {
-            use bhwi::common::Error as CommonError;
-            let code = match error {
-                CommonError::UserCancelled => HwiErrorCode::ActionCanceled,
-                CommonError::UnsupportedDisplayAddress(_) => HwiErrorCode::UnsupportedCommand,
-                // Device-refused input keeps upstream's bad-argument class,
-                // e.g. `Coldcard Error: ...` for an unknown multisig wallet.
-                CommonError::InvalidInput(_) | CommonError::Device(_) => HwiErrorCode::BadArgument,
-                _ => break,
-            };
-            return HwiError::new(code, error.to_string());
+            return Some(error);
         }
         source = current.source();
+    }
+    None
+}
+
+fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
+    let mut source = Some(err);
+    while let Some(current) = source {
+        if let Some(error) = locked_device_error(&current.to_string()) {
+            return error;
+        }
+        source = current.source();
+    }
+
+    if let Some(error) = common_device_error(err) {
+        use bhwi::common::Error as CommonError;
+        if let CommonError::InvalidInput(message) = error
+            && message == "Passphrase too long"
+        {
+            return HwiError::new(HwiErrorCode::BadArgument, message);
+        }
+        let code = match error {
+            CommonError::AuthenticationRefused | CommonError::UserCancelled => {
+                HwiErrorCode::ActionCanceled
+            }
+            CommonError::MissingCommandInfo(_) | CommonError::UnsupportedDisplayAddress(_) => {
+                HwiErrorCode::UnsupportedCommand
+            }
+            // Device-refused input keeps upstream's bad-argument class,
+            // e.g. `Coldcard Error: ...` for an unknown multisig wallet.
+            CommonError::InvalidInput(_) | CommonError::Device(_) => HwiErrorCode::BadArgument,
+            _ => return device_error(err),
+        };
+        return HwiError::new(code, error.to_string());
     }
     device_error(err)
 }
@@ -2868,6 +3043,7 @@ fn hwi_can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
         DeviceType::BitBox02 => false,
         DeviceType::Ledger => true,
         DeviceType::Jade => false,
+        DeviceType::KeepKey => false,
         DeviceType::Coldcard => model.contains("edge"),
         DeviceType::Trezor => model != "trezor_one",
     }
@@ -2939,12 +3115,14 @@ fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
 }
 
 fn reports_device_info(device_type: DeviceType) -> bool {
-    matches!(device_type, DeviceType::Trezor)
+    matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor)
 }
 
 fn label_for(device_type: DeviceType, label: Option<String>) -> Option<Option<String>> {
     match device_type {
-        DeviceType::Coldcard | DeviceType::Ledger | DeviceType::Trezor => Some(label),
+        DeviceType::Coldcard | DeviceType::KeepKey | DeviceType::Ledger | DeviceType::Trezor => {
+            Some(label)
+        }
         DeviceType::BitBox02 | DeviceType::Jade => None,
     }
 }
@@ -2957,6 +3135,8 @@ fn hwi_enumerate_model(
 ) -> String {
     match (device_type, is_emulated) {
         (DeviceType::BitBox02, true) => "bitbox02_nova_multi".to_owned(),
+        (DeviceType::KeepKey, true) => "keepkey_simulator".to_owned(),
+        (DeviceType::KeepKey, false) => "keepkey".to_owned(),
         (DeviceType::Trezor, emulated) => match firmware {
             Some(reported) => {
                 let suffix = if emulated { "_simulator" } else { "" };
@@ -3021,6 +3201,25 @@ fn hwi_unavailable_action_message(
         }
         (DeviceType::Trezor, HwiUnsupportedDeviceAction::TogglePassphrase) => {
             "Trezor passphrase toggling is not yet supported"
+        }
+        (DeviceType::KeepKey, HwiUnsupportedDeviceAction::Setup { .. }) => {
+            "KeepKey setup is unavailable"
+        }
+        (DeviceType::KeepKey, HwiUnsupportedDeviceAction::Wipe) => "KeepKey wipe is unavailable",
+        (DeviceType::KeepKey, HwiUnsupportedDeviceAction::Restore { .. }) => {
+            "KeepKey restore is unavailable"
+        }
+        (DeviceType::KeepKey, HwiUnsupportedDeviceAction::Backup { .. }) => {
+            "The Keepkey does not support creating a backup via software"
+        }
+        (DeviceType::KeepKey, HwiUnsupportedDeviceAction::PromptPin) => {
+            "KeepKey PIN entry is unavailable"
+        }
+        (DeviceType::KeepKey, HwiUnsupportedDeviceAction::SendPin { .. }) => {
+            "KeepKey PIN entry is unavailable"
+        }
+        (DeviceType::KeepKey, HwiUnsupportedDeviceAction::TogglePassphrase) => {
+            "KeepKey passphrase toggling is unavailable"
         }
         (DeviceType::Jade, HwiUnsupportedDeviceAction::Setup { .. }) => {
             "Blockstream Jade does not support software setup"
@@ -3099,18 +3298,25 @@ fn print_response(response: HwiResponse) -> ExitCode {
 }
 
 fn parse_device_type(value: &str) -> HwiResult<DeviceType> {
+    let unknown = || HwiError::new(HwiErrorCode::UnknownDevice, "Unknown device type specified");
     let family = value.split('_').next().unwrap_or(value);
-    match family.to_ascii_lowercase().as_str() {
-        "bitbox02" => Ok(DeviceType::BitBox02),
-        "coldcard" => Ok(DeviceType::Coldcard),
-        "jade" => Ok(DeviceType::Jade),
-        "ledger" => Ok(DeviceType::Ledger),
-        "trezor" => Ok(DeviceType::Trezor),
-        _ => Err(HwiError::new(
-            HwiErrorCode::UnknownDevice,
-            "Unknown device type specified",
-        )),
+    if family.eq_ignore_ascii_case("keepkey")
+        && !value.eq_ignore_ascii_case("keepkey")
+        && !value.eq_ignore_ascii_case("keepkey_simulator")
+    {
+        return Err(unknown());
     }
+    [
+        ("bitbox02", DeviceType::BitBox02),
+        ("coldcard", DeviceType::Coldcard),
+        ("jade", DeviceType::Jade),
+        ("ledger", DeviceType::Ledger),
+        ("keepkey", DeviceType::KeepKey),
+        ("trezor", DeviceType::Trezor),
+    ]
+    .into_iter()
+    .find_map(|(name, device_type)| family.eq_ignore_ascii_case(name).then_some(device_type))
+    .ok_or_else(unknown)
 }
 
 fn is_known_emulator_path(device_type: Option<DeviceType>, path: Option<&str>) -> bool {
@@ -3127,6 +3333,10 @@ fn is_known_emulator_path(device_type: Option<DeviceType>, path: Option<&str>) -
             | (
                 Some(DeviceType::Ledger),
                 Some("127.0.0.1:9999" | "tcp:127.0.0.1:9999")
+            )
+            | (
+                Some(DeviceType::KeepKey),
+                Some("127.0.0.1:11044" | "udp:127.0.0.1:11044")
             )
             | (
                 Some(DeviceType::Trezor),
@@ -3161,12 +3371,21 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
     // The raw device type stays unparsed until device lookup; upstream only
     // rejects an unknown type once `get_client` is reached.
     let device_type = args.device_type;
+    let mut device_path = args.device_path;
+    if matches!(&args.command, HwiCliCommand::Enumerate)
+        && device_path.is_none()
+        && device_type
+            .as_deref()
+            .is_some_and(|raw| raw.eq_ignore_ascii_case("keepkey_simulator"))
+    {
+        device_path = Some(DEFAULT_KEEPKEY_EMULATOR.to_owned());
+    }
     let include_emulators = args.emulators
         || is_known_emulator_path(
             device_type
                 .as_deref()
                 .and_then(|raw| parse_device_type(raw).ok()),
-            args.device_path.as_deref(),
+            device_path.as_deref(),
         );
     let network = parse_chain(&args.chain)?;
     let command = match args.command {
@@ -3256,7 +3475,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
             network,
             fingerprint: args.fingerprint,
             device_type,
-            device_path: args.device_path,
+            device_path,
             include_emulators,
             passphrase,
         },
@@ -3312,6 +3531,168 @@ mod tests {
             DeviceType::Coldcard
         );
         assert!(parse_device_type("notadevice").is_err());
+    }
+
+    #[test]
+    fn keepkey_selector_accepts_models_and_both_emulator_path_forms() {
+        for model in ["keepkey", "keepkey_simulator"] {
+            assert_eq!(parse_device_type(model).unwrap(), DeviceType::KeepKey);
+        }
+        assert!(hwi_selector_matches_device(
+            Some("keepkey"),
+            DeviceType::KeepKey,
+            "keepkey",
+            false,
+        ));
+        assert!(hwi_selector_matches_device(
+            Some("keepkey"),
+            DeviceType::KeepKey,
+            "keepkey_simulator",
+            true,
+        ));
+        for path in ["127.0.0.1:11044", "udp:127.0.0.1:11044"] {
+            let request = parse_args([
+                "hwi",
+                "--device-type",
+                "keepkey_simulator",
+                "--device-path",
+                path,
+                "enumerate",
+            ])
+            .unwrap();
+            assert_eq!(
+                request.selector.device_type.as_deref(),
+                Some("keepkey_simulator")
+            );
+            assert_eq!(request.selector.device_path.as_deref(), Some(path));
+            assert!(request.selector.include_emulators);
+        }
+        assert!(!is_known_emulator_path(
+            Some(DeviceType::KeepKey),
+            Some("tcp:127.0.0.1:11044"),
+        ));
+    }
+
+    #[test]
+    fn keepkey_selector_rejects_unknown_model_suffix() {
+        let raw = "keepkey_not_a_model";
+        let error = parse_device_type(raw).expect_err("unknown KeepKey model");
+        assert_eq!(error.code, HwiErrorCode::UnknownDevice.code());
+        assert_eq!(error.error, "Unknown device type specified");
+
+        // Enumerate drops unknown filters, while command lookup rejects them.
+        let enumerate_filter = parse_device_type(raw).ok().map(|_| raw);
+        assert!(enumerate_filter.is_none());
+        assert!(hwi_selector_matches_device(
+            enumerate_filter,
+            DeviceType::Trezor,
+            "trezor_t",
+            false,
+        ));
+
+        let request = parse_args(["hwi", "-t", raw, "getxpub", "m/44h/1h/0h"]).unwrap();
+        let response = futures::executor::block_on(process_request(request));
+        let HwiResponse::Error(error) = response else {
+            panic!("expected HWI error");
+        };
+        assert_eq!(error.code, HwiErrorCode::DeviceConnectionError.code());
+        assert_eq!(
+            error.error,
+            "Could not find device with specified fingerprint or type"
+        );
+
+        let request = parse_args([
+            "hwi",
+            "-t",
+            raw,
+            "-d",
+            "/dev/null",
+            "getxpub",
+            "m/44h/1h/0h",
+        ])
+        .unwrap();
+        let response = futures::executor::block_on(process_request(request));
+        let HwiResponse::Error(error) = response else {
+            panic!("expected HWI error");
+        };
+        assert_eq!(error.code, HwiErrorCode::UnknownDevice.code());
+        assert_eq!(error.error, "Unknown device type specified");
+    }
+
+    #[test]
+    fn keepkey_selector_pathless_simulator_matches_only_emulated_model() {
+        let request =
+            parse_args(["hwi", "--device-type", "keepkey_simulator", "enumerate"]).unwrap();
+        assert_eq!(
+            request.selector.device_path.as_deref(),
+            Some(DEFAULT_KEEPKEY_EMULATOR)
+        );
+        assert!(request.selector.include_emulators);
+
+        let raw = request.selector.device_type.as_deref();
+        assert!(hwi_selector_matches_device(
+            raw,
+            DeviceType::KeepKey,
+            "keepkey_simulator",
+            true,
+        ));
+        assert!(!hwi_selector_matches_device(
+            raw,
+            DeviceType::KeepKey,
+            "keepkey",
+            false,
+        ));
+        assert!(!hwi_selector_matches_device(
+            raw,
+            DeviceType::KeepKey,
+            "keepkey",
+            true,
+        ));
+        assert!(!hwi_selector_matches_device(
+            raw,
+            DeviceType::Trezor,
+            "keepkey_simulator",
+            true,
+        ));
+    }
+
+    #[test]
+    fn keepkey_simulator_non_enumerate_requires_emulator_flag() {
+        let request =
+            parse_args(["hwi", "--device-type", "keepkey_simulator", "getmasterxpub"]).unwrap();
+        assert_eq!(request.selector.device_path, None);
+        assert!(!request.selector.include_emulators);
+
+        let request = parse_args([
+            "hwi",
+            "--device-type",
+            "keepkey_simulator",
+            "--emulators",
+            "getmasterxpub",
+        ])
+        .unwrap();
+        assert!(request.selector.include_emulators);
+    }
+
+    #[test]
+    fn keepkey_selector_for_destructive_command_cannot_select_physical_device() {
+        let request = parse_args([
+            "hwi",
+            "--device-type",
+            "keepkey_simulator",
+            "--device-path",
+            "hid:physical-keepkey",
+            "wipe",
+        ])
+        .unwrap();
+        assert_eq!(request.command, HwiCommand::Wipe);
+        assert!(!request.selector.include_emulators);
+        assert!(!hwi_selector_matches_device(
+            request.selector.device_type.as_deref(),
+            DeviceType::KeepKey,
+            "keepkey",
+            false,
+        ));
     }
 
     #[test]
@@ -3731,6 +4112,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keepkey_taproot_display_is_rejected_before_lookup_and_path_parsing() {
+        let request = parse_args([
+            "hwi",
+            "-t",
+            "keepkey",
+            "displayaddress",
+            "--path",
+            "not_a_derivation_path",
+            "--addr-type",
+            "tap",
+        ])
+        .unwrap();
+        let response = process_request(request).await;
+        let HwiResponse::Error(error) = response else {
+            panic!("expected HWI error");
+        };
+        assert_eq!(error.code, HwiErrorCode::UnsupportedCommand.code());
+        assert_eq!(
+            error.error,
+            "This device does not support displaying Taproot addresses"
+        );
+    }
+
+    #[tokio::test]
+    async fn keepkey_taproot_keypool_is_rejected_before_device_lookup() {
+        let request = parse_args([
+            "hwi",
+            "-t",
+            "keepkey",
+            "getkeypool",
+            "0",
+            "1",
+            "--addr-type",
+            "tap",
+        ])
+        .unwrap();
+        let response = process_request(request).await;
+        let HwiResponse::Error(error) = response else {
+            panic!("expected HWI error");
+        };
+        assert_eq!(error.code, HwiErrorCode::UnsupportedCommand.code());
+        assert_eq!(error.error, "Device does not support Taproot");
+    }
+
+    #[tokio::test]
     async fn invalid_arguments_without_device_report_no_device_found() {
         // Argument validation is deferred until after device lookup; with no
         // matching device every case collapses to -3 like upstream.
@@ -3781,6 +4207,18 @@ mod tests {
         assert_eq!(model(Some("1"), true), "trezor_1_simulator");
         assert_eq!(model(Some("T"), true), "trezor_t_simulator");
         assert_eq!(model(None, false), "trezor_t");
+    }
+
+    #[test]
+    fn keepkey_enumerate_model_is_canonical() {
+        assert_eq!(
+            hwi_enumerate_model(DeviceType::KeepKey, "ignored", false, Some("K1-14AM")),
+            "keepkey"
+        );
+        assert_eq!(
+            hwi_enumerate_model(DeviceType::KeepKey, "ignored", true, Some("K1-14AM")),
+            "keepkey_simulator"
+        );
     }
 
     #[test]
@@ -4104,6 +4542,20 @@ mod tests {
     }
 
     #[test]
+    fn keepkey_backup_error_matches_python_hwi() {
+        assert_eq!(
+            hwi_unavailable_action_message(
+                DeviceType::KeepKey,
+                &HwiUnsupportedDeviceAction::Backup {
+                    label: String::new(),
+                    backup_passphrase: String::new(),
+                },
+            ),
+            "The Keepkey does not support creating a backup via software"
+        );
+    }
+
+    #[test]
     fn ledger_and_coldcard_labels_are_serialized_as_null() {
         assert_eq!(
             serde_json::to_value(HwiEnumeratedDevice {
@@ -4181,6 +4633,37 @@ mod tests {
     }
 
     #[test]
+    fn keepkey_emulator_enumerate_shape_reports_required_passphrase() {
+        let json = serde_json::to_value(HwiEnumeratedDevice {
+            device_type: DeviceType::KeepKey.to_string(),
+            model: hwi_enumerate_model(DeviceType::KeepKey, "keepkey", true, None),
+            path: hwi_enumerate_path(DeviceType::KeepKey, "udp:127.0.0.1:11044", true),
+            label: label_for(DeviceType::KeepKey, None),
+            fingerprint: None,
+            needs_pin_sent: false,
+            needs_passphrase_sent: true,
+            warnings: Vec::new(),
+            error: Some(KEEPKEY_PASSPHRASE_REQUIRED.to_owned()),
+            code: Some(HwiErrorCode::DeviceNotReady.code()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "keepkey",
+                "model": "keepkey_simulator",
+                "path": "udp:127.0.0.1:11044",
+                "label": null,
+                "needs_pin_sent": false,
+                "needs_passphrase_sent": true,
+                "error": KEEPKEY_PASSPHRASE_REQUIRED,
+                "code": -12,
+            })
+        );
+    }
+
+    #[test]
     fn getxpub_non_expert_serializes_only_xpub() {
         let xpub = sample_xpub();
 
@@ -4217,12 +4700,41 @@ mod tests {
     }
 
     #[test]
+    fn send_pin_action_cancelled_matches_hwi_false_contract() {
+        for error in [
+            bhwi_async::HWIDeviceError::new(bhwi::trezor::TrezorError::ActionCancelled),
+            wrapped_device_error(bhwi::common::Error::AuthenticationRefused),
+        ] {
+            assert_eq!(
+                serde_json::to_value(send_pin_error_response(&error)).unwrap(),
+                serde_json::json!({ "success": false })
+            );
+        }
+
+        let bad_pin = wrapped_device_error(bhwi::common::Error::Rpc(7, Some("bad pin".to_owned())));
+        let HwiResponse::Error(error) = send_pin_error_response(&bad_pin) else {
+            panic!("expected HWI error");
+        };
+        assert_eq!(error.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(error.error, "bad pin");
+    }
+
+    #[test]
     fn classify_device_error_maps_typed_common_errors() {
         use bhwi::common::Error as CommonError;
 
         let cancelled = classify_device_error(&wrapped_device_error(CommonError::UserCancelled));
         assert_eq!(cancelled.code, HwiErrorCode::ActionCanceled.code());
         assert_eq!(cancelled.error, "action canceled by the user");
+
+        let refused =
+            classify_device_error(&wrapped_device_error(CommonError::AuthenticationRefused));
+        assert_eq!(refused.code, HwiErrorCode::ActionCanceled.code());
+
+        let unavailable = classify_device_error(&wrapped_device_error(
+            CommonError::MissingCommandInfo("unsupported command"),
+        ));
+        assert_eq!(unavailable.code, HwiErrorCode::UnsupportedCommand.code());
 
         let unsupported = classify_device_error(&wrapped_device_error(
             CommonError::UnsupportedDisplayAddress(
@@ -4250,6 +4762,29 @@ mod tests {
     }
 
     #[test]
+    fn keepkey_locked_and_bad_pin_errors_use_python_hwi_codes() {
+        let locked = device_error(format!("transport failed: {KEEPKEY_LOCKED}"));
+        assert_eq!(locked.code, HwiErrorCode::DeviceNotReady.code());
+        assert_eq!(locked.error, KEEPKEY_LOCKED);
+
+        let bad_pin = wrapped_device_error(bhwi::common::Error::Rpc(7, Some("bad pin".to_owned())));
+        let bad_pin = pin_error(&bad_pin);
+        assert_eq!(bad_pin.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(bad_pin.error, "bad pin");
+
+        for message in [
+            bhwi::trezor::TrezorError::NO_PIN_NEEDED,
+            bhwi::trezor::TrezorError::PIN_ALREADY_SENT,
+        ] {
+            let error = wrapped_device_error(bhwi::common::Error::DeviceAlreadyUnlocked(message));
+            assert_eq!(
+                pin_error(&error).code,
+                HwiErrorCode::DeviceAlreadyUnlocked.code()
+            );
+        }
+    }
+
+    #[test]
     fn ledger_cancellations_downgrade_to_unknown_error_code() {
         let err = wrapped_device_error(bhwi::common::Error::UserCancelled);
         let ledger = classify_device_error_for(DeviceType::Ledger, &err);
@@ -4264,6 +4799,41 @@ mod tests {
             .context("getting master fingerprint");
         let classified = classify_anyhow_device_error(&err);
         assert_eq!(classified.code, HwiErrorCode::ActionCanceled.code());
+        assert_eq!(classified.error, "action canceled by the user");
+    }
+
+    #[test]
+    fn classify_anyhow_device_error_maps_wrapped_missing_command() {
+        let err = anyhow::Error::new(wrapped_device_error(
+            bhwi::common::Error::MissingCommandInfo("host interaction required"),
+        ))
+        .context("displaying descriptor address");
+        let classified = classify_anyhow_device_error(&err);
+        assert_eq!(classified.code, HwiErrorCode::UnsupportedCommand.code());
+        assert_eq!(
+            classified.error,
+            "missing command info: host interaction required"
+        );
+    }
+
+    #[test]
+    fn classify_anyhow_device_error_maps_wrapped_overlong_passphrase() {
+        let err = anyhow::Error::new(wrapped_device_error(bhwi::common::Error::InvalidInput(
+            "Passphrase too long".to_owned(),
+        )))
+        .context("getting master fingerprint");
+        let classified = classify_anyhow_device_error(&err);
+        assert_eq!(classified.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(classified.error, "Passphrase too long");
+    }
+
+    #[test]
+    fn classify_anyhow_device_error_preserves_locked_descriptor_lookup() {
+        let err = anyhow::Error::new(std::io::Error::other(KEEPKEY_LOCKED))
+            .context("getting descriptor fingerprint");
+        let classified = classify_anyhow_device_error(&err);
+        assert_eq!(classified.code, HwiErrorCode::DeviceNotReady.code());
+        assert_eq!(classified.error, KEEPKEY_LOCKED);
     }
 
     #[test]
@@ -4476,6 +5046,14 @@ mod tests {
         );
         assert_eq!(
             hwi_descriptor_addr_types(DeviceType::Coldcard, "coldcard_simulator"),
+            vec![
+                HwiAddressType::Legacy,
+                HwiAddressType::Wit,
+                HwiAddressType::ShWit,
+            ]
+        );
+        assert_eq!(
+            hwi_descriptor_addr_types(DeviceType::KeepKey, "keepkey_simulator"),
             vec![
                 HwiAddressType::Legacy,
                 HwiAddressType::Wit,

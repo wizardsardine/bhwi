@@ -4,6 +4,8 @@ pub mod bitbox;
 pub mod coldcard;
 #[cfg(feature = "jade")]
 pub mod jade;
+#[cfg(feature = "keepkey")]
+pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
 pub mod transport;
@@ -33,6 +35,8 @@ use bhwi::{
 };
 #[cfg(feature = "jade")]
 pub use jade::Jade;
+#[cfg(feature = "keepkey")]
+pub use keepkey::KeepKey;
 #[cfg(feature = "ledger")]
 pub use ledger::Ledger;
 #[cfg(feature = "trezor")]
@@ -56,6 +60,14 @@ pub trait Transport {
 pub trait HttpClient {
     type Error: Debug;
     async fn request(&self, url: &str, request: &[u8]) -> Result<Vec<u8>, Self::Error>;
+}
+
+#[async_trait(?Send)]
+pub trait HostInteraction {
+    async fn respond(
+        &mut self,
+        request: &common::HostRequest,
+    ) -> Result<common::HostResponse, common::Error>;
 }
 
 #[async_trait(?Send)]
@@ -510,8 +522,9 @@ pub trait CommonInterface<C, T, R, E> {
     fn components(
         &mut self,
     ) -> (
-        &mut dyn Transport<Error = Self::TransportError>,
-        &dyn HttpClient<Error = Self::HttpClientError>,
+        &mut (dyn Transport<Error = Self::TransportError> + '_),
+        &(dyn HttpClient<Error = Self::HttpClientError> + '_),
+        Option<&mut (dyn HostInteraction + 'static)>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     );
 }
@@ -574,13 +587,8 @@ where
         >,
     C: Into<common::Command>,
 {
-    let (transport, http_client, mut intpr) = device.components();
-    let transmit = intpr.start(command.into())?;
-    let exchange = transport
-        .exchange(&transmit.payload, transmit.encrypted)
-        .await
-        .map_err(Error::Transport)?;
-    let mut transmit = intpr.exchange(exchange)?;
+    let (transport, http_client, mut host_interaction, mut intpr) = device.components();
+    let mut transmit = Some(intpr.start(command.into())?);
     while let Some(t) = &transmit {
         match &t.recipient {
             common::Recipient::PinServer { url } => {
@@ -589,6 +597,16 @@ where
                     .await
                     .map_err(Error::HttpClient)?;
                 transmit = intpr.exchange(res)?;
+            }
+            common::Recipient::Host(request) => {
+                let interaction =
+                    host_interaction
+                        .as_deref_mut()
+                        .ok_or(common::Error::MissingCommandInfo(
+                            "host interaction required",
+                        ))?;
+                let response = interaction.respond(request).await?;
+                transmit = intpr.exchange(response.into_bytes_for(request)?)?;
             }
             common::Recipient::Device => {
                 let exchange = match transport.exchange(&t.payload, t.encrypted).await {
@@ -605,4 +623,287 @@ where
         }
     }
     intpr.end().map_err(|e| e.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use std::{
+        cell::{Cell, RefCell},
+        convert::Infallible,
+        rc::Rc,
+    };
+
+    struct ScriptedTransport {
+        calls: usize,
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    #[async_trait(?Send)]
+    impl Transport for ScriptedTransport {
+        type Error = Infallible;
+
+        async fn exchange(
+            &mut self,
+            command: &[u8],
+            encrypted: bool,
+        ) -> Result<Vec<u8>, Self::Error> {
+            self.events.borrow_mut().push("device");
+            self.calls += 1;
+            assert_eq!(command, &[0x01]);
+            assert!(!encrypted);
+            Ok(vec![0x02])
+        }
+    }
+
+    struct NoHttp;
+
+    #[async_trait(?Send)]
+    impl HttpClient for NoHttp {
+        type Error = Infallible;
+
+        async fn request(&self, _url: &str, _request: &[u8]) -> Result<Vec<u8>, Self::Error> {
+            panic!("host interaction must not use HTTP")
+        }
+    }
+
+    struct ScriptedHost {
+        response: Option<common::HostResponse>,
+        calls: Rc<Cell<usize>>,
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    #[async_trait(?Send)]
+    impl HostInteraction for ScriptedHost {
+        async fn respond(
+            &mut self,
+            request: &common::HostRequest,
+        ) -> Result<common::HostResponse, common::Error> {
+            assert_eq!(
+                request,
+                &common::HostRequest::PinMatrix {
+                    kind: common::PinMatrixRequestKind::Current,
+                }
+            );
+            self.events.borrow_mut().push("host");
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.response.take().expect("one scripted host response"))
+        }
+    }
+
+    #[derive(Default)]
+    struct ScriptedInterpreter {
+        state: u8,
+        host_first: bool,
+    }
+
+    impl Interpreter for ScriptedInterpreter {
+        type Command = common::Command;
+        type Transmit = common::Transmit;
+        type Response = common::Response;
+        type Error = common::Error;
+
+        fn start(&mut self, command: Self::Command) -> Result<Self::Transmit, Self::Error> {
+            assert!(matches!(command, common::Command::GetVersion));
+            assert_eq!(self.state, 0);
+            self.state = 1;
+            if self.host_first {
+                Ok(common::HostRequest::PinMatrix {
+                    kind: common::PinMatrixRequestKind::Current,
+                }
+                .into())
+            } else {
+                Ok(vec![0x01].into())
+            }
+        }
+
+        fn exchange(&mut self, data: Vec<u8>) -> Result<Option<Self::Transmit>, Self::Error> {
+            match (self.host_first, self.state) {
+                (false, 1) => {
+                    assert_eq!(data.as_slice(), &[0x02]);
+                    self.state = 2;
+                    Ok(Some(
+                        common::HostRequest::PinMatrix {
+                            kind: common::PinMatrixRequestKind::Current,
+                        }
+                        .into(),
+                    ))
+                }
+                (false, 2) => {
+                    assert_eq!(data.as_slice(), b"123");
+                    self.state = 3;
+                    Ok(None)
+                }
+                (true, 1) => {
+                    assert_eq!(data.as_slice(), b"123");
+                    self.state = 2;
+                    Ok(Some(vec![0x01].into()))
+                }
+                (true, 2) => {
+                    assert_eq!(data.as_slice(), &[0x02]);
+                    self.state = 3;
+                    Ok(None)
+                }
+                _ => panic!("unexpected scripted interpreter state"),
+            }
+        }
+
+        fn end(self) -> Result<Self::Response, Self::Error> {
+            assert_eq!(self.state, 3);
+            Ok(common::Response::DeviceAction(true))
+        }
+    }
+
+    struct ScriptedDevice {
+        transport: ScriptedTransport,
+        host_interaction: Option<Box<dyn HostInteraction>>,
+        host_first: bool,
+    }
+
+    impl CommonInterface<common::Command, common::Transmit, common::Response, common::Error>
+        for ScriptedDevice
+    {
+        type TransportError = Infallible;
+        type HttpClientError = Infallible;
+
+        fn components(
+            &mut self,
+        ) -> (
+            &mut (dyn Transport<Error = Self::TransportError> + '_),
+            &(dyn HttpClient<Error = Self::HttpClientError> + '_),
+            Option<&mut (dyn HostInteraction + 'static)>,
+            impl Interpreter<
+                Command = common::Command,
+                Transmit = common::Transmit,
+                Response = common::Response,
+                Error = common::Error,
+            >,
+        ) {
+            (
+                &mut self.transport,
+                &NoHttp,
+                self.host_interaction.as_deref_mut(),
+                ScriptedInterpreter {
+                    host_first: self.host_first,
+                    ..Default::default()
+                },
+            )
+        }
+    }
+
+    fn scripted_device(
+        response: Option<common::HostResponse>,
+    ) -> (ScriptedDevice, Rc<Cell<usize>>) {
+        scripted_device_with_sequence(response, false)
+    }
+
+    fn scripted_device_with_sequence(
+        response: Option<common::HostResponse>,
+        host_first: bool,
+    ) -> (ScriptedDevice, Rc<Cell<usize>>) {
+        let calls = Rc::new(Cell::new(0));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let host_interaction = response.map(|response| {
+            Box::new(ScriptedHost {
+                response: Some(response),
+                calls: Rc::clone(&calls),
+                events: Rc::clone(&events),
+            }) as Box<dyn HostInteraction>
+        });
+        (
+            ScriptedDevice {
+                transport: ScriptedTransport { calls: 0, events },
+                host_interaction,
+                host_first,
+            },
+            calls,
+        )
+    }
+
+    #[test]
+    fn initial_host_recipient_uses_provider_before_device_exchange() {
+        let (mut device, host_calls) = scripted_device_with_sequence(
+            Some(common::HostResponse::PinPositions("123".into())),
+            true,
+        );
+
+        let response = block_on(run_command_inner(
+            &mut device,
+            common::Command::GetVersion,
+            false,
+        ))
+        .expect("scripted command succeeds");
+
+        assert!(matches!(response, common::Response::DeviceAction(true)));
+        assert_eq!(host_calls.get(), 1);
+        assert_eq!(device.transport.calls, 1);
+        assert_eq!(
+            device.transport.events.borrow().as_slice(),
+            &["host", "device"]
+        );
+    }
+
+    #[test]
+    fn host_recipient_uses_provider_without_second_device_exchange() {
+        let (mut device, host_calls) =
+            scripted_device(Some(common::HostResponse::PinPositions("123".into())));
+
+        let response = block_on(run_command_inner(
+            &mut device,
+            common::Command::GetVersion,
+            false,
+        ))
+        .expect("scripted command succeeds");
+
+        assert!(matches!(response, common::Response::DeviceAction(true)));
+        assert_eq!(device.transport.calls, 1);
+        assert_eq!(host_calls.get(), 1);
+    }
+
+    #[test]
+    fn host_recipient_requires_provider_without_second_device_exchange() {
+        let (mut device, host_calls) = scripted_device(None);
+
+        let error = match block_on(run_command_inner(
+            &mut device,
+            common::Command::GetVersion,
+            false,
+        )) {
+            Err(error) => error,
+            Ok(_) => panic!("missing host provider succeeds"),
+        };
+
+        assert!(matches!(
+            error,
+            Error::Interpreter(common::Error::MissingCommandInfo(
+                "host interaction required"
+            ))
+        ));
+        assert_eq!(device.transport.calls, 1);
+        assert_eq!(host_calls.get(), 0);
+    }
+
+    #[test]
+    fn host_recipient_validates_response_without_second_device_exchange() {
+        let (mut device, host_calls) =
+            scripted_device(Some(common::HostResponse::RecoveryCharacter('a')));
+
+        let error = match block_on(run_command_inner(
+            &mut device,
+            common::Command::GetVersion,
+            false,
+        )) {
+            Err(error) => error,
+            Ok(_) => panic!("mismatched host response succeeds"),
+        };
+
+        assert!(matches!(
+            error,
+            Error::Interpreter(common::Error::InvalidInput(message))
+                if message == "host response does not match request"
+        ));
+        assert_eq!(device.transport.calls, 1);
+        assert_eq!(host_calls.get(), 1);
+    }
 }

@@ -103,6 +103,42 @@
         "type": "github"
       }
     },
+    "keepkey-firmware": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1739317963,
+        "narHash": "sha256-sYramzOpi8sDt0ENIp5xYbZPmBlw+jmk7Vp5hOOeovk=",
+        "ref": "refs/heads/master",
+        "rev": "d54797ee604f12c82ac6e5e02490b62dc04bf2dd",
+        "revCount": 4450,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/keepkey/keepkey-firmware"
+      },
+      "original": {
+        "rev": "d54797ee604f12c82ac6e5e02490b62dc04bf2dd",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/keepkey/keepkey-firmware"
+      }
+    },
+    "keepkey-nanopb": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1570968365,
+        "narHash": "sha256-SR/n8eDL4cVvqVEvpXixbzLxZosipnngbCG60nPpXAA=",
+        "owner": "nanopb",
+        "repo": "nanopb",
+        "rev": "493adf3616bee052649c63c473f8355630c2797f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nanopb",
+        "repo": "nanopb",
+        "rev": "493adf3616bee052649c63c473f8355630c2797f",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1787498568,
@@ -192,6 +228,8 @@
         "flake-utils": "flake-utils",
         "jade-firmware": "jade-firmware",
         "jade-pinserver": "jade-pinserver",
+        "keepkey-firmware": "keepkey-firmware",
+        "keepkey-nanopb": "keepkey-nanopb",
         "nixpkgs": "nixpkgs",
         "nixpkgs-coldcard": "nixpkgs-coldcard",
         "nixpkgs-esp-dev": "nixpkgs-esp-dev",

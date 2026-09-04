@@ -9,7 +9,7 @@ use strum::{EnumIter, IntoEnumIterator};
 
 use crate::{
     bitbox::BitBoxDevice, coldcard::ColdcardDevice, config::DeviceSelector, jade::JadeDevice,
-    ledger::LedgerDevice, trezor::TrezorDevice,
+    keepkey::KeepKeyDevice, ledger::LedgerDevice, trezor::TrezorDevice,
 };
 
 pub mod address;
@@ -20,6 +20,7 @@ pub mod get_descriptors;
 pub mod hid;
 pub mod hwi;
 pub mod jade;
+pub mod keepkey;
 pub mod ledger;
 pub mod management;
 pub mod trezor;
@@ -158,6 +159,8 @@ pub enum DeviceType {
     BitBox02,
     Coldcard,
     Jade,
+    #[value(name = "keepkey", alias = "keep-key")]
+    KeepKey,
     Ledger,
     Trezor,
 }
@@ -169,9 +172,35 @@ impl DeviceType {
             DeviceType::Ledger => LedgerDevice::enumerate(selector).await?,
             DeviceType::Coldcard => ColdcardDevice::enumerate(selector).await?,
             DeviceType::Jade => JadeDevice::enumerate(selector).await?,
+            DeviceType::KeepKey => KeepKeyDevice::enumerate(selector).await?,
             DeviceType::Trezor => TrezorDevice::enumerate(selector).await?,
         })
     }
+}
+
+fn collect_enumeration_results<T>(
+    targeted: bool,
+    results: Vec<anyhow::Result<Vec<T>>>,
+) -> anyhow::Result<Vec<T>> {
+    let mut values = Vec::new();
+    let mut first_error = None;
+
+    for result in results {
+        match result {
+            Ok(mut found) => values.append(&mut found),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+
+    if values.is_empty()
+        && targeted
+        && let Some(error) = first_error
+    {
+        return Err(error);
+    }
+
+    Ok(values)
 }
 
 pub struct DeviceManager {
@@ -223,20 +252,22 @@ impl DeviceManager {
     }
 
     pub async fn enumerate(&self) -> Result<Vec<Device>> {
+        let targeted = self.selector.device_type.is_some()
+            || self.selector.device_path.is_some()
+            || self.selector.fingerprint.is_some();
         let device_types: Vec<DeviceType> = self
             .selector
             .device_type
             .map(|device_type| vec![device_type])
             .unwrap_or_else(|| DeviceType::iter().collect());
-        let res = join_all(
+        let results = join_all(
             device_types
                 .into_iter()
                 .map(|device_type| device_type.enumerate(&self.selector)),
         )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
-        Ok(res.into_iter().flatten().collect())
+        .await;
+
+        collect_enumeration_results(targeted, results)
     }
 }
 
@@ -259,5 +290,65 @@ where
         hex::serialize(v, ser)
     } else {
         ser.serialize_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_enumeration_results;
+
+    #[test]
+    fn enumeration_results_unfiltered_success_plus_error() {
+        let results = vec![
+            Ok(vec![1_u8, 2]),
+            Err(anyhow::anyhow!("unrelated")),
+            Ok(vec![3]),
+        ];
+
+        assert_eq!(
+            collect_enumeration_results(false, results).unwrap(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn enumeration_results_explicit_family_error() {
+        let error = collect_enumeration_results::<u8>(
+            true,
+            vec![
+                Err(anyhow::anyhow!("first")),
+                Err(anyhow::anyhow!("second")),
+            ],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "first");
+    }
+
+    #[test]
+    fn enumeration_results_path_only_no_result_error() {
+        let error =
+            collect_enumeration_results::<u8>(true, vec![Err(anyhow::anyhow!("path failed"))])
+                .unwrap_err();
+
+        assert_eq!(error.to_string(), "path failed");
+    }
+
+    #[test]
+    fn enumeration_results_fingerprint_only_no_result_error() {
+        let error = collect_enumeration_results::<u8>(
+            true,
+            vec![Err(anyhow::anyhow!("fingerprint failed"))],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "fingerprint failed");
+    }
+
+    #[test]
+    fn enumeration_results_targeted_success_despite_another_family_error() {
+        let results = vec![Err(anyhow::anyhow!("unrelated")), Ok(vec![7_u8])];
+
+        assert_eq!(collect_enumeration_results(true, results).unwrap(), vec![7]);
     }
 }

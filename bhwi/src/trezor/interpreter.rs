@@ -8,10 +8,12 @@ use bitcoin::psbt::Psbt;
 use bitcoin::{Network, NetworkKind, Transaction};
 
 use crate::Interpreter;
+use crate::common::{HostRequest, PinMatrixRequestKind};
 use crate::miniscript::descriptor::{DescriptorPublicKey, SinglePubKey, Wildcard};
 use crate::trezor::api::{self, MessageType};
 use crate::trezor::error::TrezorError;
 use crate::trezor::proto::{bitcoin as btc, common as pb, management as mgmt};
+use zeroize::Zeroize;
 
 pub enum TrezorCommand {
     Initialize(Option<Network>),
@@ -45,6 +47,85 @@ pub enum TrezorCommand {
     },
     PromptPin,
     SendPin(crate::trezor::HostPin),
+}
+
+pub(crate) enum EngineCommand {
+    Initialize(Option<Network>),
+    GetFeatures,
+    GetMasterFingerprint,
+    GetXpub {
+        address_n: Vec<u32>,
+        display: bool,
+    },
+    GetAddress {
+        address_n: Vec<u32>,
+        display: bool,
+        script_type: btc::InputScriptType,
+    },
+    GetMultisigAddress(TrezorMultisigAddress),
+    SignMessage {
+        address_n: Vec<u32>,
+        message: Vec<u8>,
+    },
+    SignTx(Box<Psbt>),
+    Wipe,
+    TogglePassphrase,
+    Setup {
+        label: Option<String>,
+        host_entropy: [u8; 32],
+    },
+    Restore {
+        label: Option<String>,
+        word_count: u32,
+        u2f_counter: u32,
+    },
+    PromptPin,
+    SendPin(crate::trezor::HostPin),
+}
+
+impl From<TrezorCommand> for EngineCommand {
+    fn from(command: TrezorCommand) -> Self {
+        match command {
+            TrezorCommand::Initialize(network) => Self::Initialize(network),
+            TrezorCommand::GetFeatures => Self::GetFeatures,
+            TrezorCommand::GetMasterFingerprint => Self::GetMasterFingerprint,
+            TrezorCommand::GetXpub { address_n, display } => Self::GetXpub { address_n, display },
+            TrezorCommand::GetAddress {
+                address_n,
+                display,
+                script_type,
+            } => Self::GetAddress {
+                address_n,
+                display,
+                script_type,
+            },
+            TrezorCommand::GetMultisigAddress(address) => Self::GetMultisigAddress(address),
+            TrezorCommand::SignMessage { address_n, message } => {
+                Self::SignMessage { address_n, message }
+            }
+            TrezorCommand::SignTx(psbt) => Self::SignTx(psbt),
+            TrezorCommand::Wipe => Self::Wipe,
+            TrezorCommand::TogglePassphrase => Self::TogglePassphrase,
+            TrezorCommand::Setup {
+                label,
+                host_entropy,
+            } => Self::Setup {
+                label,
+                host_entropy,
+            },
+            TrezorCommand::Restore {
+                label,
+                word_count,
+                u2f_counter,
+            } => Self::Restore {
+                label,
+                word_count,
+                u2f_counter,
+            },
+            TrezorCommand::PromptPin => Self::PromptPin,
+            TrezorCommand::SendPin(pin) => Self::SendPin(pin),
+        }
+    }
 }
 
 /// m/44'/1'/0', the key asked for to raise the keypad. The reply is never read.
@@ -99,6 +180,10 @@ enum State {
     AwaitMultisigAddress(Box<MultisigCtx>),
     AwaitMessageSignature,
     AwaitSuccess,
+    AwaitToggleSuccess,
+    AwaitRecovery,
+    AwaitHostPin(Box<State>),
+    AwaitRecoveryCharacter(Box<State>),
     AwaitPassphraseCancel,
     AwaitLockedCancel,
     AwaitPassphraseSetting,
@@ -114,17 +199,17 @@ enum State {
     Finished(TrezorResponse),
 }
 
-struct SetupCtx {
-    label: Option<String>,
-    passphrase_protection: bool,
-    host_entropy: [u8; 32],
+pub(crate) struct SetupCtx {
+    pub(crate) label: Option<String>,
+    pub(crate) passphrase_protection: bool,
+    pub(crate) host_entropy: [u8; 32],
 }
 
-struct RestoreCtx {
-    label: Option<String>,
-    passphrase_protection: bool,
-    word_count: u32,
-    u2f_counter: u32,
+pub(crate) struct RestoreCtx {
+    pub(crate) label: Option<String>,
+    pub(crate) passphrase_protection: bool,
+    pub(crate) word_count: u32,
+    pub(crate) u2f_counter: u32,
 }
 
 struct MultisigCtx {
@@ -142,42 +227,196 @@ struct SignCtx {
     signatures: Vec<(u32, Vec<u8>)>,
     passes: usize,
     ignored: std::collections::BTreeSet<usize>,
+    external_inputs: bool,
 }
 
 const MAX_SIGN_PASSES: usize = 15;
 
-pub struct TrezorInterpreter<C, T, R, E> {
+pub(crate) enum EngineTransmit {
+    Device(Vec<u8>),
+    Host(HostRequest),
+}
+
+pub(crate) struct DeviceFeatures {
+    pub(crate) major_version: u32,
+    pub(crate) minor_version: u32,
+    pub(crate) patch_version: u32,
+    pub(crate) pin_protection: bool,
+    pub(crate) passphrase_protection: bool,
+    pub(crate) label: Option<String>,
+    pub(crate) initialized: Option<bool>,
+    pub(crate) unlocked: bool,
+    pub(crate) model: Option<String>,
+    pub(crate) on_device_passphrase_entry: bool,
+}
+
+pub(crate) trait Profile {
+    const HOST_MANAGEMENT: bool;
+    const CHARACTER_CIPHER: bool;
+    const TOGGLE_PENDING_PIN: bool;
+    const EXTERNAL_INPUTS: bool;
+    const DEFAULT_ON_DEVICE_PASSPHRASE: bool;
+
+    fn coin_name(network: Network) -> String;
+    fn decode_features(payload: &[u8]) -> Result<DeviceFeatures, TrezorError>;
+    fn get_public_key(
+        address_n: Vec<u32>,
+        show_display: bool,
+        script_type: btc::InputScriptType,
+        coin_name: String,
+    ) -> Vec<u8>;
+    fn sign_message(address_n: Vec<u32>, message: Vec<u8>, coin_name: String) -> Vec<u8>;
+    fn passphrase_ack(on_device: bool, passphrase: &str) -> Vec<u8>;
+    fn passphrase_too_long(passphrase: &crate::trezor::HostPassphrase) -> bool;
+    fn reset_device(features: &DeviceFeatures, context: SetupCtx) -> Result<Vec<u8>, TrezorError>;
+    fn recovery_device(
+        features: &DeviceFeatures,
+        context: RestoreCtx,
+    ) -> Result<Vec<u8>, TrezorError>;
+    fn locked_message() -> &'static str;
+    fn pin_failure_needs_features(_failure: &pb::Failure) -> bool {
+        true
+    }
+
+    fn validate_command(_command: &EngineCommand) -> Result<(), TrezorError> {
+        Ok(())
+    }
+
+    fn validate_psbt(_psbt: &Psbt, _master_fp: Fingerprint) -> Result<(), TrezorError> {
+        Ok(())
+    }
+
+    fn decode_character_request(_payload: &[u8]) -> Result<HostRequest, TrezorError> {
+        Err(TrezorError::Unsupported(
+            "character-cipher recovery is not supported",
+        ))
+    }
+
+    fn character_ack(_value: u8) -> Result<Vec<u8>, TrezorError> {
+        Err(TrezorError::Unsupported(
+            "character-cipher recovery is not supported",
+        ))
+    }
+}
+
+struct TrezorProfile;
+
+impl Profile for TrezorProfile {
+    const HOST_MANAGEMENT: bool = false;
+    const CHARACTER_CIPHER: bool = false;
+    const TOGGLE_PENDING_PIN: bool = false;
+    const EXTERNAL_INPUTS: bool = false;
+    const DEFAULT_ON_DEVICE_PASSPHRASE: bool = true;
+
+    fn coin_name(network: Network) -> String {
+        coin_name(network)
+    }
+
+    fn decode_features(payload: &[u8]) -> Result<DeviceFeatures, TrezorError> {
+        let features: mgmt::Features = api::decode(payload)?;
+        Ok(trezor_device_features(features))
+    }
+
+    fn get_public_key(
+        address_n: Vec<u32>,
+        show_display: bool,
+        script_type: btc::InputScriptType,
+        coin_name: String,
+    ) -> Vec<u8> {
+        api::get_public_key(address_n, show_display, script_type, coin_name)
+    }
+
+    fn sign_message(address_n: Vec<u32>, message: Vec<u8>, coin_name: String) -> Vec<u8> {
+        api::sign_message(address_n, message, coin_name)
+    }
+
+    fn passphrase_ack(on_device: bool, passphrase: &str) -> Vec<u8> {
+        if on_device {
+            api::passphrase_ack_on_device()
+        } else {
+            api::passphrase_ack_from_host(passphrase)
+        }
+    }
+
+    fn passphrase_too_long(passphrase: &crate::trezor::HostPassphrase) -> bool {
+        passphrase.is_too_long()
+    }
+
+    fn reset_device(features: &DeviceFeatures, context: SetupCtx) -> Result<Vec<u8>, TrezorError> {
+        if features.model.as_deref().unwrap_or("1") == "1" {
+            return Err(TrezorError::Unsupported(
+                "Trezor One setup needs host PIN entry, which is not supported in this build",
+            ));
+        }
+        let strength = if features.model.as_deref() == Some("1") {
+            256
+        } else {
+            128
+        };
+        Ok(api::reset_device(
+            strength,
+            context.passphrase_protection,
+            context.label,
+        ))
+    }
+
+    fn recovery_device(
+        features: &DeviceFeatures,
+        context: RestoreCtx,
+    ) -> Result<Vec<u8>, TrezorError> {
+        if features.model.as_deref().unwrap_or("1") == "1" {
+            return Err(TrezorError::Unsupported(
+                "Trezor One restore needs host word entry, which is not supported in this build",
+            ));
+        }
+        Ok(api::recovery_device(
+            context.word_count,
+            context.passphrase_protection,
+            context.label,
+            context.u2f_counter,
+        ))
+    }
+
+    fn locked_message() -> &'static str {
+        TrezorError::LOCKED
+    }
+}
+
+pub(crate) struct Engine<P> {
     state: State,
     network: Network,
     passphrase: Option<crate::trezor::HostPassphrase>,
     on_device_passphrase: bool,
-    _marker: PhantomData<(C, T, R, E)>,
+    _profile: PhantomData<P>,
 }
 
-impl<C, T, R, E> Default for TrezorInterpreter<C, T, R, E> {
+impl<P: Profile> Default for Engine<P> {
     fn default() -> Self {
         Self {
             state: State::New,
             network: Network::Bitcoin,
             passphrase: None,
-            on_device_passphrase: true,
-            _marker: PhantomData,
+            on_device_passphrase: P::DEFAULT_ON_DEVICE_PASSPHRASE,
+            _profile: PhantomData,
         }
     }
 }
 
-impl<C, T, R, E> TrezorInterpreter<C, T, R, E> {
-    pub fn with_network(mut self, network: Network) -> Self {
+impl<P: Profile> Engine<P> {
+    pub(crate) fn with_network(mut self, network: Network) -> Self {
         self.network = network;
         self
     }
 
-    pub fn with_passphrase(mut self, passphrase: Option<crate::trezor::HostPassphrase>) -> Self {
+    pub(crate) fn with_passphrase(
+        mut self,
+        passphrase: Option<crate::trezor::HostPassphrase>,
+    ) -> Self {
         self.passphrase = passphrase;
         self
     }
 
-    pub fn with_on_device_passphrase(mut self, on_device: bool) -> Self {
+    pub(crate) fn with_on_device_passphrase(mut self, on_device: bool) -> Self {
         self.on_device_passphrase = on_device;
         self
     }
@@ -187,43 +426,31 @@ impl<C, T, R, E> TrezorInterpreter<C, T, R, E> {
             .as_ref()
             .is_some_and(|passphrase| !passphrase.as_str().is_empty())
     }
-}
 
-impl<C, T, R, E> Interpreter for TrezorInterpreter<C, T, R, E>
-where
-    C: TryInto<TrezorCommand, Error = TrezorError>,
-    T: From<Vec<u8>>,
-    R: From<TrezorResponse>,
-    E: From<TrezorError>,
-{
-    type Command = C;
-    type Transmit = T;
-    type Response = R;
-    type Error = E;
-
-    fn start(&mut self, command: C) -> Result<T, E> {
-        let coin = coin_name(self.network);
-        let bytes = match command.try_into().map_err(E::from)? {
-            TrezorCommand::Initialize(network) => {
+    pub(crate) fn start(&mut self, command: EngineCommand) -> Result<EngineTransmit, TrezorError> {
+        P::validate_command(&command)?;
+        let coin = P::coin_name(self.network);
+        let bytes = match command {
+            EngineCommand::Initialize(network) => {
                 if let Some(network) = network {
                     self.network = network;
                 }
                 self.state = State::AwaitFeatures;
                 api::initialize()
             }
-            TrezorCommand::GetFeatures => {
+            EngineCommand::GetFeatures => {
                 self.state = State::AwaitFeatures;
                 api::get_features()
             }
-            TrezorCommand::GetMasterFingerprint => {
+            EngineCommand::GetMasterFingerprint => {
                 self.state = State::AwaitPublicKey(PublicKeyKind::Fingerprint);
-                api::get_public_key(Vec::new(), false, btc::InputScriptType::Spendaddress, coin)
+                P::get_public_key(Vec::new(), false, btc::InputScriptType::Spendaddress, coin)
             }
-            TrezorCommand::GetXpub { address_n, display } => {
+            EngineCommand::GetXpub { address_n, display } => {
                 self.state = State::AwaitPublicKey(PublicKeyKind::Xpub);
-                api::get_public_key(address_n, display, btc::InputScriptType::Spendwitness, coin)
+                P::get_public_key(address_n, display, btc::InputScriptType::Spendwitness, coin)
             }
-            TrezorCommand::GetAddress {
+            EngineCommand::GetAddress {
                 address_n,
                 display,
                 script_type,
@@ -231,7 +458,7 @@ where
                 self.state = State::AwaitAddress;
                 api::get_address(address_n, display, script_type, coin, None)
             }
-            TrezorCommand::GetMultisigAddress(address) => {
+            EngineCommand::GetMultisigAddress(address) => {
                 let script_type = multisig_script_type(address.address_type);
                 let (multisig, paths) = multisig_script(&address)?;
                 let bytes = api::get_address(
@@ -249,30 +476,28 @@ where
                 }));
                 bytes
             }
-            TrezorCommand::SignMessage { address_n, message } => {
+            EngineCommand::SignMessage { address_n, message } => {
                 self.state = State::AwaitMessageSignature;
-                api::sign_message(address_n, message, coin)
+                P::sign_message(address_n, message, coin)
             }
-            TrezorCommand::Wipe => {
+            EngineCommand::Wipe => {
                 self.state = State::AwaitSuccess;
                 api::wipe_device()
             }
-            TrezorCommand::TogglePassphrase => {
+            EngineCommand::TogglePassphrase => {
                 self.state = State::AwaitPassphraseSetting;
                 api::get_features()
             }
-            TrezorCommand::PromptPin => {
+            EngineCommand::PromptPin => {
                 self.state = State::AwaitPinPromptFeatures;
                 api::initialize()
             }
-            TrezorCommand::SendPin(pin) => {
-                // Nothing may be sent before the ack, so the features exchange that reports
-                // on-device passphrase entry has not happened.
+            EngineCommand::SendPin(pin) => {
                 self.on_device_passphrase = false;
                 self.state = State::AwaitPinResult;
                 api::pin_matrix_ack(pin.as_str())
             }
-            TrezorCommand::Setup {
+            EngineCommand::Setup {
                 label,
                 host_entropy,
             } => {
@@ -283,7 +508,7 @@ where
                 }));
                 api::get_features()
             }
-            TrezorCommand::Restore {
+            EngineCommand::Restore {
                 label,
                 word_count,
                 u2f_counter,
@@ -296,52 +521,62 @@ where
                 }));
                 api::get_features()
             }
-            TrezorCommand::SignTx(psbt) => {
+            EngineCommand::SignTx(psbt) => {
                 self.state = State::AwaitSignKey(psbt);
-                api::get_public_key(Vec::new(), false, btc::InputScriptType::Spendaddress, coin)
+                P::get_public_key(Vec::new(), false, btc::InputScriptType::Spendaddress, coin)
             }
         };
-        Ok(T::from(bytes))
+        Ok(EngineTransmit::Device(bytes))
     }
 
-    fn exchange(&mut self, data: Vec<u8>) -> Result<Option<T>, E> {
-        let (msg_type, payload) = api::parse_frame(&data).map_err(E::from)?;
+    pub(crate) fn exchange(
+        &mut self,
+        data: Vec<u8>,
+    ) -> Result<Option<EngineTransmit>, TrezorError> {
+        if matches!(
+            self.state,
+            State::AwaitHostPin(_) | State::AwaitRecoveryCharacter(_)
+        ) {
+            return self.consume_host_response(data);
+        }
+
+        let (msg_type, payload) = api::parse_frame(&data)?;
 
         if matches!(self.state, State::New | State::Finished(_)) {
-            return Err(E::from(TrezorError::UnexpectedMessage(
+            return Err(TrezorError::UnexpectedMessage(
                 msg_type,
                 "no command in progress",
-            )));
+            ));
         }
-
         if matches!(self.state, State::AwaitPassphraseCancel) {
-            return Err(E::from(TrezorError::PassphraseTooLong));
+            return Err(TrezorError::PassphraseTooLong);
         }
         if matches!(self.state, State::AwaitLockedCancel) {
-            return Err(E::from(TrezorError::Locked(TrezorError::LOCKED)));
+            return Err(TrezorError::Locked(P::locked_message()));
         }
         if msg_type == MessageType::ButtonRequest as u16 {
-            return Ok(Some(T::from(api::button_ack())));
+            return Ok(Some(EngineTransmit::Device(api::button_ack())));
         }
         if msg_type == MessageType::PassphraseRequest as u16 {
-            if self.on_device_passphrase {
-                return Ok(Some(T::from(api::passphrase_ack_on_device())));
-            }
-            if self
-                .passphrase
-                .as_ref()
-                .is_some_and(crate::trezor::HostPassphrase::is_too_long)
-            {
+            let on_device = self.on_device_passphrase && P::DEFAULT_ON_DEVICE_PASSPHRASE;
+            if !on_device && self.passphrase.as_ref().is_some_and(P::passphrase_too_long) {
                 self.state = State::AwaitPassphraseCancel;
-                return Ok(Some(T::from(api::cancel())));
+                return Ok(Some(EngineTransmit::Device(api::cancel())));
             }
             let passphrase = self
                 .passphrase
                 .as_ref()
                 .map_or("", crate::trezor::HostPassphrase::as_str);
-            return Ok(Some(T::from(api::passphrase_ack_from_host(passphrase))));
+            return Ok(Some(EngineTransmit::Device(P::passphrase_ack(
+                on_device, passphrase,
+            ))));
         }
         if msg_type == MessageType::Failure as u16 && !matches!(self.state, State::AwaitPinResult) {
+            let failure: pb::Failure = api::decode(&payload)?;
+            let error = failure_error(failure);
+            if matches!(error, TrezorError::ActionCancelled) {
+                return Err(error);
+            }
             if let State::AwaitMultisigAddress(ctx) = &mut self.state
                 && ctx.next < ctx.paths.len()
             {
@@ -349,37 +584,55 @@ where
                     ctx.paths[ctx.next].clone(),
                     true,
                     ctx.script_type,
-                    coin_name(self.network),
+                    P::coin_name(self.network),
                     Some(ctx.multisig.clone()),
                 );
                 ctx.next += 1;
-                return Ok(Some(T::from(bytes)));
+                return Ok(Some(EngineTransmit::Device(bytes)));
             }
-            let failure: pb::Failure = api::decode(&payload).map_err(E::from)?;
             if matches!(self.state, State::AwaitMultisigAddress(_)) {
-                return Err(E::from(TrezorError::InvalidInput(
+                return Err(TrezorError::InvalidInput(
                     "No path supplied matched device keys".into(),
-                )));
+                ));
             }
-            return Err(E::from(failure_error(failure)));
+            return Err(error);
         }
-        if msg_type == MessageType::PinMatrixRequest as u16
-            && !matches!(self.state, State::AwaitPinMatrix)
-        {
-            self.state = State::AwaitLockedCancel;
-            return Ok(Some(T::from(api::cancel())));
+        if msg_type == MessageType::PinMatrixRequest as u16 {
+            let request: pb::PinMatrixRequest = api::decode(&payload)?;
+            let kind = pin_request_kind(request.r#type);
+            if matches!(self.state, State::AwaitPinMatrix) {
+                // promptpin deliberately leaves the device waiting for sendpin.
+            } else if P::TOGGLE_PENDING_PIN
+                && matches!(self.state, State::AwaitToggleSuccess)
+                && kind == PinMatrixRequestKind::Current
+            {
+                self.state = State::Finished(TrezorResponse::DeviceAction(true));
+                return Ok(None);
+            } else if P::HOST_MANAGEMENT
+                && matches!(
+                    self.state,
+                    State::AwaitEntropyRequest(_) | State::AwaitRecovery
+                )
+            {
+                let resume = core::mem::replace(&mut self.state, State::New);
+                self.state = State::AwaitHostPin(Box::new(resume));
+                return Ok(Some(EngineTransmit::Host(HostRequest::PinMatrix { kind })));
+            } else {
+                self.state = State::AwaitLockedCancel;
+                return Ok(Some(EngineTransmit::Device(api::cancel())));
+            }
+        }
+        if P::CHARACTER_CIPHER && msg_type == 80 && matches!(self.state, State::AwaitRecovery) {
+            let request = P::decode_character_request(&payload)?;
+            let resume = core::mem::replace(&mut self.state, State::New);
+            self.state = State::AwaitRecoveryCharacter(Box::new(resume));
+            return Ok(Some(EngineTransmit::Host(request)));
         }
 
         let response = match &self.state {
             State::AwaitFeatures => {
-                let features: mgmt::Features = expect(
-                    msg_type,
-                    MessageType::Features,
-                    &payload,
-                    "reading features",
-                )
-                .map_err(E::from)?;
-                TrezorResponse::Info(features_info(features, self.network))
+                let features = expect_features::<P>(msg_type, &payload, "reading features")?;
+                TrezorResponse::Info(device_info(features, self.network))
             }
             State::AwaitPublicKey(kind) => {
                 let pubkey: btc::PublicKey = expect(
@@ -387,20 +640,19 @@ where
                     MessageType::PublicKey,
                     &payload,
                     "reading public key",
-                )
-                .map_err(E::from)?;
+                )?;
                 match kind {
                     PublicKeyKind::Fingerprint => {
                         let fingerprint = match pubkey.root_fingerprint {
                             Some(fingerprint) => Fingerprint::from(fingerprint.to_be_bytes()),
-                            None => parse_xpub(&pubkey.xpub).map_err(E::from)?.fingerprint(),
+                            None => parse_xpub(&pubkey.xpub)?.fingerprint(),
                         };
                         TrezorResponse::MasterFingerprint(fingerprint)
                     }
                     PublicKeyKind::Xpub => {
-                        let xpub = parse_xpub(&pubkey.xpub).map_err(E::from)?;
+                        let xpub = parse_xpub(&pubkey.xpub)?;
                         if xpub.network != NetworkKind::from(self.network) {
-                            return Err(E::from(TrezorError::NetworkMismatch));
+                            return Err(TrezorError::NetworkMismatch);
                         }
                         TrezorResponse::Xpub(xpub)
                     }
@@ -408,14 +660,12 @@ where
             }
             State::AwaitAddress => {
                 let address: btc::Address =
-                    expect(msg_type, MessageType::Address, &payload, "reading address")
-                        .map_err(E::from)?;
+                    expect(msg_type, MessageType::Address, &payload, "reading address")?;
                 TrezorResponse::Address(address.address)
             }
             State::AwaitMultisigAddress(_) => {
                 let address: btc::Address =
-                    expect(msg_type, MessageType::Address, &payload, "reading address")
-                        .map_err(E::from)?;
+                    expect(msg_type, MessageType::Address, &payload, "reading address")?;
                 TrezorResponse::Address(address.address)
             }
             State::AwaitMessageSignature => {
@@ -424,79 +674,49 @@ where
                     MessageType::MessageSignature,
                     &payload,
                     "reading message signature",
-                )
-                .map_err(E::from)?;
+                )?;
                 let (header, compact) = signed
                     .signature
                     .split_first()
                     .ok_or(TrezorError::InvalidInput("empty message signature".into()))?;
                 let signature = bitcoin::secp256k1::ecdsa::Signature::from_compact(compact)
-                    .map_err(|e| TrezorError::InvalidInput(e.to_string()))
-                    .map_err(E::from)?;
+                    .map_err(|e| TrezorError::InvalidInput(e.to_string()))?;
                 TrezorResponse::Signature(*header, signature)
             }
             State::AwaitSetupFeatures(_) => {
-                let State::AwaitSetupFeatures(ctx) =
+                let State::AwaitSetupFeatures(context) =
                     core::mem::replace(&mut self.state, State::New)
                 else {
                     unreachable!("state checked above")
                 };
-                let features: mgmt::Features = expect(
-                    msg_type,
-                    MessageType::Features,
-                    &payload,
-                    "reading features before setup",
-                )
-                .map_err(E::from)?;
+                let features =
+                    expect_features::<P>(msg_type, &payload, "reading features before setup")?;
                 if features.initialized.unwrap_or(false) {
-                    return Err(E::from(TrezorError::AlreadyInitialized));
+                    return Err(TrezorError::AlreadyInitialized);
                 }
-                if features.model.as_deref().unwrap_or("1") == "1" {
-                    return Err(E::from(TrezorError::Unsupported(
-                        "Trezor One setup needs host PIN entry, which is not supported in this build",
-                    )));
-                }
-                // trezorlib's defaults: Trezor One seeds at 256 bits, later models at 128.
-                let strength = if features.model.as_deref() == Some("1") {
-                    256
-                } else {
-                    128
-                };
-                self.state = State::AwaitEntropyRequest(ctx.host_entropy);
-                return Ok(Some(T::from(api::reset_device(
-                    strength,
-                    ctx.passphrase_protection,
-                    ctx.label,
-                ))));
+                let entropy = context.host_entropy;
+                let bytes = P::reset_device(&features, *context)?;
+                self.state = State::AwaitEntropyRequest(entropy);
+                return Ok(Some(EngineTransmit::Device(bytes)));
             }
             State::AwaitRestoreFeatures(_) => {
-                let State::AwaitRestoreFeatures(ctx) =
+                let State::AwaitRestoreFeatures(context) =
                     core::mem::replace(&mut self.state, State::New)
                 else {
                     unreachable!("state checked above")
                 };
-                let features: mgmt::Features = expect(
-                    msg_type,
-                    MessageType::Features,
-                    &payload,
-                    "reading features before restore",
-                )
-                .map_err(E::from)?;
+                let features =
+                    expect_features::<P>(msg_type, &payload, "reading features before restore")?;
                 if features.initialized.unwrap_or(false) {
-                    return Err(E::from(TrezorError::AlreadyInitialized));
+                    return Err(TrezorError::AlreadyInitialized);
                 }
-                if features.model.as_deref().unwrap_or("1") == "1" {
-                    return Err(E::from(TrezorError::Unsupported(
-                        "Trezor One restore needs host word entry, which is not supported in this build",
-                    )));
-                }
-                self.state = State::AwaitSuccess;
-                return Ok(Some(T::from(api::recovery_device(
-                    ctx.word_count,
-                    ctx.passphrase_protection,
-                    ctx.label,
-                    ctx.u2f_counter,
-                ))));
+                let bytes = P::recovery_device(&features, *context)?;
+                self.state = if P::CHARACTER_CIPHER {
+                    State::AwaitRecovery
+                } else {
+                    State::AwaitSuccess
+                };
+                return Ok(Some(EngineTransmit::Device(bytes)));
             }
             State::AwaitEntropyRequest(host_entropy) => {
                 let entropy = *host_entropy;
@@ -505,67 +725,64 @@ where
                     MessageType::EntropyRequest,
                     &payload,
                     "reading entropy request",
-                )
-                .map_err(E::from)?;
+                )?;
                 self.state = State::AwaitSuccess;
-                return Ok(Some(T::from(api::entropy_ack(&entropy))));
+                return Ok(Some(EngineTransmit::Device(api::entropy_ack(&entropy))));
             }
             State::AwaitPassphraseSetting => {
-                let features: mgmt::Features = expect(
-                    msg_type,
-                    MessageType::Features,
-                    &payload,
-                    "reading passphrase setting",
-                )
-                .map_err(E::from)?;
-                let enabled = features.passphrase_protection.unwrap_or(false);
-                self.state = State::AwaitSuccess;
-                return Ok(Some(T::from(api::apply_settings(!enabled))));
+                let features =
+                    expect_features::<P>(msg_type, &payload, "reading passphrase setting")?;
+                self.state = State::AwaitToggleSuccess;
+                return Ok(Some(EngineTransmit::Device(api::apply_settings(
+                    !features.passphrase_protection,
+                ))));
             }
             State::AwaitPinPromptFeatures => {
-                let features: mgmt::Features = expect(
-                    msg_type,
-                    MessageType::Features,
-                    &payload,
-                    "reading features before PIN entry",
-                )
-                .map_err(E::from)?;
-                check_pin_needed(&features).map_err(E::from)?;
+                let features =
+                    expect_features::<P>(msg_type, &payload, "reading features before PIN entry")?;
+                check_device_pin_needed(&features)?;
                 self.state = State::AwaitPinMatrix;
-                return Ok(Some(T::from(api::get_public_key(
+                return Ok(Some(EngineTransmit::Device(P::get_public_key(
                     PIN_PROMPT_PATH.to_vec(),
                     false,
                     btc::InputScriptType::Spendaddress,
-                    coin_name(self.network),
+                    P::coin_name(self.network),
                 ))));
             }
             State::AwaitPinMatrix => TrezorResponse::DeviceAction(true),
             State::AwaitPinResult => {
                 if msg_type == MessageType::Failure as u16 {
-                    self.state = State::AwaitPinFailureFeatures;
-                    return Ok(Some(T::from(api::get_features())));
+                    let failure: pb::Failure = api::decode(&payload)?;
+                    let needs_features = P::pin_failure_needs_features(&failure);
+                    let error = failure_error(failure);
+                    if matches!(error, TrezorError::ActionCancelled) {
+                        return Err(error);
+                    }
+                    if needs_features {
+                        self.state = State::AwaitPinFailureFeatures;
+                        return Ok(Some(EngineTransmit::Device(api::get_features())));
+                    }
+                    TrezorResponse::DeviceAction(false)
+                } else {
+                    TrezorResponse::DeviceAction(true)
                 }
-                TrezorResponse::DeviceAction(true)
             }
             State::AwaitPinFailureFeatures => {
-                let features: mgmt::Features = expect(
+                let features = expect_features::<P>(
                     msg_type,
-                    MessageType::Features,
                     &payload,
                     "reading features after a rejected PIN",
-                )
-                .map_err(E::from)?;
-                check_pin_needed(&features).map_err(E::from)?;
+                )?;
+                check_device_pin_needed(&features)?;
                 TrezorResponse::DeviceAction(false)
             }
-            State::AwaitSuccess => {
+            State::AwaitSuccess | State::AwaitToggleSuccess | State::AwaitRecovery => {
                 let _: pb::Success = expect(
                     msg_type,
                     MessageType::Success,
                     &payload,
                     "reading device action result",
-                )
-                .map_err(E::from)?;
+                )?;
                 TrezorResponse::DeviceAction(true)
             }
             State::AwaitSignKey(_) => {
@@ -578,33 +795,35 @@ where
                     MessageType::PublicKey,
                     &payload,
                     "reading master public key",
-                )
-                .map_err(E::from)?;
+                )?;
                 let master_fp = match pubkey.root_fingerprint {
                     Some(fingerprint) => Fingerprint::from(fingerprint.to_be_bytes()),
-                    None => parse_xpub(&pubkey.xpub).map_err(E::from)?.fingerprint(),
+                    None => parse_xpub(&pubkey.xpub)?.fingerprint(),
                 };
+                P::validate_psbt(&psbt, master_fp)?;
                 let tx = psbt.unsigned_tx.clone();
+                let coin = P::coin_name(self.network);
                 let bytes = api::sign_tx(
                     tx.input.len() as u32,
                     tx.output.len() as u32,
                     tx.version.0 as u32,
                     tx.lock_time.to_consensus_u32(),
-                    &coin_name(self.network),
+                    &coin,
                 );
                 self.state = State::AwaitTxRequest(Box::new(SignCtx {
                     psbt,
                     tx,
-                    coin: coin_name(self.network),
+                    coin,
                     master_fp,
                     signatures: Vec::new(),
                     passes: 1,
                     ignored: std::collections::BTreeSet::new(),
+                    external_inputs: P::EXTERNAL_INPUTS,
                 }));
-                return Ok(Some(T::from(bytes)));
+                return Ok(Some(EngineTransmit::Device(bytes)));
             }
             State::AwaitTxRequest(_) => {
-                let State::AwaitTxRequest(mut ctx) =
+                let State::AwaitTxRequest(mut context) =
                     core::mem::replace(&mut self.state, State::New)
                 else {
                     unreachable!("state checked above")
@@ -614,48 +833,155 @@ where
                     MessageType::TxRequest,
                     &payload,
                     "signing transaction",
-                )
-                .map_err(E::from)?;
-                match drive_sign(&mut ctx, request).map_err(E::from)? {
+                )?;
+                match drive_sign(&mut context, request)? {
                     SignStep::Continue(bytes) => {
-                        self.state = State::AwaitTxRequest(ctx);
-                        return Ok(Some(T::from(bytes)));
+                        self.state = State::AwaitTxRequest(context);
+                        return Ok(Some(EngineTransmit::Device(bytes)));
                     }
                     SignStep::Done(psbt) => TrezorResponse::SignedPsbt(psbt),
                 }
             }
-            State::AwaitPassphraseCancel => {
-                return Err(E::from(TrezorError::PassphraseTooLong));
-            }
-            State::AwaitLockedCancel => {
-                return Err(E::from(TrezorError::Locked(TrezorError::LOCKED)));
+            State::AwaitPassphraseCancel => return Err(TrezorError::PassphraseTooLong),
+            State::AwaitLockedCancel => return Err(TrezorError::Locked(P::locked_message())),
+            State::AwaitHostPin(_) | State::AwaitRecoveryCharacter(_) => {
+                unreachable!("host response states are handled before framing")
             }
             State::New | State::Finished(_) => {
-                return Err(E::from(TrezorError::UnexpectedMessage(
+                return Err(TrezorError::UnexpectedMessage(
                     msg_type,
                     "no command in progress",
-                )));
+                ));
             }
         };
         self.state = State::Finished(response);
         Ok(None)
     }
 
-    fn end(self) -> Result<R, E> {
+    fn consume_host_response(
+        &mut self,
+        mut data: Vec<u8>,
+    ) -> Result<Option<EngineTransmit>, TrezorError> {
+        let state = core::mem::replace(&mut self.state, State::New);
+        let result = match state {
+            State::AwaitHostPin(resume) => {
+                self.state = *resume;
+                match core::str::from_utf8(&data) {
+                    Ok(positions)
+                        if !positions.is_empty()
+                            && positions.bytes().all(|byte| byte.is_ascii_digit()) =>
+                    {
+                        Ok(Some(EngineTransmit::Device(api::pin_matrix_ack(positions))))
+                    }
+                    _ => Err(TrezorError::InvalidInput(
+                        "PIN positions must contain ASCII digits".into(),
+                    )),
+                }
+            }
+            State::AwaitRecoveryCharacter(resume) => {
+                self.state = *resume;
+                if data.len() != 1 || !matches!(data[0], b'a'..=b'z' | 0x08 | b' ' | b'\n') {
+                    Err(TrezorError::InvalidInput(
+                        "invalid recovery cipher response".into(),
+                    ))
+                } else {
+                    P::character_ack(data[0]).map(|bytes| Some(EngineTransmit::Device(bytes)))
+                }
+            }
+            _ => unreachable!("host response state checked before calling"),
+        };
+        data.zeroize();
+        result
+    }
+
+    pub(crate) fn end(self) -> Result<TrezorResponse, TrezorError> {
         match self.state {
-            State::Finished(response) => Ok(R::from(response)),
-            _ => Err(E::from(TrezorError::InvalidInput(
+            State::Finished(response) => Ok(response),
+            _ => Err(TrezorError::InvalidInput(
                 "interpreter did not reach a response".into(),
-            ))),
+            )),
         }
     }
 }
 
-fn check_pin_needed(features: &mgmt::Features) -> Result<(), TrezorError> {
-    if !features.pin_protection.unwrap_or(false) {
+pub struct TrezorInterpreter<C, T, R, E> {
+    engine: Engine<TrezorProfile>,
+    _marker: PhantomData<(C, T, R, E)>,
+}
+
+impl<C, T, R, E> Default for TrezorInterpreter<C, T, R, E> {
+    fn default() -> Self {
+        Self {
+            engine: Engine::default(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<C, T, R, E> TrezorInterpreter<C, T, R, E> {
+    pub fn with_network(mut self, network: Network) -> Self {
+        self.engine = self.engine.with_network(network);
+        self
+    }
+
+    pub fn with_passphrase(mut self, passphrase: Option<crate::trezor::HostPassphrase>) -> Self {
+        self.engine = self.engine.with_passphrase(passphrase);
+        self
+    }
+
+    pub fn with_on_device_passphrase(mut self, on_device: bool) -> Self {
+        self.engine = self.engine.with_on_device_passphrase(on_device);
+        self
+    }
+
+    #[cfg(test)]
+    fn wants_passphrase_protection(&self) -> bool {
+        self.engine.wants_passphrase_protection()
+    }
+}
+
+impl<C, T, R, E> Interpreter for TrezorInterpreter<C, T, R, E>
+where
+    C: TryInto<TrezorCommand, Error = TrezorError>,
+    T: From<Vec<u8>>,
+    R: From<TrezorResponse>,
+    E: From<TrezorError>,
+{
+    type Command = C;
+    type Transmit = T;
+    type Response = R;
+    type Error = E;
+
+    fn start(&mut self, command: C) -> Result<T, E> {
+        let command = command.try_into().map_err(E::from)?;
+        match self.engine.start(command.into()).map_err(E::from)? {
+            EngineTransmit::Device(bytes) => Ok(T::from(bytes)),
+            EngineTransmit::Host(_) => Err(E::from(TrezorError::InvalidInput(
+                "Trezor profile requested host interaction".into(),
+            ))),
+        }
+    }
+
+    fn exchange(&mut self, data: Vec<u8>) -> Result<Option<T>, E> {
+        match self.engine.exchange(data).map_err(E::from)? {
+            Some(EngineTransmit::Device(bytes)) => Ok(Some(T::from(bytes))),
+            Some(EngineTransmit::Host(_)) => Err(E::from(TrezorError::InvalidInput(
+                "Trezor profile requested host interaction".into(),
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    fn end(self) -> Result<R, E> {
+        self.engine.end().map(R::from).map_err(E::from)
+    }
+}
+
+fn check_device_pin_needed(features: &DeviceFeatures) -> Result<(), TrezorError> {
+    if !features.pin_protection {
         return Err(TrezorError::AlreadyUnlocked(TrezorError::NO_PIN_NEEDED));
     }
-    if features.unlocked.unwrap_or(false) {
+    if features.unlocked {
         return Err(TrezorError::AlreadyUnlocked(TrezorError::PIN_ALREADY_SENT));
     }
     Ok(())
@@ -671,6 +997,34 @@ fn expect<M: prost::Message + Default>(
         return Err(TrezorError::UnexpectedMessage(msg_type, context));
     }
     api::decode(payload)
+}
+
+fn expect_features<P: Profile>(
+    msg_type: u16,
+    payload: &[u8],
+    context: &'static str,
+) -> Result<DeviceFeatures, TrezorError> {
+    if msg_type != MessageType::Features as u16 {
+        return Err(TrezorError::UnexpectedMessage(msg_type, context));
+    }
+    P::decode_features(payload)
+}
+
+fn pin_request_kind(value: Option<i32>) -> PinMatrixRequestKind {
+    use pb::pin_matrix_request::PinMatrixRequestType;
+    match value {
+        Some(value) if value == PinMatrixRequestType::Current as i32 => {
+            PinMatrixRequestKind::Current
+        }
+        Some(value) if value == PinMatrixRequestType::NewFirst as i32 => {
+            PinMatrixRequestKind::NewFirst
+        }
+        Some(value) if value == PinMatrixRequestType::NewSecond as i32 => {
+            PinMatrixRequestKind::NewSecond
+        }
+        Some(value) => PinMatrixRequestKind::Unknown(value),
+        None => PinMatrixRequestKind::Current,
+    }
 }
 
 fn failure_error(failure: pb::Failure) -> TrezorError {
@@ -692,8 +1046,23 @@ fn failure_error(failure: pb::Failure) -> TrezorError {
     }
 }
 
-fn features_info(features: mgmt::Features, network: Network) -> TrezorDeviceInfo {
-    let on_device = on_device_passphrase_entry(&features);
+fn trezor_device_features(features: mgmt::Features) -> DeviceFeatures {
+    let on_device_passphrase_entry = on_device_passphrase_entry(&features);
+    DeviceFeatures {
+        major_version: features.major_version,
+        minor_version: features.minor_version,
+        patch_version: features.patch_version,
+        pin_protection: features.pin_protection.unwrap_or(false),
+        passphrase_protection: features.passphrase_protection.unwrap_or(false),
+        label: features.label,
+        initialized: features.initialized,
+        unlocked: features.unlocked.unwrap_or(false),
+        model: features.model,
+        on_device_passphrase_entry,
+    }
+}
+
+fn device_info(features: DeviceFeatures, network: Network) -> TrezorDeviceInfo {
     TrezorDeviceInfo {
         version: format!(
             "{}.{}.{}",
@@ -703,11 +1072,15 @@ fn features_info(features: mgmt::Features, network: Network) -> TrezorDeviceInfo
         model: features.model,
         initialized: features.initialized,
         label: features.label,
-        on_device_passphrase_entry: on_device,
-        needs_pin_sent: features.pin_protection.unwrap_or(false)
-            && !features.unlocked.unwrap_or(false),
-        passphrase_protection: features.passphrase_protection.unwrap_or(false),
+        on_device_passphrase_entry: features.on_device_passphrase_entry,
+        needs_pin_sent: features.pin_protection && !features.unlocked,
+        passphrase_protection: features.passphrase_protection,
     }
+}
+
+#[cfg(test)]
+fn features_info(features: mgmt::Features, network: Network) -> TrezorDeviceInfo {
+    device_info(trezor_device_features(features), network)
 }
 
 fn on_device_passphrase_entry(features: &mgmt::Features) -> bool {
@@ -1143,6 +1516,26 @@ fn our_input(ctx: &SignCtx, index: usize) -> Result<(TxType, bool), TrezorError>
         .ok_or(TrezorError::InvalidInput(
             "psbt input has no utxo to sign".into(),
         ))?;
+    let belongs_to_device = taproot_derivation(psbt_input, ctx.master_fp).is_some()
+        || our_derivation(&psbt_input.bip32_derivation, ctx.master_fp).is_some();
+    if ctx.external_inputs && !belongs_to_device {
+        let coin_type = if ctx.coin == "Bitcoin" { 0 } else { 1 };
+        return Ok((
+            TxType {
+                inputs: vec![AckInput {
+                    address_n: vec![0x8000_0054, 0x8000_0000 | coin_type, 0x8000_0000, 0, 0],
+                    prev_hash: prev_hash_bytes(txin.previous_output.txid),
+                    prev_index: txin.previous_output.vout,
+                    sequence: Some(txin.sequence.to_consensus_u32()),
+                    script_type: Some(btc::InputScriptType::Spendwitness as i32),
+                    amount: Some(utxo.value.to_sat()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            true,
+        ));
+    }
     let script_type = spend_script_type(psbt_input, &utxo.script_pubkey, &ctx.psbt.xpub)?;
     let multisig = match script_type {
         btc::InputScriptType::Spendmultisig => {
@@ -1686,6 +2079,7 @@ mod tests {
             signatures: Vec::new(),
             passes: 1,
             ignored: std::collections::BTreeSet::new(),
+            external_inputs: false,
         }
     }
 
@@ -1710,6 +2104,28 @@ mod tests {
         let step = drive_sign(&mut ctx, tx_finished()).expect("drive sign");
         assert!(matches!(step, SignStep::Done(_)));
         assert_eq!(ctx.passes, 1);
+    }
+
+    #[test]
+    fn unsupported_transaction_request_branches_are_explicit() {
+        for request_type in [
+            btc::tx_request::RequestType::Txextradata,
+            btc::tx_request::RequestType::Txpaymentreq,
+            btc::tx_request::RequestType::Txoriginput,
+            btc::tx_request::RequestType::Txorigoutput,
+        ] {
+            let mut ctx = sign_ctx_with(&[test_key(0), test_key(1)]);
+            let Err(error) = drive_sign(
+                &mut ctx,
+                btc::TxRequest {
+                    request_type: Some(request_type as i32),
+                    ..Default::default()
+                },
+            ) else {
+                panic!("unsupported request was accepted")
+            };
+            assert!(matches!(error, TrezorError::Unsupported(_)));
+        }
     }
 
     #[test]
@@ -2040,12 +2456,14 @@ mod tests {
     }
 
     fn cosigner_pubkeys(msg: &btc::GetAddress) -> Vec<String> {
+        use bitcoin::hex::DisplayHex;
+
         msg.multisig
             .as_ref()
             .expect("multisig script")
             .pubkeys
             .iter()
-            .map(|key| hex::encode(&key.node.public_key))
+            .map(|key| key.node.public_key.to_lower_hex_string())
             .collect()
     }
 
@@ -2324,12 +2742,31 @@ mod tests {
     }
 
     #[test]
-    fn send_pin_rechecks_features_before_reporting_a_wrong_pin() {
+    fn send_pin_distinguishes_cancellation_from_rejection() {
+        for code in [
+            pb::failure::FailureType::FailureActionCancelled,
+            pb::failure::FailureType::FailurePinCancelled,
+        ] {
+            let mut interp = Interp::default();
+            interp.start(send_pin_command("1234")).unwrap();
+            let failure = pb::Failure {
+                code: Some(code as i32),
+                message: None,
+            };
+            assert!(matches!(
+                interp.exchange(framed(MessageType::Failure, &failure)),
+                Err(Error::AuthenticationRefused)
+            ));
+        }
+
         let mut interp = Interp::default();
         interp.start(send_pin_command("1234")).unwrap();
-
+        let failure = pb::Failure {
+            code: Some(pb::failure::FailureType::FailurePinInvalid as i32),
+            message: None,
+        };
         let transmit = interp
-            .exchange(framed(MessageType::Failure, &pb::Failure::default()))
+            .exchange(framed(MessageType::Failure, &failure))
             .unwrap()
             .unwrap();
         let (msg_type, _) = decode_transmit::<mgmt::GetFeatures>(transmit);

@@ -1,0 +1,16 @@
+[package]
+name = "bhwi-e2e-keepkey"
+version = "0.1.0"
+edition = "2024"
+authors.workspace = true
+license-file.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bhwi = { workspace = true, features = ["keepkey"] }
+bhwi-async = { workspace = true, features = ["keepkey"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
+prost = "=0.13.5"
+
+[dev-dependencies]
+bhwi-cli = { path = "../../bhwi-cli" }

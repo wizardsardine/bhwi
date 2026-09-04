@@ -7,7 +7,10 @@ license-file.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bhwi = { workspace = true, features = ["keepkey"] }
 bitcoin = { workspace = true, features = ["base64"] }
 serde_json.workspace = true
 
 bhwi-e2e-trezor = { path = "../trezor" }
+bhwi-e2e-keepkey = { path = "../keepkey" }
+tokio = { workspace = true, features = ["net", "rt", "time"] }

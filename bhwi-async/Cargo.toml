@@ -12,10 +12,11 @@ description = "development kit"
 # https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["bitbox", "coldcard", "jade", "ledger", "trezor"]
+default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "trezor"]
 bitbox = ["bhwi/bitbox"]
 coldcard = ["bhwi/coldcard"]
 jade = ["bhwi/jade", "serde_cbor"]
+keepkey = ["bhwi/keepkey"]
 ledger = ["bhwi/ledger"]
 trezor = ["bhwi/trezor"]
 emulators = ["hex", "serde", "serde_json"]

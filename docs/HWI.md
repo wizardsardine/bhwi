@@ -29,22 +29,25 @@ errors exit `0`, and argparse-style usage errors exit `2` with
 
 |Command           |Ledger|Jade |Coldcard|Trezor|KeepKey|BitBox01|BitBox02|Notes                                                                 |
 |------------------|------|-----|--------|------|-------|--------|--------|----------------------------------------------------------------------|
-|`enumerate`       |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for expected Python HWI fields and global selection arguments.|
-|`getmasterxpub`   |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for supported address types.                                  |
-|`getxpub`         |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for normal and expert output shape.                           |
-|`getdescriptors`  |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for account descriptors.                                      |
-|`getkeypool`      |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for receive/change ranges and address types.                  |
-|`signtx`          |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Ledger covers default BIP44/49/84/86 wallets and classic registered sorted multisig. Trezor covers single-sig, taproot, op_return, and multisig.|
-|`signmessage`     |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Covered for emulator-supported paths.                                 |
-|`displayaddress`  |`[x]` |`[x]`|`[x]`   |`[x]` |`[ ]`  |`n/a`   |`[x]`   |Registered Coldcard multisig display is covered for all script wrappers. Trezor covers descriptor and multisig display.|
-|`setup`           |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |Physical setup uses fresh entropy and backup; simulator setup is covered end to end.|
-|`wipe`            |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`[ ]`   |`[x]`   |BitBox02 reset-disconnect behavior is covered by a stateful lifecycle.|
-|`restore`         |`n/a` |`n/a`|`n/a`   |`[~]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI support excludes Ledger, Jade, Coldcard, and BitBox01. Trezor restore is supported on the Model T, which takes the recovery phrase on its own screen. The Trezor One requires host word entry and is unsupported.|
+|`enumerate`       |`[x]` |`[x]`|`[x]`   |`[x]` |`[x]`  |`[ ]`   |`[x]`   |Covered for expected Python HWI fields and global selection arguments.|
+|`getmasterxpub`   |`[x]` |`[x]`|`[x]`   |`[x]` |`[x]`  |`[ ]`   |`[x]`   |Covered for supported address types.                                  |
+|`getxpub`         |`[x]` |`[x]`|`[x]`   |`[x]` |`[x]`  |`[ ]`   |`[x]`   |Covered for normal and expert output shape.                           |
+|`getdescriptors`  |`[x]` |`[x]`|`[x]`   |`[x]` |`[x]`  |`[ ]`   |`[x]`   |Covered for account descriptors.                                      |
+|`getkeypool`      |`[x]` |`[x]`|`[x]`   |`[x]` |`[x]`  |`[ ]`   |`[x]`   |Covered for receive/change ranges and address types.                  |
+|`signtx`          |`[x]` |`[x]`|`[x]`   |`[x]` |`[x]`  |`[ ]`   |`[x]`   |Ledger covers default BIP44/49/84/86 wallets and classic registered sorted multisig. Trezor covers single-sig, Taproot, OP_RETURN, and multisig. KeepKey multisig coverage is limited to fully derived sorted 2-of-2 signing across legacy P2SH, wrapped P2WSH-P2SH, and native P2WSH.|
+|`signmessage`     |`[x]` |`[x]`|`[x]`   |`[x]` |`[x]`  |`[ ]`   |`[x]`   |Covered for emulator-supported paths.                                 |
+|`displayaddress`  |`[x]` |`[x]`|`[x]`   |`[x]` |`[x]`  |`n/a`   |`[x]`   |Registered Coldcard multisig display is covered for all script wrappers. Trezor covers descriptor and multisig display. KeepKey covers sorted, fully derived multisig.|
+|`setup`           |`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`[ ]`   |`[x]`   |Trezor and KeepKey setup use fresh host entropy; emulator lifecycle coverage verifies setup end to end.|
+|`wipe`            |`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`[ ]`   |`[x]`   |Stateful emulator lifecycles cover supported reset behavior.          |
+|`restore`         |`n/a` |`n/a`|`n/a`   |`[~]` |`[~]`  |`n/a`   |`[x]`   |KeepKey restore implements the firmware character-cipher flow, but pinned Python HWI has no working or reference-tested flow. Trezor restore is supported on Model T; Model One host word entry remains unsupported.|
 |`backup`          |`n/a` |`n/a`|`[x]`   |`n/a` |`n/a`  |`[ ]`   |`[x]`   |Coldcard file backup and BitBox02 mnemonic-export backup are covered. BitBox01 remains open.|
-|`promptpin`       |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN prompting for Trezor-class devices.      |
-|`sendpin`         |`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`n/a`   |`n/a`   |Python HWI supports host PIN entry for Trezor-class devices.          |
-|`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[x]` |`[ ]`  |`n/a`   |`[x]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
+|`promptpin`       |`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`n/a`   |`n/a`   |Python HWI supports host PIN prompting for Trezor-class devices.      |
+|`sendpin`         |`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`n/a`   |`n/a`   |Python HWI supports host PIN entry for Trezor-class devices.          |
+|`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`n/a`   |`[x]`   |Python HWI supports this for Trezor, KeepKey, and BitBox02.           |
 |`installudevrules`|`n/a` |`n/a`|`n/a`   |`n/a` |`n/a`  |`n/a`   |`n/a`   |Host-side Python HWI command covered by the shared udev installer. Registered on Linux only.|
+
+KeepKey wallet registration and software backup remain unsupported. Its
+management input is host-interactive only when `hwi -i` is used.
 
 ## Running Parity Tests
 

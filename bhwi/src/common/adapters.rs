@@ -4,6 +4,8 @@ mod bitbox;
 mod coldcard;
 #[cfg(feature = "jade")]
 mod jade;
+#[cfg(feature = "keepkey")]
+mod keepkey;
 #[cfg(feature = "ledger")]
 mod ledger;
 #[cfg(feature = "trezor")]

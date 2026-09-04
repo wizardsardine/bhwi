@@ -103,7 +103,7 @@ impl<T: Transport> BitBox<T> {
     /// Drive one BitBox-specific command through the interpreter and transport.
     async fn run_bitbox(&mut self, command: BitBoxCommand) -> Result<BitBoxResponse, BitBoxError> {
         use crate::CommonInterface;
-        let (transport, _http, mut interpreter) = <BitBox<T> as CommonInterface<
+        let (transport, _http, _host, mut interpreter) = <BitBox<T> as CommonInterface<
             RawCommand,
             BitBoxTransmit,
             BitBoxResponse,
@@ -141,14 +141,16 @@ where
     fn components(
         &mut self,
     ) -> (
-        &mut dyn Transport<Error = Self::TransportError>,
-        &dyn HttpClient<Error = Self::HttpClientError>,
+        &mut (dyn Transport<Error = Self::TransportError> + '_),
+        &(dyn HttpClient<Error = Self::HttpClientError> + '_),
+        Option<&mut (dyn crate::HostInteraction + 'static)>,
         impl Interpreter<Command = C, Transmit = T, Response = R, Error = E>,
     ) {
         let network = self.network;
         (
             &mut self.transport,
             &DummyClient,
+            None,
             BitBoxInterpreter::new(&mut self.noise).with_network(network),
         )
     }
