@@ -216,7 +216,17 @@ case " \$* " in
   *" wipe "* | *" signtx "* | *" signmessage "* | *" displayaddress "* | *" togglepassphrase "* | *" setup "* | *" restore "*) press=1 ;;
 esac
 case " \$* " in
-  *" sendpin "* | *" enumerate "*) case " \$* " in *" -p "*) press=1 ;; esac ;;
+  *" sendpin "*) case " \$* " in *" -p "*) press=1 ;; esac ;;
+  *" enumerate "*)
+    previous=
+    for arg in "\$@"; do
+      if [[ "\$previous" == "-p" ]]; then
+        [[ -n "\$arg" ]] && press=1
+        break
+      fi
+      previous="\$arg"
+    done
+    ;;
 esac
 case "\$press" in
   1)
