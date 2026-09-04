@@ -23,9 +23,10 @@ commands and devices where parity is claimed.
   and candidate PSBTs are then compared field for field with only the signature
   values excluded. Per-input signature key sets must still match exactly.
 - Emulator CI (`.github/workflows/emulators.yml`) runs the matching
-  `hwi-parity-<device>` app inside each device job, then stops the shared
-  emulator and runs the pinned upstream HWI suite as that job's final test
-  gate.
+  `hwi-parity-<device>` app inside each device job. BitBox02, Coldcard, Ledger,
+  Jade, and KeepKey then stop the shared emulator and run their pinned upstream
+  HWI suite as the final gate. Trezor's upstream apps remain available locally
+  but are not currently wired into CI.
 
 ## Exit status contract
 
@@ -50,17 +51,19 @@ compared for usage errors.
 
 User refusals on the device stop flattening to `-3` and mirror the pinned
 reference exactly: `-14` where upstream raises `ActionCanceledError` (Coldcard
-signmessage/displayaddress, BitBox, Jade), `-13` for Ledger (upstream's
-`ledger_bitcoin` `DenyError` bypasses the `ledger_exception` cancel mapping),
-and, for a refused Coldcard signtx, either `-14` (the refusal frame answers an
-in-flight poll) or `-7` `Coldcard Error: No active request` (the cleared
-request errors on the next poll); both occur upstream depending on poll
+signmessage/displayaddress, BitBox, Jade, and KeepKey), `-13` for Ledger
+(upstream's `ledger_bitcoin` `DenyError` bypasses the `ledger_exception` cancel
+mapping), and, for a refused Coldcard signtx, either `-14` (the refusal frame
+answers an in-flight poll) or `-7` `Coldcard Error: No active request` (the
+cleared request errors on the next poll); both occur upstream depending on poll
 timing. Emulator-backed cancel parity cases cover Ledger (Speculos reject
 automation, both binaries) and Coldcard (simulator refuse keypress,
 candidate-only: the pinned reference presses `y` on the simulator by itself
 via `sim_keypress`, so its refusal path cannot be exercised there and its codes
-are pinned from upstream source); Jade and BitBox refusals are covered by
-protocol unit tests only.
+are pinned from upstream source). KeepKey refusal recovery is also
+candidate-only because Python HWI's debug client auto-approves; the candidate
+must return `-14` and the next session must succeed. Jade and BitBox refusals
+are covered by protocol unit tests only.
 
 Argument validation follows upstream's ordering: device lookup runs first, so
 an invalid derivation path, PSBT, or unknown `-t` value reports `-3` when no
@@ -85,6 +88,7 @@ nix run .#hwi-upstream-bitbox
 nix run .#hwi-upstream-coldcard
 nix run .#hwi-upstream-ledger
 nix run .#hwi-upstream-jade
+nix run .#hwi-upstream-keepkey
 nix run .#hwi-upstream-trezor
 nix run .#hwi-upstream-trezor-t
 ```
@@ -100,7 +104,8 @@ the upstream test suite.
 
 The generic dispatcher remains available as `nix run .#hwi-upstream-suite --
 <device>`. CI gives the final gates bounded runtimes of 45 minutes for
-BitBox02, 90 minutes for Coldcard and Ledger, and 120 minutes for Jade.
+BitBox02, 90 minutes for Coldcard, Ledger, and KeepKey, and 120 minutes for
+Jade.
 
 ### Why the reference side works for the wired devices
 
@@ -117,6 +122,7 @@ starts the emulator on the exact transport that backend already probes:
 | Jade     | QEMU serial over TCP `localhost:30121`             | `nix run .#jade` + `jade-init` |
 | BitBox02 | Firmware simulator TCP `localhost:15423`           | `nix run .#bitbox` |
 | Trezor   | Emulator UDP `127.0.0.1:21324`                     | `nix run .#trezor-one` or `.#trezor-t`, + `trezor-init` |
+| KeepKey  | Emulator UDP `127.0.0.1:11044` (debug `11045`) | `nix run .#keepkey`, + `keepkey-init` |
 
 The flake env blocks only supply build/runtime libraries; they do not tell HWI
 where the emulator is — the backend already knows. Our candidate `bhwi hwi`
@@ -131,6 +137,7 @@ mirrors each with its own `--emulators` enumerate.
 | Jade      | `hwi-parity-jade` | `hwi-upstream-jade` |
 | BitBox02  | `hwi-parity-bitbox` | `hwi-upstream-bitbox` |
 | Trezor    | `hwi-parity-trezor` | `hwi-upstream-trezor`, `hwi-upstream-trezor-t` |
+| KeepKey   | `hwi-parity-keepkey` | `hwi-upstream-keepkey` |
 
 Coldcard multisig display cases reset simulator state and register the same
 deterministic wallet through the native `bhwi` binary before each reference
@@ -202,3 +209,30 @@ only, because the Model T takes its PIN and passphrase on its own screen.
 covered by `bhwi-e2e-trezor` and `bhwi-e2e-cli` instead. It is supported on the
 Model T, which takes the recovery phrase on its own screen; the Trezor One
 requires host word entry and is unsupported.
+
+## KeepKey parity notes
+
+KeepKey parity runs against emulator UDP `127.0.0.1:11044`; confirmation and
+state automation uses the debug link on `127.0.0.1:11045`. Start `keepkey` and
+`keepkey-init` before `hwi-parity-keepkey`.
+
+The differential suite covers enumerate, global arguments, xpubs, six
+non-Taproot descriptor/keypool forms, legacy and SegWit transaction signing,
+including fully derived sorted 2-of-2 KeepKey multisig across legacy P2SH,
+wrapped P2WSH-P2SH, and native P2WSH, message signing, supported single- and
+multisig display, management errors, PIN/passphrase behavior, and validation
+errors. The candidate-only fresh-image management lifecycle covers setup,
+wipe, and firmware character-cipher
+restore. Candidate refusal tests require code `-14` and a usable following
+session; Python HWI's debug client auto-approves and cannot provide the same
+refusal observation.
+
+`hwi-upstream-keepkey` is the final gate over the 29 methods in HWI 3.2.0's
+unmodified KeepKey suite. Upstream starts and initializes a new image per test,
+so stop the shared emulator before running it.
+
+Restore remains partial parity (`[~]`). HWI 3.2.0 has no KeepKey restore test
+and its inherited word-request implementation does not correctly drive the
+firmware's `CharacterRequest`/`CharacterAck` flow. BHWI's direct and CLI
+firmware-backed lifecycle tests cover that real flow, but there is no working
+reference result to compare.
