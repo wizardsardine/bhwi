@@ -197,6 +197,7 @@ pub fn sign_tx(
         coin_name: Some(coin_name.to_string()),
         version: Some(version),
         lock_time: Some(lock_time),
+        serialize: Some(false),
         ..Default::default()
     };
     encode(MessageType::SignTx, &msg)
