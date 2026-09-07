@@ -34,13 +34,18 @@ jobs:
         # Per-package checks: workspace-level builds unify features and would
         # mask a device gate that no longer compiles on its own.
         run: |
-          cargo check -p bhwi --no-default-features
-          cargo check -p bhwi-async --no-default-features
-          for f in bitbox coldcard jade ledger trezor; do
-            cargo check -p bhwi --no-default-features --features "$f"
-            cargo check -p bhwi-async --no-default-features --features "$f"
+          cargo check -p bhwi --no-default-features --all-targets
+          cargo check -p bhwi-async --no-default-features --all-targets
+          cargo check -p bhwi-cli --no-default-features --all-targets
+          for f in bitbox coldcard jade keepkey ledger trezor; do
+            cargo check -p bhwi --no-default-features --features "$f" --all-targets
+            cargo check -p bhwi-async --no-default-features --features "$f" --all-targets
+            cargo check -p bhwi-async-transport --no-default-features --features "$f" --all-targets
+            cargo check -p bhwi-cli --no-default-features --features "$f" --all-targets
           done
-          cargo check -p bhwi-async --no-default-features --features emulators,jade,ledger
+          cargo check -p bhwi-async-transport --no-default-features --all-targets
+          cargo check -p bhwi-async --no-default-features --features jade,ledger
+          cargo check -p bhwi-async-transport
 
   unit_tests:
     needs: linter
