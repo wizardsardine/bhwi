@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
 members = [
-    "bhwi", "bhwi-async", "bhwi-wasm", "bhwi-cli", "e2e/*"
+    "bhwi", "bhwi-async", "bhwi-wasm", "bhwi-cli", "bhwi-async-transport", "e2e/*"
 ]
-default-members = ["bhwi", "bhwi-async", "bhwi-cli"]
+default-members = ["bhwi", "bhwi-async", "bhwi-cli", "bhwi-async-transport"]
 
 [workspace.package]
 authors = ["Edouard Paris <m@edouard.paris>", "Trevor Arjeski <tmarjeski@gmail.com>"]
@@ -19,6 +19,7 @@ bitcoin = "0.32.2"
 # (bhwi-async forwards them; its defaults keep all devices enabled)
 bhwi = { path = "./bhwi", version = "0.0.1", default-features = false }
 bhwi-async = { path = "./bhwi-async", version = "0.0.1", default-features = false }
+bhwi-async-transport = { path = "./bhwi-async-transport", version = "0.0.1", default-features = false }
 futures = "0.3"
 hex = "0.4.3"
 log = "0.4"

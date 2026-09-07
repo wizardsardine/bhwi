@@ -429,6 +429,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bhwi-async-transport"
+version = "0.0.1"
+dependencies = [
+ "async-hid",
+ "async-trait",
+ "bhwi",
+ "bhwi-async",
+ "bitcoin",
+ "futures",
+ "nusb",
+ "rand_core 0.6.4",
+ "reqwest",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-serial",
+]
+
+[[package]]
 name = "bhwi-wasm"
 version = "0.0.1"
 dependencies = [
