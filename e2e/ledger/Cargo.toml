@@ -17,5 +17,5 @@ tokio = { workspace = true, features = ["macros"] }
 reqwest = { workspace = true, features = ["json"] }
 miniscript.workspace = true
 
-bhwi-cli = { path = "../../bhwi-cli" }
+bhwi-async-transport = { workspace = true, default-features = false, features = ["ledger"] }
 bhwi = { workspace = true, features = ["ledger"] }
