@@ -286,10 +286,7 @@ dependencies = [
  "bhwi",
  "byteorder",
  "futures",
- "hex",
- "serde",
  "serde_cbor",
- "serde_json",
  "thiserror 1.0.69",
 ]
 
