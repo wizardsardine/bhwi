@@ -1,17 +1,16 @@
-use std::{
-    ffi::OsString,
-    fs,
-    io::{self, BufRead},
-    path::PathBuf,
-    process::ExitCode,
-    str::FromStr,
+use crate::management::{bitbox_restore_context, bitbox_setup_context};
+use crate::management::{keepkey_restore_context, keepkey_setup_context};
+use crate::management::{trezor_restore_context, trezor_setup_context};
+use crate::udev::{UdevRuleSelection, install_udev_rules};
+use crate::{
+    Device, DeviceManager, DeviceSelector, DeviceType, device_manager,
+    get_descriptors::{GetDescriptorOptions, get_descriptor},
 };
-
+use bhwi::ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy};
 use bhwi::{
     bitcoin::psbt::Psbt,
     common::{MultisigAddressType, MultisigDisplayAddress},
     keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED},
-    ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
     passphrase::HostPassphrase,
 };
 use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions};
@@ -33,16 +32,13 @@ use miniscript::{
     descriptor::{DescriptorType, WalletPolicy, Wildcard, checksum},
 };
 use serde::{Serialize, Serializer};
-
-use crate::{
-    Device, DeviceManager, DeviceType,
-    config::DeviceSelector,
-    get_descriptors::GetDescriptorOptions,
-    management::{
-        bitbox_restore_context, bitbox_setup_context, keepkey_restore_context,
-        keepkey_setup_context, trezor_restore_context, trezor_setup_context,
-    },
-    udev::{UdevRuleSelection, install_udev_rules},
+use std::{
+    ffi::OsString,
+    fs,
+    io::{self, BufRead},
+    path::PathBuf,
+    process::ExitCode,
+    str::FromStr,
 };
 
 type HwiResult<T> = std::result::Result<T, HwiError>;
@@ -154,7 +150,6 @@ pub enum HwiCliCommand {
         pin: String,
     },
     Togglepassphrase,
-    #[cfg(target_os = "linux")]
     Installudevrules {
         #[arg(long, default_value = "/etc/udev/rules.d/")]
         location: PathBuf,
@@ -236,7 +231,7 @@ fn hwi_device_manager(selector: &HwiSelector) -> Result<DeviceManager, HwiError>
             }
         },
     };
-    Ok(DeviceManager::new(selector.device_selector(device_type)))
+    Ok(device_manager(selector.device_selector(device_type)))
 }
 
 async fn find_hwi_device(selector: &HwiSelector) -> Result<(DeviceManager, Device), HwiError> {
@@ -256,7 +251,7 @@ async fn find_hwi_device(selector: &HwiSelector) -> Result<(DeviceManager, Devic
             HwiErrorCode::DeviceConnectionError,
             "Could not find device with specified fingerprint or type",
         )),
-        Err(err) => Err(classify_anyhow_device_error(&err)),
+        Err(err) => Err(classify_device_error(&err)),
     }
 }
 
@@ -825,15 +820,15 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
         .as_deref()
         .and_then(|raw| parse_device_type(raw).ok());
     let raw_device_type = device_type.and(selector.device_type.as_deref());
-    let manager = DeviceManager::new(selector.device_selector(device_type));
-    let devices = match manager.enumerate().await {
-        Ok(devices) => devices,
+    let manager = device_manager(selector.device_selector(device_type));
+    let scan = match manager.enumerate().await {
+        Ok(scan) => scan,
         Err(err) => {
             return HwiResponse::Error(device_error(err));
         }
     };
-    let mut response = Vec::with_capacity(devices.len());
-    for mut device in devices {
+    let mut response = Vec::with_capacity(scan.devices.len() + scan.skipped.len());
+    for mut device in scan.devices {
         if !hwi_selector_matches_device(
             raw_device_type,
             device.device_type(),
@@ -907,7 +902,7 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
                                 code = Some(HwiErrorCode::DeviceNotInitialized.code());
                             }
                             Err(err) => {
-                                let classified = classify_anyhow_device_error(&err);
+                                let classified = classify_device_error(&err);
                                 error = Some(classified.error);
                                 code = Some(classified.code);
                             }
@@ -945,9 +940,23 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
             code,
         });
     }
+    // Python HWI lists unopenable devices with an error rather than omitting them.
+    for skipped in scan.skipped {
+        response.push(HwiEnumeratedDevice {
+            device_type: skipped.device_type.to_string(),
+            model: skipped.model,
+            path: skipped.path,
+            label: None,
+            fingerprint: None,
+            needs_pin_sent: false,
+            needs_passphrase_sent: false,
+            warnings: Vec::new(),
+            error: Some(skipped.error),
+            code: Some(HwiErrorCode::DeviceConnectionError.code()),
+        });
+    }
     HwiResponse::Enumerate(response)
 }
-
 fn install_udev_rules_hwi(location: PathBuf) -> HwiResponse {
     match install_udev_rules(&location, UdevRuleSelection::All) {
         Ok(()) => HwiResponse::Success(HwiSuccessResponse { success: true }),
@@ -1052,7 +1061,13 @@ async fn setup_device(
                 ));
             }
         },
-        _ => unreachable!("setup support checked above"),
+        #[allow(unreachable_patterns)]
+        device_type => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::UnsupportedCommand,
+                format!("{device_type} support is not compiled into this build"),
+            ));
+        }
     };
     match device
         .device()
@@ -1143,36 +1158,48 @@ async fn restore_device(
             ),
         ));
     }
-    let context = if device.device_type() == DeviceType::BitBox02 {
-        if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+    let context = match device.device_type() {
+        DeviceType::BitBox02 => {
+            if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::UnsupportedCommand,
+                    "The BitBox02 must be wiped before setup.",
+                ));
+            }
+            match bitbox_restore_context() {
+                Ok(context) => Some(context),
+                Err(err) => {
+                    return HwiResponse::Error(HwiError::new(
+                        HwiErrorCode::DeviceFailure,
+                        err.to_string(),
+                    ));
+                }
+            }
+        }
+        DeviceType::KeepKey => match keepkey_restore_context() {
+            Ok(context) => Some(context),
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
+        },
+        DeviceType::Trezor => match trezor_restore_context() {
+            Ok(context) => Some(context),
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
+        },
+        #[allow(unreachable_patterns)]
+        device_type => {
             return HwiResponse::Error(HwiError::new(
                 HwiErrorCode::UnsupportedCommand,
-                "The BitBox02 must be wiped before setup.",
+                format!("{device_type} support is not compiled into this build"),
             ));
-        }
-        match bitbox_restore_context() {
-            Ok(context) => Some(context),
-            Err(err) => {
-                return HwiResponse::Error(HwiError::new(
-                    HwiErrorCode::DeviceFailure,
-                    err.to_string(),
-                ));
-            }
-        }
-    } else {
-        let context = if device.device_type() == DeviceType::KeepKey {
-            keepkey_restore_context()
-        } else {
-            trezor_restore_context()
-        };
-        match context {
-            Ok(context) => Some(context),
-            Err(err) => {
-                return HwiResponse::Error(HwiError::new(
-                    HwiErrorCode::DeviceFailure,
-                    err.to_string(),
-                ));
-            }
         }
     };
     match device
@@ -1273,7 +1300,7 @@ async fn device_for_pin_command(
             ));
         }
         Err(err) => {
-            return Err(classify_anyhow_device_error(&err));
+            return Err(classify_device_error(&err));
         }
     };
 
@@ -1836,7 +1863,7 @@ async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(classify_anyhow_device_error(&err));
+            return HwiResponse::Error(classify_device_error(&err));
         }
     };
     let device_type = device.device_type();
@@ -1857,10 +1884,10 @@ async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
                 descriptor_type,
                 network,
             );
-            let descriptor = match manager.get_descriptor(device.device(), options).await {
+            let descriptor = match get_descriptor(device.device().as_mut(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(classify_anyhow_device_error(&err));
+                    return HwiResponse::Error(classify_device_error(&err));
                 }
             };
             let descriptor = match hwi_descriptor_string(&descriptor) {
@@ -1927,7 +1954,7 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(classify_anyhow_device_error(&err));
+            return HwiResponse::Error(classify_device_error(&err));
         }
     };
     let device_type = device.device_type();
@@ -1974,10 +2001,10 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
                     network,
                 ),
             };
-            let descriptor = match manager.get_descriptor(device.device(), options).await {
+            let descriptor = match get_descriptor(device.device().as_mut(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(classify_anyhow_device_error(&err));
+                    return HwiResponse::Error(classify_device_error(&err));
                 }
             };
             let desc = match hwi_descriptor_string(&descriptor) {
@@ -2003,18 +2030,15 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
 
     HwiResponse::GetKeypool(entries)
 }
-
 #[derive(Debug)]
 enum LedgerSigningError {
     BadArgument(String),
     Device(HwiError),
 }
-
 struct LedgerSigningContext {
     address_type: LedgerAddressType,
     context: DeviceContext,
 }
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum LedgerAddressType {
     Tap,
@@ -2022,7 +2046,6 @@ enum LedgerAddressType {
     ShWit,
     Legacy,
 }
-
 impl LedgerAddressType {
     fn priority(self) -> u8 {
         match self {
@@ -2042,7 +2065,6 @@ impl LedgerAddressType {
         }
     }
 }
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum LedgerSigningPlan {
     Default {
@@ -2055,7 +2077,6 @@ enum LedgerSigningPlan {
         policy: String,
     },
 }
-
 impl LedgerSigningPlan {
     fn priority(&self) -> u8 {
         match self {
@@ -2065,7 +2086,6 @@ impl LedgerSigningPlan {
         }
     }
 }
-
 async fn ledger_signing_contexts(
     device: &mut Device,
     psbt: &Psbt,
@@ -2074,7 +2094,7 @@ async fn ledger_signing_contexts(
     let fingerprint = device
         .fingerprint()
         .await
-        .map_err(|err| LedgerSigningError::Device(classify_anyhow_device_error(&err)))?;
+        .map_err(|err| LedgerSigningError::Device(classify_device_error(&err)))?;
     let plans = ledger_signing_plans(psbt, fingerprint, network)
         .map_err(LedgerSigningError::BadArgument)?;
     let mut contexts = Vec::with_capacity(plans.len());
@@ -2154,7 +2174,6 @@ async fn ledger_signing_contexts(
 
     Ok(contexts)
 }
-
 fn strip_legacy_witness_utxos(psbt: &mut Psbt) {
     for (index, input) in psbt.inputs.iter_mut().enumerate() {
         let Some(utxo) = input.non_witness_utxo.as_ref().and_then(|tx| {
@@ -2168,7 +2187,6 @@ fn strip_legacy_witness_utxos(psbt: &mut Psbt) {
         }
     }
 }
-
 fn merge_psbt_signatures(target: &mut Psbt, signed: Psbt) {
     for (target, signed) in target.inputs.iter_mut().zip(signed.inputs) {
         target.partial_sigs.extend(signed.partial_sigs);
@@ -2178,7 +2196,6 @@ fn merge_psbt_signatures(target: &mut Psbt, signed: Psbt) {
         }
     }
 }
-
 fn ledger_signing_plans(
     psbt: &Psbt,
     fingerprint: Fingerprint,
@@ -2247,7 +2264,6 @@ fn ledger_signing_plans(
     plans.sort_by_key(LedgerSigningPlan::priority);
     Ok(plans)
 }
-
 fn ledger_singlesig_plan(
     input: &Input,
     utxo: &TxOut,
@@ -2322,7 +2338,6 @@ fn ledger_singlesig_plan(
         account_path,
     }))
 }
-
 fn singlesig_address_type(input: &Input, utxo: &TxOut) -> Option<LedgerAddressType> {
     if utxo.script_pubkey.is_p2pkh() {
         Some(LedgerAddressType::Legacy)
@@ -2341,7 +2356,6 @@ fn singlesig_address_type(input: &Input, utxo: &TxOut) -> Option<LedgerAddressTy
         None
     }
 }
-
 fn singlesig_key_matches(
     key: bitcoin::secp256k1::PublicKey,
     address_type: LedgerAddressType,
@@ -2365,7 +2379,6 @@ fn singlesig_key_matches(
         LedgerAddressType::Tap => false,
     }
 }
-
 fn validate_standard_singlesig_path(
     path: &DerivationPath,
     address_type: LedgerAddressType,
@@ -2397,21 +2410,18 @@ fn validate_standard_singlesig_path(
     }
     Ok(DerivationPath::from(children[..3].to_vec()))
 }
-
 fn hardened_index(child: ChildNumber) -> Option<u32> {
     match child {
         ChildNumber::Hardened { index } => Some(index),
         ChildNumber::Normal { .. } => None,
     }
 }
-
 fn normal_index(child: ChildNumber) -> Option<u32> {
     match child {
         ChildNumber::Normal { index } => Some(index),
         ChildNumber::Hardened { .. } => None,
     }
 }
-
 fn ledger_multisig_plan(
     psbt: &Psbt,
     input: &Input,
@@ -2457,12 +2467,10 @@ fn ledger_multisig_plan(
         policy,
     })
 }
-
 struct ResolvedMultisigKey {
     expression: String,
     suffix: (u32, u32),
 }
-
 fn global_xpub_key_expression(
     psbt: &Psbt,
     key_source: &KeySource,
@@ -2526,7 +2534,6 @@ fn global_xpub_key_expression(
     };
     Ok(ResolvedMultisigKey { expression, suffix })
 }
-
 fn input_has_fingerprint(input: &Input, fingerprint: Fingerprint) -> bool {
     input
         .bip32_derivation
@@ -2537,7 +2544,6 @@ fn input_has_fingerprint(input: &Input, fingerprint: Fingerprint) -> bool {
             .values()
             .any(|(_, (key_fingerprint, _))| *key_fingerprint == fingerprint)
 }
-
 fn input_utxo(psbt: &Psbt, input_index: usize) -> Result<Option<TxOut>, String> {
     let input = &psbt.inputs[input_index];
     let txin = &psbt.unsigned_tx.input[input_index];
@@ -2565,14 +2571,12 @@ fn input_utxo(psbt: &Psbt, input_index: usize) -> Result<Option<TxOut>, String> 
     }
     Ok(input.witness_utxo.clone().or(non_witness))
 }
-
 fn extend_account_path_for_policy(path: &DerivationPath) -> DerivationPath {
     let mut children = path.as_ref().to_vec();
     children.push(ChildNumber::from_normal_idx(0).expect("valid receive branch"));
     children.push(ChildNumber::from_normal_idx(0).expect("valid address index"));
     DerivationPath::from(children)
 }
-
 fn multisig_script(
     input: &Input,
     utxo: &TxOut,
@@ -2616,7 +2620,6 @@ fn multisig_script(
         Ok(Some((LedgerAddressType::Legacy, redeem_script.clone())))
     }
 }
-
 fn parse_multisig_script(script: &ScriptBuf) -> Result<Option<(usize, Vec<PublicKey>)>, String> {
     let mut instructions = script.instructions();
     let Some(first) = instructions.next() else {
@@ -2664,7 +2667,6 @@ fn parse_multisig_script(script: &ScriptBuf) -> Result<Option<(usize, Vec<Public
     }
     Ok(Some((threshold, pubkeys)))
 }
-
 fn multisig_policy_descriptor(
     address_type: LedgerAddressType,
     threshold: usize,
@@ -2845,7 +2847,6 @@ fn pushnum(op: bitcoin::blockdata::opcodes::Opcode) -> Option<usize> {
     }
     None
 }
-
 fn push_bytes_as_bytes(bytes: &PushBytes) -> &[u8] {
     bytes.as_bytes()
 }
@@ -2904,7 +2905,7 @@ async fn singlesig_display_address_from_descriptor(
     let fingerprint = device
         .fingerprint()
         .await
-        .map_err(|err| classify_anyhow_device_error(&err))?;
+        .map_err(|err| classify_device_error(&err))?;
     if parsed.fingerprint != fingerprint {
         return Err(HwiError::new(
             HwiErrorCode::BadArgument,
@@ -3152,6 +3153,11 @@ fn common_device_error<'a>(
     None
 }
 
+fn classify_anyhow_device_error(err: &anyhow::Error) -> HwiError {
+    let source: &(dyn std::error::Error + 'static) = err.as_ref();
+    classify_device_error(source)
+}
+
 fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
     let mut source = Some(err);
     while let Some(current) = source {
@@ -3183,11 +3189,6 @@ fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
         return HwiError::new(code, error.to_string());
     }
     device_error(err)
-}
-
-fn classify_anyhow_device_error(err: &anyhow::Error) -> HwiError {
-    let source: &(dyn std::error::Error + 'static) = err.as_ref();
-    classify_device_error(source)
 }
 
 /// Device-aware classification. Upstream's Ledger backend uses the new
@@ -3645,7 +3646,6 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         HwiCliCommand::Promptpin => HwiCommand::PromptPin,
         HwiCliCommand::Sendpin { pin } => HwiCommand::SendPin { pin },
         HwiCliCommand::Togglepassphrase => HwiCommand::TogglePassphrase,
-        #[cfg(target_os = "linux")]
         HwiCliCommand::Installudevrules { location } => HwiCommand::InstallUdevRules { location },
         HwiCliCommand::External(argv) => {
             let command = argv
@@ -4521,8 +4521,6 @@ mod tests {
             .expect("togglepassphrase request");
         assert_eq!(togglepassphrase.command, HwiCommand::TogglePassphrase);
     }
-
-    #[cfg(target_os = "linux")]
     #[test]
     fn parses_installudevrules_without_device_selection() {
         let request = parse_args(["hwi", "installudevrules", "--location", "/tmp/bhwi-rules.d"])
@@ -5502,7 +5500,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn ledger_signing_plans_cover_all_default_wallets() {
         let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
@@ -5594,7 +5591,6 @@ mod tests {
             }]
         );
     }
-
     #[test]
     fn ledger_signing_plans_support_multiple_singlesig_accounts() {
         let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
@@ -5651,7 +5647,6 @@ mod tests {
             }
         )));
     }
-
     #[test]
     fn ledger_signing_plans_support_mixed_default_and_registered_policies() {
         let (multisig, fingerprint) = sample_multisig_psbt(LedgerAddressType::Wit, true);
@@ -5683,7 +5678,6 @@ mod tests {
         assert!(matches!(plans[0], LedgerSigningPlan::Default { .. }));
         assert!(matches!(plans[1], LedgerSigningPlan::Registered { .. }));
     }
-
     #[test]
     fn ledger_multisig_plans_cover_all_hwi_wrappers() {
         for address_type in [
@@ -5708,7 +5702,6 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn ledger_multisig_plan_rejects_missing_global_xpub() {
         let (mut psbt, fingerprint) = sample_multisig_psbt(LedgerAddressType::Wit, true);
@@ -5718,7 +5711,6 @@ mod tests {
             ledger_signing_plans(&psbt, fingerprint, Network::Testnet).expect_err("missing xpub");
         assert!(err.contains("expected one account-level global xpub"));
     }
-
     #[test]
     fn ledger_multisig_plan_rejects_unsorted_script() {
         let (psbt, fingerprint) = sample_multisig_psbt(LedgerAddressType::Wit, false);
@@ -5732,7 +5724,6 @@ mod tests {
         Xpub::from_str("tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT")
             .expect("sample xpub")
     }
-
     fn sample_child_pubkey(index: u32) -> PublicKey {
         let secp = Secp256k1::verification_only();
         let xpub = sample_xpub()
@@ -5746,7 +5737,6 @@ mod tests {
             .expect("derive pubkey");
         PublicKey::new(xpub.public_key)
     }
-
     fn multisig_script_buf(threshold: i64, pubkeys: &[PublicKey]) -> ScriptBuf {
         let mut builder = Builder::new().push_int(threshold);
         for pubkey in pubkeys {
@@ -5757,7 +5747,6 @@ mod tests {
             .push_opcode(OP_CHECKMULTISIG)
             .into_script()
     }
-
     fn sample_multisig_psbt(address_type: LedgerAddressType, sorted: bool) -> (Psbt, Fingerprint) {
         let secp = Secp256k1::new();
         let account_path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();

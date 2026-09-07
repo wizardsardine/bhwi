@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
-use crate::NativeResult;
+use crate::{NativeError, NativeResult};
 use async_trait::async_trait;
 use bhwi_async::{
     HttpClient, Jade, Transport,
@@ -19,7 +19,8 @@ use tokio_serial::{
 };
 
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, PairingCodePrompt, ScanEntry,
+    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
+    PairingCodePrompt, ScanEntry,
 };
 
 pub type JadeSerialDevice = Jade<SerialTransport, PinServerClient>;
@@ -138,12 +139,24 @@ fn is_macos_dialin(port_name: &str) -> bool {
     port_name.starts_with("/dev/tty.")
 }
 
+fn require_linux_tty_sysfs(is_linux: bool, sysfs_exists: bool) -> NativeResult<()> {
+    if is_linux && !sysfs_exists {
+        return Err(NativeError::SerialSysfsMissing);
+    }
+    Ok(())
+}
+
 #[async_trait(?Send)]
 impl DeviceEnumerator for JadeDevice {
     async fn enumerate(
         selector: &DeviceSelector,
         _pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
     ) -> NativeResult<DeviceScan> {
+        require_linux_tty_sysfs(
+            cfg!(target_os = "linux"),
+            Path::new("/sys/class/tty").exists(),
+        )?;
         let mut scan: DeviceScan = iter(available_ports()?.into_iter().map(Ok))
             .try_filter_map(|info| async move {
                 match info.port_type {
@@ -226,5 +239,20 @@ impl CborStream for TcpClient {
     }
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         Ok(self.stream.read(buf).await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_linux_tty_sysfs;
+
+    #[test]
+    fn absent_linux_tty_sysfs_errors_before_port_enumeration() {
+        let result = require_linux_tty_sysfs(true, false).map(|_| panic!("enumerator invoked"));
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "serial port enumeration unavailable: /sys/class/tty is missing"
+        );
     }
 }

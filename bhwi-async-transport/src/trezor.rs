@@ -11,15 +11,16 @@ use bhwi_async::{Trezor, transport::trezor::TrezorTransport};
 use futures::stream::{StreamExt, TryStreamExt};
 
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, PairingCodePrompt, ScanEntry,
-    SkippedDevice, hid::HidChannel, trezor::emulator::EmulatorClient, webusb::WebUsbChannel,
+    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
+    PairingCodePrompt, ScanEntry, SkippedDevice, hid::HidChannel, trezor::emulator::EmulatorClient,
+    uses_backend, webusb::WebUsbChannel,
 };
 
 pub type TrezorOneDevice = Trezor<TrezorTransport<HidChannel>>;
 pub type TrezorWebUsbDevice = Trezor<TrezorTransport<WebUsbChannel>>;
 pub type TrezorEmulatorDevice = Trezor<TrezorTransport<EmulatorClient>>;
 
-const EMULATOR_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+pub(crate) const EMULATOR_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct TrezorDevice;
 
@@ -93,47 +94,57 @@ impl DeviceEnumerator for TrezorDevice {
     async fn enumerate(
         selector: &DeviceSelector,
         _pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
     ) -> NativeResult<DeviceScan> {
-        let mut scan: DeviceScan = HidBackend::default()
-            .enumerate()
-            .await?
-            .map(Ok)
-            .try_filter_map(|dev| async move {
-                let path = hid_path(&dev);
-                if selector.matches(DeviceType::Trezor, &path)
-                    && dev.vendor_id == TREZOR_ONE_VID
-                    && dev.product_id == TREZOR_ONE_PID
-                    && dev.usage_page
-                        == TREZOR_ONE_DEVICE_ID
-                            .usage_page
-                            .ok_or(NativeError::MissingDeviceId(
-                                "trezor one usage page constant not set",
-                            ))?
-                {
-                    Self::hid_device(selector, dev).await.map(Some)
-                } else {
-                    Ok(None)
-                }
-            })
-            .try_collect()
-            .await?;
+        let selected_path = selector.device_path.as_deref();
+        let mut scan = DeviceScan::default();
 
-        for info in nusb::list_devices()
-            .await?
-            .filter(|info| info.vendor_id() == TREZOR_VID && info.product_id() == TREZOR_PID)
-        {
-            let path = webusb_path(&info);
-            if !selector.matches(DeviceType::Trezor, &path) {
-                continue;
-            }
-            match Self::webusb_device(selector, &info).await {
-                Ok(device) => scan.devices.push(device),
-                Err(err) => scan.skipped.push(SkippedDevice::new(
-                    DeviceType::Trezor,
-                    trezor_model(info.product_id(), false),
-                    path,
-                    &err,
-                )),
+        if uses_backend(selected_path, "hid:") {
+            let found: DeviceScan = HidBackend::default()
+                .enumerate()
+                .await?
+                .map(Ok)
+                .try_filter_map(|dev| async move {
+                    let path = hid_path(&dev);
+                    if selector.matches(DeviceType::Trezor, &path)
+                        && dev.vendor_id == TREZOR_ONE_VID
+                        && dev.product_id == TREZOR_ONE_PID
+                        && dev.usage_page
+                            == TREZOR_ONE_DEVICE_ID.usage_page.ok_or(
+                                NativeError::MissingDeviceId(
+                                    "trezor one usage page constant not set",
+                                ),
+                            )?
+                    {
+                        Self::hid_device(selector, dev).await.map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .try_collect()
+                .await?;
+            scan.devices.extend(found.devices);
+            scan.skipped.extend(found.skipped);
+        }
+
+        if uses_backend(selected_path, "webusb:") {
+            for info in nusb::list_devices()
+                .await?
+                .filter(|info| info.vendor_id() == TREZOR_VID && info.product_id() == TREZOR_PID)
+            {
+                let path = webusb_path(&info);
+                if !selector.matches(DeviceType::Trezor, &path) {
+                    continue;
+                }
+                match Self::webusb_device(selector, &info).await {
+                    Ok(device) => scan.devices.push(device),
+                    Err(err) => scan.skipped.push(SkippedDevice::new(
+                        DeviceType::Trezor,
+                        trezor_model(info.product_id(), false),
+                        path,
+                        &err,
+                    )),
+                }
             }
         }
 
@@ -152,11 +163,11 @@ impl DeviceEnumerator for TrezorDevice {
     }
 }
 
-fn emulator_socket(path: &str) -> &str {
+pub(crate) fn emulator_socket(path: &str) -> &str {
     path.strip_prefix("udp:").unwrap_or(path)
 }
 
-fn webusb_path(info: &nusb::DeviceInfo) -> String {
+pub(crate) fn webusb_path(info: &nusb::DeviceInfo) -> String {
     let mut path = format!("webusb:{}", bus_number(info.bus_id()));
     for port in info.port_chain() {
         path.push_str(&format!(":{port}"));
@@ -176,7 +187,7 @@ fn bus_number(bus_id: &str) -> String {
     }
 }
 
-fn hid_path(dev: &HidDevice) -> String {
+pub(crate) fn hid_path(dev: &HidDevice) -> String {
     let suffix = dev.serial_number.as_deref().unwrap_or(&dev.name);
     format!("hid:{:04x}:{:04x}:{suffix}", dev.vendor_id, dev.product_id)
 }

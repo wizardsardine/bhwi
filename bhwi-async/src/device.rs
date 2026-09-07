@@ -12,15 +12,17 @@ pub enum DeviceType {
     BitBox02,
     Coldcard,
     Jade,
+    KeepKey,
     Ledger,
     Trezor,
 }
 
 impl DeviceType {
-    pub const ALL: [DeviceType; 5] = [
+    pub const ALL: [DeviceType; 6] = [
         DeviceType::BitBox02,
         DeviceType::Coldcard,
         DeviceType::Jade,
+        DeviceType::KeepKey,
         DeviceType::Ledger,
         DeviceType::Trezor,
     ];
@@ -30,6 +32,7 @@ impl DeviceType {
             DeviceType::BitBox02 => "bitbox02",
             DeviceType::Coldcard => "coldcard",
             DeviceType::Jade => "jade",
+            DeviceType::KeepKey => "keepkey",
             DeviceType::Ledger => "ledger",
             DeviceType::Trezor => "trezor",
         }
@@ -77,6 +80,9 @@ impl DeviceSelector {
 
 pub type PairingCodePrompt = Rc<dyn Fn(&str)>;
 
+/// A KeepKey asks mid-command, so this attaches before the device is boxed.
+pub type HostInteractionFactory = Rc<dyn Fn() -> Box<dyn crate::HostInteraction>>;
+
 #[async_trait(?Send)]
 pub trait DeviceSource {
     type Error: std::error::Error + 'static;
@@ -85,6 +91,7 @@ pub trait DeviceSource {
         &self,
         selector: &DeviceSelector,
         pairing_code: Option<&PairingCodePrompt>,
+        host_interaction: Option<&HostInteractionFactory>,
     ) -> Result<DeviceScan, Self::Error>;
 }
 
@@ -108,6 +115,7 @@ pub struct DeviceManager<S> {
     pub selector: DeviceSelector,
     source: S,
     pairing_code: Option<PairingCodePrompt>,
+    host_interaction: Option<HostInteractionFactory>,
 }
 
 impl<S: DeviceSource> DeviceManager<S> {
@@ -116,6 +124,7 @@ impl<S: DeviceSource> DeviceManager<S> {
             selector,
             source,
             pairing_code: None,
+            host_interaction: None,
         }
     }
 
@@ -124,9 +133,18 @@ impl<S: DeviceSource> DeviceManager<S> {
         self
     }
 
+    pub fn with_host_interaction(mut self, factory: HostInteractionFactory) -> Self {
+        self.host_interaction = Some(factory);
+        self
+    }
+
     pub async fn enumerate(&self) -> Result<DeviceScan, S::Error> {
         self.source
-            .enumerate(&self.selector, self.pairing_code.as_ref())
+            .enumerate(
+                &self.selector,
+                self.pairing_code.as_ref(),
+                self.host_interaction.as_ref(),
+            )
             .await
     }
 

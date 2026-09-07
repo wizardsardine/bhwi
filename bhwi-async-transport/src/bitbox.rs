@@ -24,8 +24,8 @@ use tokio::{
 };
 
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, PairingCodePrompt, ScanEntry,
-    hid::HidChannel,
+    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
+    PairingCodePrompt, ScanEntry, hid::HidChannel,
 };
 
 pub struct BitBoxDevice;
@@ -99,6 +99,7 @@ impl DeviceEnumerator for BitBoxDevice {
     async fn enumerate(
         selector: &DeviceSelector,
         pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
     ) -> NativeResult<DeviceScan> {
         let DeviceId {
             vid,

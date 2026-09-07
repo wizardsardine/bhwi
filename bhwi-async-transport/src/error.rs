@@ -30,4 +30,8 @@ pub enum NativeError {
     #[cfg(feature = "jade")]
     #[error("serial port enumeration failed: {0}")]
     Serial(#[from] tokio_serial::Error),
+
+    #[cfg(feature = "jade")]
+    #[error("serial port enumeration unavailable: /sys/class/tty is missing")]
+    SerialSysfsMissing,
 }

@@ -8,10 +8,11 @@ license-file.workspace = true
 description = "Native device channels and discovery for bhwi"
 
 [features]
-default = ["bitbox", "coldcard", "jade", "ledger", "trezor"]
+default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "trezor"]
 bitbox = ["bhwi-async/bitbox", "dep:async-hid"]
 coldcard = ["bhwi-async/coldcard", "dep:async-hid"]
 jade = ["bhwi-async/jade", "dep:reqwest", "dep:tokio-serial"]
+keepkey = ["bhwi-async/keepkey", "trezor"]
 ledger = ["bhwi-async/ledger", "dep:async-hid"]
 trezor = ["bhwi-async/trezor", "dep:async-hid", "dep:nusb"]
 

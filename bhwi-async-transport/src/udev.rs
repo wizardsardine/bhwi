@@ -220,7 +220,7 @@ const UDEV_RULES: &[UdevRule] = &[
     UdevRule {
         name: "51-usb-keepkey.rules",
         contents: include_str!("udev/51-usb-keepkey.rules"),
-        device_type: None,
+        device_type: Some(DeviceType::KeepKey),
     },
     UdevRule {
         name: "52-hid-digitalbitbox.rules",
@@ -263,6 +263,25 @@ mod tests {
             udev_rule_names(&UdevRuleSelection::Devices(vec![DeviceType::Jade])),
             vec!["55-usb-jade.rules"]
         );
+        assert_eq!(
+            udev_rule_names(&UdevRuleSelection::Devices(vec![DeviceType::KeepKey])),
+            vec!["51-usb-keepkey.rules"]
+        );
+    }
+
+    #[test]
+    fn explicit_keepkey_selection_copies_only_its_rule() {
+        let temp = test_dir("explicit_keepkey_selection_copies_only_its_rule");
+        fs::create_dir_all(&temp).expect("temp dir");
+        copy_udev_rule_files(
+            &temp,
+            &UdevRuleSelection::Devices(vec![DeviceType::KeepKey]),
+        )
+        .expect("copy KeepKey rule");
+
+        assert!(temp.join("51-usb-keepkey.rules").exists());
+        assert_eq!(fs::read_dir(&temp).unwrap().count(), 1);
+        fs::remove_dir_all(temp).ok();
     }
 
     #[test]
