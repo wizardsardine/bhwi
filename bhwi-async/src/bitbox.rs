@@ -12,6 +12,8 @@ use bhwi::{
 
 use crate::{HttpClient, Transport};
 
+pub const HOST_PASSPHRASE_REJECTED: &str = "The BitBox02 does not accept a passphrase from the host. Please enable the passphrase option and enter the passphrase on the device during unlock.";
+
 /// Async BitBox02 client. Holds the noise-encryption state that persists across
 /// interpreter invocations. The caller is expected to:
 ///
