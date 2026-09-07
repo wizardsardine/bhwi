@@ -15,4 +15,4 @@ bhwi-async = { workspace = true, features = ["coldcard"] }
 rand_core.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 
-bhwi-cli = { path = "../../bhwi-cli" }
+bhwi-async-transport = { workspace = true, default-features = false, features = ["coldcard"] }

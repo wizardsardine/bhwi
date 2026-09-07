@@ -8,7 +8,7 @@ mod tests {
     };
     use bhwi::trezor::ManagementContext;
     use bhwi_async::{DisplayAddress, HWI, Trezor, transport::trezor::TrezorTransport};
-    use bhwi_cli::trezor::emulator::{DEFAULT_EMULATOR_ADDR, EmulatorClient};
+    use bhwi_async_transport::trezor::emulator::{DEFAULT_EMULATOR_ADDR, EmulatorClient};
 
     use crate::debuglink::{DEFAULT_DEBUGLINK_ADDR, DebugLink};
     use bhwi::bitcoin::{

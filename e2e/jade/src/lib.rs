@@ -3,7 +3,7 @@ mod tests {
     use base64ct::{Base64, Encoding};
     use bhwi_async::transport::jade::tcp::TcpTransport;
     use bhwi_async::{DisplayAddress, HWI, WalletRegistration};
-    use bhwi_cli::jade::{JadeQemuDevice, PinServerClient, TcpClient};
+    use bhwi_async_transport::jade::{JadeQemuDevice, PinServerClient, TcpClient};
     use bitcoin::{
         Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
         Witness,
