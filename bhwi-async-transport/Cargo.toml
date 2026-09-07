@@ -26,6 +26,8 @@ rand_core = { workspace = true, features = ["getrandom"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync", "time"] }
 
+# Bus crates with no wasm build.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 async-hid = { version = "0.5.0", optional = true }
 nusb = { version = "0.2", features = ["tokio"], optional = true }
 reqwest = { workspace = true, features = ["json"], optional = true }
