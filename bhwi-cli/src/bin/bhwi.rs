@@ -9,6 +9,7 @@ use bhwi_cli::management::{bitbox_restore_context, bitbox_setup_context};
 use bhwi_cli::management::{keepkey_pin_context, keepkey_restore_context, keepkey_setup_context};
 #[cfg(feature = "trezor")]
 use bhwi_cli::management::{trezor_pin_context, trezor_restore_context, trezor_setup_context};
+#[cfg(target_os = "linux")]
 use bhwi_cli::udev::{UdevRuleSelection, install_udev_rules};
 use bhwi_cli::{
     DeviceJson, DeviceSelector, DeviceType, DeviceTypeArg, OutputFormat, SkippedDevice,
@@ -199,6 +200,7 @@ enum DeviceCommands {
         positions: String,
     },
     /// Install udev rules for hardware wallet device access
+    #[cfg(target_os = "linux")]
     InstallUdevRules {
         /// Device rule targets to install
         #[arg(value_enum)]
@@ -559,6 +561,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        #[cfg(target_os = "linux")]
         Commands::Device(DeviceCommands::InstallUdevRules {
             targets,
             all,
@@ -743,6 +746,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn parses_device_install_udev_rules_targets() {
         let args = Args::try_parse_from([
             "bhwi",
@@ -851,6 +855,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn parses_device_install_udev_rules_all() {
         let args = Args::try_parse_from(["bhwi", "device", "install-udev-rules", "--all"])
             .expect("parse install all udev rules");

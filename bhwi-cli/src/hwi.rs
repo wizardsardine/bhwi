@@ -41,6 +41,7 @@ use crate::management::{bitbox_restore_context, bitbox_setup_context};
 use crate::management::{keepkey_restore_context, keepkey_setup_context};
 #[cfg(feature = "trezor")]
 use crate::management::{trezor_restore_context, trezor_setup_context};
+#[cfg(target_os = "linux")]
 use crate::udev::{UdevRuleSelection, install_udev_rules};
 use crate::{
     Device, DeviceManager, DeviceSelector, DeviceType, device_manager,
@@ -156,6 +157,7 @@ pub enum HwiCliCommand {
         pin: String,
     },
     Togglepassphrase,
+    #[cfg(target_os = "linux")]
     Installudevrules {
         #[arg(long, default_value = "/etc/udev/rules.d/")]
         location: PathBuf,
@@ -314,6 +316,7 @@ pub enum HwiCommand {
         pin: String,
     },
     UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
+    #[cfg(target_os = "linux")]
     InstallUdevRules {
         location: PathBuf,
     },
@@ -591,6 +594,7 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
+        #[cfg(target_os = "linux")]
         HwiCommand::InstallUdevRules { location } => install_udev_rules_hwi(location),
         HwiCommand::Unsupported(command) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
@@ -965,6 +969,8 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
     }
     HwiResponse::Enumerate(response)
 }
+
+#[cfg(target_os = "linux")]
 fn install_udev_rules_hwi(location: PathBuf) -> HwiResponse {
     match install_udev_rules(&location, UdevRuleSelection::All) {
         Ok(()) => HwiResponse::Success(HwiSuccessResponse { success: true }),
@@ -3746,6 +3752,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
         HwiCliCommand::Promptpin => HwiCommand::PromptPin,
         HwiCliCommand::Sendpin { pin } => HwiCommand::SendPin { pin },
         HwiCliCommand::Togglepassphrase => HwiCommand::TogglePassphrase,
+        #[cfg(target_os = "linux")]
         HwiCliCommand::Installudevrules { location } => HwiCommand::InstallUdevRules { location },
         HwiCliCommand::External(argv) => {
             let command = argv
@@ -4622,6 +4629,8 @@ mod tests {
             .expect("togglepassphrase request");
         assert_eq!(togglepassphrase.command, HwiCommand::TogglePassphrase);
     }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn parses_installudevrules_without_device_selection() {
         let request = parse_args(["hwi", "installudevrules", "--location", "/tmp/bhwi-rules.d"])

@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+#[cfg(target_os = "linux")]
 pub use bhwi_async_transport::udev;
 pub use bhwi_async_transport::{
     Device, DeviceSelector, DeviceType, NativeSource, SkippedDevice, networks_string,
