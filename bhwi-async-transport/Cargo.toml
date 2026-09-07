@@ -1,0 +1,31 @@
+[package]
+name = "bhwi-async-transport"
+version = "0.0.1"
+edition = "2024"
+authors.workspace = true
+repository = "https://github.com/wizardsardine/bhwi"
+license-file.workspace = true
+description = "Native device channels and discovery for bhwi"
+
+[features]
+default = ["bitbox", "coldcard", "jade", "ledger", "trezor"]
+bitbox = ["bhwi-async/bitbox", "dep:async-hid"]
+coldcard = ["bhwi-async/coldcard", "dep:async-hid"]
+jade = ["bhwi-async/jade", "dep:reqwest", "dep:tokio-serial"]
+ledger = ["bhwi-async/ledger", "dep:async-hid"]
+trezor = ["bhwi-async/trezor", "dep:async-hid", "dep:nusb"]
+
+[dependencies]
+async-trait.workspace = true
+bhwi.workspace = true
+bhwi-async = { workspace = true }
+bitcoin.workspace = true
+futures.workspace = true
+rand_core = { workspace = true, features = ["getrandom"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync", "time"] }
+
+async-hid = { version = "0.5.0", optional = true }
+nusb = { version = "0.2", features = ["tokio"], optional = true }
+reqwest = { workspace = true, features = ["json"], optional = true }
+tokio-serial = { version = "5.4.5", optional = true }
