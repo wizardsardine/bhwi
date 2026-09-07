@@ -4,8 +4,9 @@ pub mod proto;
 
 use crate::device::DeviceId;
 
+/// KeepKey reuses the Trezor V1 wire format, so these are the same types.
 pub use crate::trezor::{
-    HostPassphrase, HostPin, TrezorDeviceInfo as KeepKeyDeviceInfo, TrezorError as KeepKeyError,
+    HostPin, TrezorDeviceInfo as KeepKeyDeviceInfo, TrezorError as KeepKeyError,
     TrezorMultisigAddress as KeepKeyMultisigAddress,
     TrezorMultisigAddressType as KeepKeyMultisigAddressType, TrezorResponse as KeepKeyResponse,
 };

@@ -10,6 +10,7 @@ use bitcoin::{Network, NetworkKind, Transaction};
 use crate::Interpreter;
 use crate::common::{HostRequest, PinMatrixRequestKind};
 use crate::miniscript::descriptor::{DescriptorPublicKey, SinglePubKey, Wildcard};
+use crate::passphrase::HostPassphrase;
 use crate::trezor::api::{self, MessageType};
 use crate::trezor::error::TrezorError;
 use crate::trezor::proto::{bitcoin as btc, common as pb, management as mgmt};
@@ -257,6 +258,8 @@ pub(crate) trait Profile {
     const EXTERNAL_INPUTS: bool;
     const DEFAULT_ON_DEVICE_PASSPHRASE: bool;
 
+    const MAX_PASSPHRASE_BYTES: usize;
+
     fn coin_name(network: Network) -> String;
     fn decode_features(payload: &[u8]) -> Result<DeviceFeatures, TrezorError>;
     fn get_public_key(
@@ -267,7 +270,10 @@ pub(crate) trait Profile {
     ) -> Vec<u8>;
     fn sign_message(address_n: Vec<u32>, message: Vec<u8>, coin_name: String) -> Vec<u8>;
     fn passphrase_ack(on_device: bool, passphrase: &str) -> Vec<u8>;
-    fn passphrase_too_long(passphrase: &crate::trezor::HostPassphrase) -> bool;
+
+    fn passphrase_too_long(passphrase: &HostPassphrase) -> bool {
+        passphrase.byte_len() > Self::MAX_PASSPHRASE_BYTES
+    }
     fn reset_device(features: &DeviceFeatures, context: SetupCtx) -> Result<Vec<u8>, TrezorError>;
     fn recovery_device(
         features: &DeviceFeatures,
@@ -307,6 +313,9 @@ impl Profile for TrezorProfile {
     const TOGGLE_PENDING_PIN: bool = false;
     const EXTERNAL_INPUTS: bool = false;
     const DEFAULT_ON_DEVICE_PASSPHRASE: bool = true;
+    // legacy/firmware/protect.h MAX_PASSPHRASE_LEN, and core checks
+    // len(passphrase.encode()) against the same 50.
+    const MAX_PASSPHRASE_BYTES: usize = 50;
 
     fn coin_name(network: Network) -> String {
         coin_name(network)
@@ -336,10 +345,6 @@ impl Profile for TrezorProfile {
         } else {
             api::passphrase_ack_from_host(passphrase)
         }
-    }
-
-    fn passphrase_too_long(passphrase: &crate::trezor::HostPassphrase) -> bool {
-        passphrase.is_too_long()
     }
 
     fn reset_device(features: &DeviceFeatures, context: SetupCtx) -> Result<Vec<u8>, TrezorError> {
@@ -385,7 +390,7 @@ impl Profile for TrezorProfile {
 pub(crate) struct Engine<P> {
     state: State,
     network: Network,
-    passphrase: Option<crate::trezor::HostPassphrase>,
+    passphrase: Option<crate::passphrase::HostPassphrase>,
     on_device_passphrase: bool,
     _profile: PhantomData<P>,
 }
@@ -410,7 +415,7 @@ impl<P: Profile> Engine<P> {
 
     pub(crate) fn with_passphrase(
         mut self,
-        passphrase: Option<crate::trezor::HostPassphrase>,
+        passphrase: Option<crate::passphrase::HostPassphrase>,
     ) -> Self {
         self.passphrase = passphrase;
         self
@@ -566,7 +571,7 @@ impl<P: Profile> Engine<P> {
             let passphrase = self
                 .passphrase
                 .as_ref()
-                .map_or("", crate::trezor::HostPassphrase::as_str);
+                .map_or("", crate::passphrase::HostPassphrase::as_str);
             return Ok(Some(EngineTransmit::Device(P::passphrase_ack(
                 on_device, passphrase,
             ))));
@@ -924,7 +929,10 @@ impl<C, T, R, E> TrezorInterpreter<C, T, R, E> {
         self
     }
 
-    pub fn with_passphrase(mut self, passphrase: Option<crate::trezor::HostPassphrase>) -> Self {
+    pub fn with_passphrase(
+        mut self,
+        passphrase: Option<crate::passphrase::HostPassphrase>,
+    ) -> Self {
         self.engine = self.engine.with_passphrase(passphrase);
         self
     }
@@ -3040,7 +3048,9 @@ mod tests {
     fn passphrase_from_host_is_sent_when_the_device_cannot_prompt() {
         let mut interp = Interp::default()
             .with_on_device_passphrase(false)
-            .with_passphrase(Some(crate::trezor::HostPassphrase::new("secret".into())));
+            .with_passphrase(Some(crate::passphrase::HostPassphrase::new(
+                "secret".into(),
+            )));
         let ack = passphrase_ack(&mut interp)
             .unwrap()
             .expect("passphrase ack");
@@ -3051,8 +3061,9 @@ mod tests {
 
     #[test]
     fn passphrase_from_host_is_ignored_when_the_device_can_prompt() {
-        let mut interp = Interp::default()
-            .with_passphrase(Some(crate::trezor::HostPassphrase::new("secret".into())));
+        let mut interp = Interp::default().with_passphrase(Some(
+            crate::passphrase::HostPassphrase::new("secret".into()),
+        ));
         let ack = passphrase_ack(&mut interp)
             .unwrap()
             .expect("passphrase ack");
@@ -3073,13 +3084,31 @@ mod tests {
     }
 
     #[test]
+    fn the_passphrase_limit_counts_bytes_not_characters() {
+        let ascii = crate::passphrase::HostPassphrase::new("x".repeat(50));
+        assert!(!TrezorProfile::passphrase_too_long(&ascii));
+        assert_eq!(ascii.byte_len(), 50);
+
+        let accented = crate::passphrase::HostPassphrase::new("é".repeat(25));
+        assert_eq!(accented.as_str().chars().count(), 50);
+        assert_eq!(accented.byte_len(), 75);
+        assert!(TrezorProfile::passphrase_too_long(&accented));
+
+        assert!(TrezorProfile::passphrase_too_long(
+            &crate::passphrase::HostPassphrase::new("x".repeat(51))
+        ));
+    }
+
+    #[test]
     fn host_passphrase_is_normalized_to_nfkd() {
-        let composed = crate::trezor::HostPassphrase::new("caf\u{e9}".into());
+        let composed = crate::passphrase::HostPassphrase::new("caf\u{e9}".into());
         assert_eq!(composed.as_str(), "cafe\u{301}");
 
         let mut interp = Interp::default()
             .with_on_device_passphrase(false)
-            .with_passphrase(Some(crate::trezor::HostPassphrase::new("caf\u{e9}".into())));
+            .with_passphrase(Some(crate::passphrase::HostPassphrase::new(
+                "caf\u{e9}".into(),
+            )));
         let ack = passphrase_ack(&mut interp)
             .unwrap()
             .expect("passphrase ack");
@@ -3091,7 +3120,7 @@ mod tests {
     fn overlong_passphrase_cancels_then_errors() {
         let mut interp = Interp::default()
             .with_on_device_passphrase(false)
-            .with_passphrase(Some(crate::trezor::HostPassphrase::new("a".repeat(51))));
+            .with_passphrase(Some(crate::passphrase::HostPassphrase::new("a".repeat(51))));
         let transmit = passphrase_ack(&mut interp).unwrap().expect("cancel");
         let (msg_type, _) = decode_transmit::<mgmt::Cancel>(transmit);
         assert_eq!(msg_type, MessageType::Cancel as u16);
@@ -3110,7 +3139,7 @@ mod tests {
 
         let mut ok = Interp::default()
             .with_on_device_passphrase(false)
-            .with_passphrase(Some(crate::trezor::HostPassphrase::new("a".repeat(50))));
+            .with_passphrase(Some(crate::passphrase::HostPassphrase::new("a".repeat(50))));
         assert!(passphrase_ack(&mut ok).unwrap().is_some());
     }
 
@@ -3118,20 +3147,22 @@ mod tests {
     fn setup_enables_passphrase_protection_from_the_global_passphrase() {
         assert!(
             !Interp::default()
-                .with_passphrase(Some(crate::trezor::HostPassphrase::new(String::new())))
+                .with_passphrase(Some(crate::passphrase::HostPassphrase::new(String::new())))
                 .wants_passphrase_protection()
         );
         assert!(!Interp::default().wants_passphrase_protection());
         assert!(
             Interp::default()
-                .with_passphrase(Some(crate::trezor::HostPassphrase::new("secret".into())))
+                .with_passphrase(Some(crate::passphrase::HostPassphrase::new(
+                    "secret".into()
+                )))
                 .wants_passphrase_protection()
         );
     }
 
     #[test]
     fn host_passphrase_is_redacted_when_formatted() {
-        let passphrase = crate::trezor::HostPassphrase::new("secret".into());
+        let passphrase = crate::passphrase::HostPassphrase::new("secret".into());
         assert!(!format!("{passphrase:?}").contains("secret"));
     }
 

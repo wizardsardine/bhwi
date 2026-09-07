@@ -29,7 +29,8 @@ mod tests {
             DeviceContext, HostRequest, HostResponse, MultisigAddressType, MultisigDisplayAddress,
             PinMatrixRequestKind, RestoreOptions, SetupOptions,
         },
-        keepkey::{HostPassphrase, HostPin, ManagementContext},
+        keepkey::{HostPin, ManagementContext},
+        passphrase::HostPassphrase,
     };
     use bhwi_async::{
         DisplayAddress, HWI, HostInteraction, KeepKey, transport::trezor::TrezorTransport,

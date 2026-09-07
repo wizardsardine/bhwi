@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
-use bhwi::trezor::HostPassphrase;
+use bhwi::passphrase::HostPassphrase;
 use bhwi_async::{DeviceBackup, DeviceContext, RestoreOptions, SetupOptions, WalletRegistration};
 use bhwi_cli::{
     DeviceManager, DeviceType, OutputFormat,
