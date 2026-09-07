@@ -40,6 +40,8 @@ mod serial;
 pub mod specter;
 #[cfg(feature = "trezor")]
 pub mod trezor;
+/// udev rules grant device-node access on Linux; no other host has them.
+#[cfg(target_os = "linux")]
 pub mod udev;
 #[cfg(feature = "trezor")]
 pub mod webusb;

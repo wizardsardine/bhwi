@@ -1,5 +1,6 @@
 use std::{ops::Deref, rc::Rc};
 
+#[cfg(target_os = "linux")]
 pub use bhwi_async_transport::udev;
 pub use bhwi_async_transport::{
     Device, DeviceSelector, DeviceType, Info, NativeError, NativeSource, SelectError,
