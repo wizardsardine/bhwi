@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::NativeResult;
+use crate::serial::{is_macos_dialin, require_tty_sysfs};
 use async_trait::async_trait;
 use bhwi_async::{
     HttpClient, Jade, Transport,
@@ -19,7 +20,8 @@ use tokio_serial::{
 };
 
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, PairingCodePrompt, ScanEntry,
+    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
+    PairingCodePrompt, ScanEntry,
 };
 
 pub type JadeSerialDevice = Jade<SerialTransport, PinServerClient>;
@@ -131,19 +133,14 @@ impl JadeDevice {
     }
 }
 
-// serialport-rs lists each macOS serial port under both its callout
-// (`/dev/cu.*`) and dial-in (`/dev/tty.*`) node & skip the dial-in so the same
-// Jade is not opened twice.
-fn is_macos_dialin(port_name: &str) -> bool {
-    port_name.starts_with("/dev/tty.")
-}
-
 #[async_trait(?Send)]
 impl DeviceEnumerator for JadeDevice {
     async fn enumerate(
         selector: &DeviceSelector,
         _pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
     ) -> NativeResult<DeviceScan> {
+        require_tty_sysfs()?;
         let mut scan: DeviceScan = iter(available_ports()?.into_iter().map(Ok))
             .try_filter_map(|info| async move {
                 match info.port_type {

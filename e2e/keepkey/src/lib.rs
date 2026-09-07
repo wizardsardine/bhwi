@@ -35,7 +35,7 @@ mod tests {
     use bhwi_async::{
         DisplayAddress, HWI, HostInteraction, KeepKey, transport::trezor::TrezorTransport,
     };
-    use bhwi_cli::trezor::emulator::EmulatorClient;
+    use bhwi_async_transport::trezor::emulator::EmulatorClient;
 
     use crate::debuglink::{
         DEFAULT_MAIN_ADDR, DebugButton, DebugLink, KeepKeyHostInteraction, SYNTHETIC_MNEMONIC,

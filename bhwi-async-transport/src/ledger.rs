@@ -22,8 +22,8 @@ use tokio::{
 };
 
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, PairingCodePrompt, ScanEntry,
-    hid::HidChannel,
+    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
+    PairingCodePrompt, ScanEntry, hid::HidChannel,
 };
 
 pub type LedgerHidDevice = Ledger<LedgerTransportHID<HidChannel>>;
@@ -77,6 +77,7 @@ impl DeviceEnumerator for LedgerDevice {
     async fn enumerate(
         selector: &DeviceSelector,
         _pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
     ) -> NativeResult<DeviceScan> {
         let DeviceId {
             vid,

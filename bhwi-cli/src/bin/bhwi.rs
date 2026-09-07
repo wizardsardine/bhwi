@@ -2,18 +2,19 @@ use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::passphrase::HostPassphrase;
 use bhwi_async::{DeviceBackup, DeviceContext, RestoreOptions, SetupOptions, WalletRegistration};
+use bhwi_cli::management::{bitbox_restore_context, bitbox_setup_context};
+use bhwi_cli::management::{keepkey_pin_context, keepkey_restore_context, keepkey_setup_context};
+use bhwi_cli::management::{trezor_pin_context, trezor_restore_context, trezor_setup_context};
+use bhwi_cli::udev::{UdevRuleSelection, install_udev_rules};
 use bhwi_cli::{
-    DeviceManager, DeviceType, OutputFormat,
+    DeviceJson, DeviceSelector, DeviceType, DeviceTypeArg, OutputFormat, SkippedDevice,
     address::AddressTarget,
-    config::DeviceSelector,
+    device_manager,
     get_descriptors::GetKeypoolOptions,
     hwi::{PIN_MATRIX_DESCRIPTION, SEND_PIN_INSTRUCTION},
-    management::{
-        bitbox_restore_context, bitbox_setup_context, keepkey_pin_context, keepkey_restore_context,
-        keepkey_setup_context, trezor_pin_context, trezor_restore_context, trezor_setup_context,
-    },
-    udev::{UdevRuleSelection, install_udev_rules},
+    networks_string, select_device, warn_skipped,
 };
+use bhwi_cli::{address::AddressOutput, get_descriptors::DescriptorOutput};
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -38,7 +39,7 @@ struct Args {
     fingerprint: Option<Fingerprint>,
     /// select a device implementation by type
     #[arg(long, value_enum, global = true)]
-    device_type: Option<DeviceType>,
+    device_type: Option<DeviceTypeArg>,
     /// select a device by transport path
     #[arg(long, global = true)]
     device_path: Option<String>,
@@ -58,7 +59,7 @@ impl Args {
         DeviceSelector {
             network: self.network,
             fingerprint: self.fingerprint,
-            device_type: self.device_type,
+            device_type: self.device_type.map(DeviceType::from),
             device_path: self.device_path.clone(),
             include_emulators: true,
             passphrase: self.passphrase.clone().map(HostPassphrase::new),
@@ -206,7 +207,7 @@ enum DeviceCommands {
     InstallUdevRules {
         /// Device rule targets to install
         #[arg(value_enum)]
-        targets: Vec<bhwi_cli::DeviceType>,
+        targets: Vec<DeviceTypeArg>,
         /// Install rules for all BHWI-supported devices
         #[arg(long)]
         all: bool,
@@ -287,7 +288,7 @@ async fn main() -> Result<()> {
     let command = args.command.to_owned();
     let format = args.format;
     let selector = DeviceSelector::from(&args);
-    let dev_man = DeviceManager::new(selector);
+    let dev_man = device_manager(selector);
     match command {
         Commands::Address(AddressCommands::Get {
             from_path,
@@ -341,10 +342,23 @@ async fn main() -> Result<()> {
             dev_man.get_keypool(options, format).await?;
         }
         Commands::Device(DeviceCommands::List) => {
-            let mut devices = dev_man.enumerate().await?;
-            for (i, device) in devices.iter_mut().enumerate() {
+            let mut scan = dev_man.enumerate().await?;
+            for skipped in &scan.skipped {
+                warn_skipped(skipped);
+            }
+            let mut listed = 0usize;
+            let mut json_devices: Vec<DeviceJson> = Vec::new();
+            for device in scan.devices.iter_mut() {
                 // XXX: Coldcard always needs unlocking
-                device.device().unlock(dev_man.selector.network).await?;
+                if let Err(err) = device.device().unlock(dev_man.selector.network).await {
+                    warn_skipped(&SkippedDevice::new(
+                        device.device_type(),
+                        device.model(),
+                        device.path(),
+                        &err,
+                    ));
+                    continue;
+                }
                 let name = device.name().to_string();
                 let is_emulated = device.is_emulated();
                 let info = device.info().await?;
@@ -353,16 +367,17 @@ async fn main() -> Result<()> {
                 } else {
                     Some(device.fingerprint().await?)
                 };
+                listed += 1;
                 match format {
                     Some(OutputFormat::Pretty) => {
-                        if i == 0 {
+                        if listed == 1 {
                             println!(
                                 "{:<18} | {:<8} | {:<15} | {:<12} | {:<8}",
                                 "Name", "Emulated", "Fingerprint", "Network", "Version"
                             );
                         }
                         println!("{}", "-".repeat(80));
-                        let network = info.networks_string();
+                        let network = networks_string(&info.networks);
                         let fingerprint = fingerprint
                             .map(|fingerprint| fingerprint.to_string())
                             .unwrap_or_else(|| "-".to_owned());
@@ -372,7 +387,7 @@ async fn main() -> Result<()> {
                         );
                         println!("{}", "-".repeat(80));
                     }
-                    Some(OutputFormat::Json) => {}
+                    Some(OutputFormat::Json) => json_devices.push(DeviceJson::from(&*device)),
                     None => match fingerprint {
                         Some(fingerprint) => println!("{fingerprint}"),
                         None => println!("{}", device.path()),
@@ -380,11 +395,11 @@ async fn main() -> Result<()> {
                 }
             }
             if let Some(OutputFormat::Json) = format {
-                println!("{}", serde_json::json![devices])
+                println!("{}", serde_json::json![json_devices])
             }
         }
         Commands::Device(DeviceCommands::Backup { output }) => {
-            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut d) = select_device(&dev_man).await? {
                 let backup = d.device().backup_device().await?;
                 match backup {
                     DeviceBackup::File(bytes) => {
@@ -413,7 +428,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Device(DeviceCommands::Setup { label }) => {
-            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut device) = select_device(&dev_man).await? {
                 let context = match device.device_type() {
                     DeviceType::BitBox02 => bitbox_setup_context(device.is_emulated())?,
                     DeviceType::Trezor => trezor_setup_context(),
@@ -439,7 +454,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Device(DeviceCommands::Wipe) => {
-            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut device) = select_device(&dev_man).await? {
                 if !matches!(
                     device.device_type(),
                     DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
@@ -455,7 +470,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Device(DeviceCommands::Restore { label, word_count }) => {
-            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut device) = select_device(&dev_man).await? {
                 let context = match device.device_type() {
                     DeviceType::BitBox02 => bitbox_restore_context()?,
                     DeviceType::Trezor => trezor_restore_context()?,
@@ -477,7 +492,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Device(DeviceCommands::TogglePassphrase) => {
-            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut device) = select_device(&dev_man).await? {
                 let needs_pin_sent = device.device_type() == DeviceType::KeepKey
                     && device.info().await?.needs_pin_sent == Some(true);
                 if !matches!(
@@ -502,7 +517,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Device(DeviceCommands::PromptPin) => {
-            if let Some(mut device) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut device) = select_device(&dev_man).await? {
                 if !matches!(
                     device.device_type(),
                     DeviceType::KeepKey | DeviceType::Trezor
@@ -568,7 +583,7 @@ async fn main() -> Result<()> {
                     bhwi_cli::DeviceType::Ledger,
                 ])
             } else {
-                UdevRuleSelection::Devices(targets)
+                UdevRuleSelection::Devices(targets.into_iter().map(DeviceType::from).collect())
             };
             install_udev_rules(&location, selection)?;
             if let Some(OutputFormat::Json) = format {
@@ -576,12 +591,12 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Xpub(XpubCommands::Get { path }) => {
-            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut d) = select_device(&dev_man).await? {
                 println!("{}", d.device().get_extended_pubkey(path, false).await?);
             }
         }
         Commands::Descriptor(DescriptorCommands::Register { name, descriptor }) => {
-            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut d) = select_device(&dev_man).await? {
                 let registration = d.device().register_wallet(&name, &descriptor).await?;
                 match format {
                     Some(OutputFormat::Json) => {
@@ -617,7 +632,7 @@ async fn main() -> Result<()> {
             let psbt_text = std::fs::read_to_string(psbt)?;
             let psbt = Psbt::from_str(psbt_text.trim())?;
             let hmac = hmac.as_deref().map(parse_hmac).transpose()?;
-            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut d) = select_device(&dev_man).await? {
                 let context = signing_context(d.device_type(), name, descriptor, hmac)?;
                 let signed = d.device().sign_tx(psbt, context).await?;
                 let signed = signed.to_string();
@@ -633,7 +648,7 @@ async fn main() -> Result<()> {
             path,
             output,
         }) => {
-            if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+            if let Some(mut d) = select_device(&dev_man).await? {
                 let (header, signature) = d.device().sign_message(message.as_bytes(), path).await?;
                 let signature = message_signature_base64(header, &signature);
                 let rendered = match format {
@@ -767,8 +782,11 @@ mod tests {
                 location,
             }) => {
                 assert_eq!(
-                    targets,
-                    vec![bhwi_cli::DeviceType::Ledger, bhwi_cli::DeviceType::Jade]
+                    targets
+                        .into_iter()
+                        .map(DeviceType::from)
+                        .collect::<Vec<_>>(),
+                    vec![DeviceType::Ledger, DeviceType::Jade]
                 );
                 assert!(!all);
                 assert_eq!(location, PathBuf::from("/tmp/rules.d"));
@@ -925,7 +943,7 @@ mod tests {
                 args.fingerprint.as_ref().expect("fingerprint").to_string(),
                 "f5acc2fd"
             );
-            assert_eq!(args.device_type, Some(DeviceType::Ledger));
+            assert!(matches!(args.device_type, Some(DeviceTypeArg::Ledger)));
             assert_eq!(args.device_path.as_deref(), Some("tcp:localhost:9999"));
             assert!(matches!(args.format, Some(OutputFormat::Json)));
             let selector = args.device_selector();
@@ -1070,7 +1088,10 @@ mod tests {
         ])
         .expect("native selectors parse");
 
-        assert_eq!(args.device_type, Some(DeviceType::BitBox02));
+        assert_eq!(
+            args.device_type.map(DeviceType::from),
+            Some(DeviceType::BitBox02)
+        );
         assert_eq!(args.device_path.as_deref(), Some("tcp:127.0.0.1:15423"));
     }
 
@@ -1087,7 +1108,10 @@ mod tests {
                 "list",
             ])
             .expect("KeepKey selector parses");
-            assert_eq!(args.device_type, Some(DeviceType::KeepKey));
+            assert_eq!(
+                args.device_type.map(DeviceType::from),
+                Some(DeviceType::KeepKey)
+            );
             assert_eq!(args.device_path.as_deref(), Some("127.0.0.1:11044"));
         }
     }
@@ -1111,9 +1135,8 @@ mod tests {
         assert_eq!(
             args.device_selector()
                 .passphrase
-                .as_ref()
-                .map(|p| p.as_str()),
-            Some("secret")
+                .map(|p| p.as_str().to_owned()),
+            Some("secret".to_owned())
         );
 
         let without = Args::try_parse_from(["bhwi", "device", "list"]).expect("no password parses");

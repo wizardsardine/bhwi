@@ -27,7 +27,11 @@ pub enum NativeError {
     #[error("usb enumeration failed: {0}")]
     Usb(#[from] nusb::Error),
 
-    #[cfg(feature = "jade")]
+    #[cfg(any(feature = "jade", feature = "specter"))]
     #[error("serial port enumeration failed: {0}")]
     Serial(#[from] tokio_serial::Error),
+
+    #[cfg(any(feature = "jade", feature = "specter"))]
+    #[error("serial port enumeration unavailable: /sys/class/tty is missing")]
+    SerialSysfsMissing,
 }

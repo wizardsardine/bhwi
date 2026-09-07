@@ -1,24 +1,20 @@
-use anyhow::{Context, Result};
-use bhwi::{
-    bitbox::{ManagementContext, SetupEntropy, SetupMode},
-    common::DeviceContext,
-};
+use anyhow::Context;
+use anyhow::Result;
+use bhwi::bitbox::{ManagementContext, SetupEntropy, SetupMode};
+use bhwi::common::DeviceContext;
 use chrono::Local;
 use rand_core::{OsRng, RngCore};
-
 pub fn trezor_setup_context() -> DeviceContext {
     let mut host_entropy = [0; 32];
     OsRng.fill_bytes(&mut host_entropy);
     DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Setup { host_entropy })
 }
-
 pub fn trezor_pin_context(positions: String) -> Result<DeviceContext> {
     let pin = bhwi::trezor::HostPin::new(positions)?;
     Ok(DeviceContext::TrezorManagement(
         bhwi::trezor::ManagementContext::Pin(pin),
     ))
 }
-
 pub fn trezor_restore_context() -> Result<DeviceContext> {
     let u2f_counter = u2f_counter_from(Local::now().timestamp())?;
     Ok(DeviceContext::TrezorManagement(
@@ -49,7 +45,6 @@ pub fn keepkey_restore_context() -> Result<DeviceContext> {
 fn u2f_counter_from(timestamp: i64) -> Result<u32> {
     u32::try_from(timestamp).context("current timestamp does not fit in u32")
 }
-
 pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
     let mode = if is_emulated {
@@ -67,7 +62,6 @@ pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
         timezone_offset,
     }))
 }
-
 pub fn bitbox_restore_context() -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
     Ok(DeviceContext::BitBoxManagement(
@@ -77,12 +71,10 @@ pub fn bitbox_restore_context() -> Result<DeviceContext> {
         },
     ))
 }
-
 fn timestamp_and_timezone_offset() -> Result<(u32, i32)> {
     let now = Local::now();
     timestamp_and_timezone_offset_from(now.timestamp(), now.offset().local_minus_utc())
 }
-
 fn timestamp_and_timezone_offset_from(timestamp: i64, timezone_offset: i32) -> Result<(u32, i32)> {
     let timestamp = u32::try_from(timestamp).context("current timestamp does not fit in u32")?;
     Ok((timestamp, timezone_offset))

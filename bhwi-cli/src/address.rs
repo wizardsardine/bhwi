@@ -1,10 +1,15 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi_async::{DeviceContext, DisplayAddress};
 use bitcoin::address::AddressType;
 use miniscript::descriptor::WalletPolicy;
 
-use crate::{DeviceManager, DeviceType};
+use bhwi_async_transport::DeviceType;
+
+use crate::DeviceManager;
+
+use crate::select_device;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
@@ -24,9 +29,15 @@ pub enum AddressTarget {
     },
 }
 
-impl DeviceManager {
-    pub async fn get_address(&self, target: AddressTarget) -> Result<()> {
-        let Some(mut device) = self.get_device_with_fingerprint().await? else {
+#[async_trait(?Send)]
+pub trait AddressOutput {
+    async fn get_address(&self, target: AddressTarget) -> Result<()>;
+}
+
+#[async_trait(?Send)]
+impl AddressOutput for DeviceManager {
+    async fn get_address(&self, target: AddressTarget) -> Result<()> {
+        let Some(mut device) = select_device(self).await? else {
             return Ok(());
         };
         let (display_address, context) = match target {

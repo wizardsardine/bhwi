@@ -13,16 +13,20 @@ pub enum DeviceType {
     BitBox02,
     Coldcard,
     Jade,
+    KeepKey,
     Ledger,
+    Specter,
     Trezor,
 }
 
 impl DeviceType {
-    pub const ALL: [DeviceType; 5] = [
+    pub const ALL: [DeviceType; 7] = [
         DeviceType::BitBox02,
         DeviceType::Coldcard,
         DeviceType::Jade,
+        DeviceType::KeepKey,
         DeviceType::Ledger,
+        DeviceType::Specter,
         DeviceType::Trezor,
     ];
 
@@ -31,7 +35,9 @@ impl DeviceType {
             DeviceType::BitBox02 => "bitbox02",
             DeviceType::Coldcard => "coldcard",
             DeviceType::Jade => "jade",
+            DeviceType::KeepKey => "keepkey",
             DeviceType::Ledger => "ledger",
+            DeviceType::Specter => "specter",
             DeviceType::Trezor => "trezor",
         }
     }
@@ -81,6 +87,9 @@ impl DeviceSelector {
 
 pub type PairingCodePrompt = Rc<dyn Fn(&str)>;
 
+/// A KeepKey asks mid-command, so this attaches before the device is boxed.
+pub type HostInteractionFactory = Rc<dyn Fn() -> Box<dyn crate::HostInteraction>>;
+
 #[async_trait(?Send)]
 pub trait DeviceSource {
     type Error: std::error::Error + 'static;
@@ -89,6 +98,7 @@ pub trait DeviceSource {
         &self,
         selector: &DeviceSelector,
         pairing_code: Option<&PairingCodePrompt>,
+        host_interaction: Option<&HostInteractionFactory>,
     ) -> Result<DeviceScan, Self::Error>;
 }
 
@@ -112,6 +122,7 @@ pub struct DeviceManager<S> {
     pub selector: DeviceSelector,
     source: S,
     pairing_code: Option<PairingCodePrompt>,
+    host_interaction: Option<HostInteractionFactory>,
 }
 
 impl<S: DeviceSource> DeviceManager<S> {
@@ -120,6 +131,7 @@ impl<S: DeviceSource> DeviceManager<S> {
             selector,
             source,
             pairing_code: None,
+            host_interaction: None,
         }
     }
 
@@ -128,9 +140,18 @@ impl<S: DeviceSource> DeviceManager<S> {
         self
     }
 
+    pub fn with_host_interaction(mut self, factory: HostInteractionFactory) -> Self {
+        self.host_interaction = Some(factory);
+        self
+    }
+
     pub async fn enumerate(&self) -> Result<DeviceScan, S::Error> {
         self.source
-            .enumerate(&self.selector, self.pairing_code.as_ref())
+            .enumerate(
+                &self.selector,
+                self.pairing_code.as_ref(),
+                self.host_interaction.as_ref(),
+            )
             .await
     }
 
@@ -508,6 +529,14 @@ impl Device {
     pub async fn info(&mut self) -> Result<Info, HWIDeviceError> {
         if let Some(ref info) = self.info {
             Ok(info.clone())
+        } else if self.device_type == DeviceType::Specter {
+            // Specter-DIY has no version command, so asking would fail the call.
+            let info = Info {
+                version: "unavailable".into(),
+                ..Info::default()
+            };
+            self.info = Some(info.clone());
+            Ok(info)
         } else {
             let info = self.device.get_info().await?;
             self.info = Some(info.clone());
@@ -633,6 +662,7 @@ mod tests {
             &self,
             _: &DeviceSelector,
             _: Option<&PairingCodePrompt>,
+            _: Option<&HostInteractionFactory>,
         ) -> Result<DeviceScan, Self::Error> {
             let devices = [(REFUSING, true), (UNLOCKED, false)]
                 .into_iter()
