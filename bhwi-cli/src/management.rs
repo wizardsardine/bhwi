@@ -1,20 +1,29 @@
+#[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(feature = "bitbox")]
 use bhwi::bitbox::{ManagementContext, SetupEntropy, SetupMode};
 use bhwi::common::DeviceContext;
+#[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 use chrono::Local;
 use rand_core::{OsRng, RngCore};
+
+#[cfg(feature = "trezor")]
 pub fn trezor_setup_context() -> DeviceContext {
     let mut host_entropy = [0; 32];
     OsRng.fill_bytes(&mut host_entropy);
     DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Setup { host_entropy })
 }
+
+#[cfg(feature = "trezor")]
 pub fn trezor_pin_context(positions: String) -> Result<DeviceContext> {
     let pin = bhwi::trezor::HostPin::new(positions)?;
     Ok(DeviceContext::TrezorManagement(
         bhwi::trezor::ManagementContext::Pin(pin),
     ))
 }
+
+#[cfg(feature = "trezor")]
 pub fn trezor_restore_context() -> Result<DeviceContext> {
     let u2f_counter = u2f_counter_from(Local::now().timestamp())?;
     Ok(DeviceContext::TrezorManagement(
@@ -22,12 +31,14 @@ pub fn trezor_restore_context() -> Result<DeviceContext> {
     ))
 }
 
+#[cfg(feature = "keepkey")]
 pub fn keepkey_setup_context() -> DeviceContext {
     let mut host_entropy = [0; 32];
     OsRng.fill_bytes(&mut host_entropy);
     DeviceContext::KeepKeyManagement(bhwi::keepkey::ManagementContext::Setup { host_entropy })
 }
 
+#[cfg(feature = "keepkey")]
 pub fn keepkey_pin_context(positions: String) -> Result<DeviceContext> {
     let pin = bhwi::keepkey::HostPin::new(positions)?;
     Ok(DeviceContext::KeepKeyManagement(
@@ -35,6 +46,7 @@ pub fn keepkey_pin_context(positions: String) -> Result<DeviceContext> {
     ))
 }
 
+#[cfg(feature = "keepkey")]
 pub fn keepkey_restore_context() -> Result<DeviceContext> {
     let u2f_counter = u2f_counter_from(Local::now().timestamp())?;
     Ok(DeviceContext::KeepKeyManagement(
@@ -42,9 +54,12 @@ pub fn keepkey_restore_context() -> Result<DeviceContext> {
     ))
 }
 
+#[cfg(any(feature = "keepkey", feature = "trezor"))]
 fn u2f_counter_from(timestamp: i64) -> Result<u32> {
     u32::try_from(timestamp).context("current timestamp does not fit in u32")
 }
+
+#[cfg(feature = "bitbox")]
 pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
     let mode = if is_emulated {
@@ -62,6 +77,8 @@ pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
         timezone_offset,
     }))
 }
+
+#[cfg(feature = "bitbox")]
 pub fn bitbox_restore_context() -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
     Ok(DeviceContext::BitBoxManagement(
@@ -71,16 +88,20 @@ pub fn bitbox_restore_context() -> Result<DeviceContext> {
         },
     ))
 }
+
+#[cfg(feature = "bitbox")]
 fn timestamp_and_timezone_offset() -> Result<(u32, i32)> {
     let now = Local::now();
     timestamp_and_timezone_offset_from(now.timestamp(), now.offset().local_minus_utc())
 }
+
+#[cfg(feature = "bitbox")]
 fn timestamp_and_timezone_offset_from(timestamp: i64, timezone_offset: i32) -> Result<(u32, i32)> {
     let timestamp = u32::try_from(timestamp).context("current timestamp does not fit in u32")?;
     Ok((timestamp, timezone_offset))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bitbox"))]
 mod tests {
     use super::*;
 
@@ -117,6 +138,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "keepkey")]
     fn keepkey_contexts_use_keepkey_management_variants() {
         assert!(matches!(
             keepkey_setup_context(),

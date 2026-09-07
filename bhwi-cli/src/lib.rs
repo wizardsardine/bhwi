@@ -1,14 +1,44 @@
-use std::rc::Rc;
+use std::{ops::Deref, rc::Rc};
 
 pub use bhwi_async_transport::udev;
 pub use bhwi_async_transport::{
-    Device, DeviceSelector, DeviceType, Info, NativeSource, SkippedDevice, networks_string,
+    Device, DeviceSelector, DeviceType, Info, NativeError, NativeSource, SelectError,
+    SkippedDevice, networks_string,
 };
 use bitcoin::{Network, bip32::Fingerprint};
 use clap::ValueEnum;
 use serde::{Serialize, Serializer};
 
-pub type DeviceManager = bhwi_async_transport::DeviceManager<NativeSource>;
+/// Remembers whether `-p` was given, since the selector only keeps the password
+/// when Trezor or KeepKey is built in.
+pub struct DeviceManager {
+    manager: bhwi_async_transport::DeviceManager<NativeSource>,
+    password_given: bool,
+}
+
+impl Deref for DeviceManager {
+    type Target = bhwi_async_transport::DeviceManager<NativeSource>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.manager
+    }
+}
+
+impl DeviceManager {
+    pub fn password_given(&self) -> bool {
+        self.password_given
+    }
+
+    /// BitBox02 only takes a passphrase entered on the device.
+    pub fn refuse_password(&self, device_type: DeviceType) -> Result<(), SelectError<NativeError>> {
+        #[cfg(feature = "bitbox")]
+        if self.password_given && device_type == DeviceType::BitBox02 {
+            return Err(SelectError::HostPassphraseRejected);
+        }
+        let _ = device_type;
+        Ok(())
+    }
+}
 
 /// `Device` carries no serde of its own so each frontend keeps its own output format.
 #[derive(Serialize)]
@@ -72,22 +102,34 @@ where
     ser.serialize_str(device_type.as_str())
 }
 
-pub fn device_manager(selector: DeviceSelector) -> DeviceManager {
-    manager_over(NativeSource::default(), selector)
+pub fn device_manager(selector: DeviceSelector, password_given: bool) -> DeviceManager {
+    manager_over(NativeSource::default(), selector, password_given)
 }
 
 /// Python HWI has no Specter-DIY compatibility contract.
-pub fn python_hwi_device_manager(selector: DeviceSelector) -> DeviceManager {
-    manager_over(NativeSource::excluding([DeviceType::Specter]), selector)
+pub fn python_hwi_device_manager(selector: DeviceSelector, password_given: bool) -> DeviceManager {
+    manager_over(
+        NativeSource::excluding([DeviceType::Specter]),
+        selector,
+        password_given,
+    )
 }
 
-fn manager_over(source: NativeSource, selector: DeviceSelector) -> DeviceManager {
-    let manager = DeviceManager::new(source, selector).with_pairing_code_prompt(Rc::new(|code| {
-        eprintln!("\nBitBox02 pairing code — confirm on device:\n\n{code}\n");
-    }));
+fn manager_over(
+    source: NativeSource,
+    selector: DeviceSelector,
+    password_given: bool,
+) -> DeviceManager {
+    let manager = bhwi_async_transport::DeviceManager::new(source, selector)
+        .with_pairing_code_prompt(Rc::new(|code| {
+            eprintln!("\nBitBox02 pairing code — confirm on device:\n\n{code}\n");
+        }));
     #[cfg(feature = "keepkey")]
     let manager = manager.with_host_interaction(host::cli_host_interaction());
-    manager
+    DeviceManager {
+        manager,
+        password_given,
+    }
 }
 
 pub fn warn_skipped(entry: &SkippedDevice) {
@@ -106,6 +148,7 @@ pub async fn select_device(manager: &DeviceManager) -> anyhow::Result<Option<Dev
         };
         anyhow::bail!("{}", first.error);
     };
+    manager.refuse_password(device.device_type())?;
     for entry in &skipped {
         warn_skipped(entry);
     }
@@ -164,6 +207,20 @@ impl From<DeviceTypeArg> for DeviceType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_given_password_is_refused_only_for_bitbox02() {
+        let given = device_manager(DeviceSelector::default(), true);
+        let not_given = device_manager(DeviceSelector::default(), false);
+        for device_type in DeviceType::ALL {
+            assert_eq!(
+                given.refuse_password(device_type).is_err(),
+                cfg!(feature = "bitbox") && device_type == DeviceType::BitBox02,
+                "{device_type}"
+            );
+            assert!(not_given.refuse_password(device_type).is_ok());
+        }
+    }
 
     #[test]
     fn ordinary_info_keeps_the_firmware_null_json_contract() {

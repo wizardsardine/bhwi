@@ -1,13 +1,19 @@
 use anyhow::Result;
+#[cfg(feature = "ledger")]
 use bhwi::ledger::{LedgerWalletPolicy, Version};
+#[cfg(any(feature = "trezor", feature = "keepkey"))]
 use bhwi::passphrase::HostPassphrase;
 use bhwi_async::{DeviceBackup, DeviceContext, RestoreOptions, SetupOptions, WalletRegistration};
+#[cfg(feature = "bitbox")]
 use bhwi_cli::management::{bitbox_restore_context, bitbox_setup_context};
+#[cfg(feature = "keepkey")]
 use bhwi_cli::management::{keepkey_pin_context, keepkey_restore_context, keepkey_setup_context};
+#[cfg(feature = "trezor")]
 use bhwi_cli::management::{trezor_pin_context, trezor_restore_context, trezor_setup_context};
 use bhwi_cli::udev::{UdevRuleSelection, install_udev_rules};
 use bhwi_cli::{
-    DeviceJson, DeviceSelector, DeviceType, DeviceTypeArg, OutputFormat, SkippedDevice,
+    DeviceJson, DeviceManager, DeviceSelector, DeviceType, DeviceTypeArg, OutputFormat,
+    SkippedDevice,
     address::AddressTarget,
     device_manager,
     get_descriptors::GetKeypoolOptions,
@@ -56,20 +62,26 @@ struct Args {
 
 impl Args {
     fn device_selector(&self) -> DeviceSelector {
-        DeviceSelector {
+        // Whether `passphrase` exists follows bhwi-async's features, which another
+        // crate in the build can widen past this one's.
+        let selector = DeviceSelector {
             network: self.network,
             fingerprint: self.fingerprint,
             device_type: self.device_type.map(DeviceType::from),
             device_path: self.device_path.clone(),
             include_emulators: true,
+            ..DeviceSelector::default()
+        };
+        #[cfg(any(feature = "trezor", feature = "keepkey"))]
+        let selector = DeviceSelector {
             passphrase: self.passphrase.clone().map(HostPassphrase::new),
-        }
+            ..selector
+        };
+        selector
     }
-}
 
-impl From<&Args> for DeviceSelector {
-    fn from(args: &Args) -> Self {
-        args.device_selector()
+    fn manager(&self) -> DeviceManager {
+        device_manager(self.device_selector(), self.passphrase.is_some())
     }
 }
 
@@ -287,8 +299,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let command = args.command.to_owned();
     let format = args.format;
-    let selector = DeviceSelector::from(&args);
-    let dev_man = device_manager(selector);
+    let dev_man = args.manager();
     match command {
         Commands::Address(AddressCommands::Get {
             from_path,
@@ -430,8 +441,11 @@ async fn main() -> Result<()> {
         Commands::Device(DeviceCommands::Setup { label }) => {
             if let Some(mut device) = select_device(&dev_man).await? {
                 let context = match device.device_type() {
+                    #[cfg(feature = "bitbox")]
                     DeviceType::BitBox02 => bitbox_setup_context(device.is_emulated())?,
+                    #[cfg(feature = "trezor")]
                     DeviceType::Trezor => trezor_setup_context(),
+                    #[cfg(feature = "keepkey")]
                     DeviceType::KeepKey => keepkey_setup_context(),
                     other => anyhow::bail!("device setup is not supported for {other}"),
                 };
@@ -472,8 +486,11 @@ async fn main() -> Result<()> {
         Commands::Device(DeviceCommands::Restore { label, word_count }) => {
             if let Some(mut device) = select_device(&dev_man).await? {
                 let context = match device.device_type() {
+                    #[cfg(feature = "bitbox")]
                     DeviceType::BitBox02 => bitbox_restore_context()?,
+                    #[cfg(feature = "trezor")]
                     DeviceType::Trezor => trezor_restore_context()?,
+                    #[cfg(feature = "keepkey")]
                     DeviceType::KeepKey => keepkey_restore_context()?,
                     device_type => {
                         anyhow::bail!("device restore is not supported for {device_type}")
@@ -550,9 +567,15 @@ async fn main() -> Result<()> {
                     );
                 }
                 let context = match device.device_type() {
+                    #[cfg(feature = "keepkey")]
                     DeviceType::KeepKey => keepkey_pin_context(positions)?,
+                    #[cfg(feature = "trezor")]
                     DeviceType::Trezor => trezor_pin_context(positions)?,
-                    _ => unreachable!("PIN support checked above"),
+                    #[allow(unreachable_patterns)]
+                    device_type => {
+                        let _ = positions;
+                        anyhow::bail!("{device_type} support is not compiled into this build");
+                    }
                 };
                 if !device.device().send_pin(Some(context)).await? {
                     anyhow::bail!("device rejected the PIN");
@@ -676,6 +699,7 @@ fn signing_context(
     hmac: Option<[u8; 32]>,
 ) -> Result<Option<DeviceContext>> {
     match device_type {
+        #[cfg(feature = "ledger")]
         DeviceType::Ledger => match (name, descriptor, hmac) {
             (Some(name), Some(policy), hmac) => Ok(Some(DeviceContext::Ledger {
                 wallet_policy: LedgerWalletPolicy::new(name, Version::V2, policy),
@@ -685,6 +709,7 @@ fn signing_context(
             (None, None, Some(_)) => anyhow::bail!("--hmac requires --name and --descriptor"),
             _ => anyhow::bail!("--name and --descriptor must be provided together"),
         },
+        #[cfg(feature = "specter")]
         DeviceType::Specter => match (name, descriptor, hmac) {
             (_, Some(policy), None) => Ok(Some(DeviceContext::Specter { policy })),
             (None, None, None) => Ok(None),
@@ -946,11 +971,13 @@ mod tests {
             assert!(matches!(args.device_type, Some(DeviceTypeArg::Ledger)));
             assert_eq!(args.device_path.as_deref(), Some("tcp:localhost:9999"));
             assert!(matches!(args.format, Some(OutputFormat::Json)));
+            assert_eq!(args.passphrase.as_deref(), Some("secret"));
             let selector = args.device_selector();
             assert_eq!(selector.network, Network::Testnet);
             assert_eq!(selector.fingerprint.as_ref(), args.fingerprint.as_ref());
             assert_eq!(selector.device_type, Some(DeviceType::Ledger));
             assert_eq!(selector.device_path.as_deref(), Some("tcp:localhost:9999"));
+            #[cfg(any(feature = "trezor", feature = "keepkey"))]
             assert_eq!(
                 selector.passphrase.as_ref().map(|p| p.as_str()),
                 Some("secret")
@@ -1116,6 +1143,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "specter")]
     #[test]
     fn specter_signing_accepts_a_descriptor_without_a_wallet_name() {
         let policy = WalletPolicy::from_str(
@@ -1128,6 +1156,7 @@ mod tests {
         assert!(signing_context(DeviceType::Specter, Some("unused".into()), None, None).is_err());
     }
 
+    #[cfg(any(feature = "trezor", feature = "keepkey"))]
     #[test]
     fn native_cli_passes_password_through_to_the_selector() {
         let args = Args::try_parse_from(["bhwi", "-p", "secret", "device", "list"])
@@ -1141,6 +1170,18 @@ mod tests {
 
         let without = Args::try_parse_from(["bhwi", "device", "list"]).expect("no password parses");
         assert!(without.device_selector().passphrase.is_none());
+    }
+
+    #[test]
+    fn native_cli_remembers_any_given_password_in_every_build() {
+        for (argv, given) in [
+            (vec!["bhwi", "-p", "secret", "device", "list"], true),
+            (vec!["bhwi", "-p", "", "device", "list"], true),
+            (vec!["bhwi", "device", "list"], false),
+        ] {
+            let args = Args::try_parse_from(argv).expect("arguments parse");
+            assert_eq!(args.manager().password_given(), given);
+        }
     }
 
     #[test]
