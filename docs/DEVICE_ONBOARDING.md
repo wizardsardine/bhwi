@@ -11,10 +11,12 @@ to add or maintain support for a hardware wallet in BHWI.
   protocol logic separate from transport I/O.
 - [Common command interface](../bhwi/src/common.rs): lists the device-agnostic
   commands, responses, recipients, and device-specific context.
-- [Async transport crate](../bhwi-async/src/transport): contains concrete HID,
-  TCP, and emulator transports for the sans-I/O interpreters.
-- [CLI crate](../bhwi-cli/src): shows how discovery, command parsing, and async
-  device execution are wired together.
+- [Protocol framing](../bhwi-async/src/transport): defines the `Channel` trait and
+  the per-device wire framing carried over it.
+- [Transport crate](../bhwi-async-transport/src): implements `Channel` over HID,
+  WebUSB, serial, TCP, and emulator sockets, and enumerates the devices found.
+- [CLI crate](../bhwi-cli/src): shows how command parsing and output formatting
+  sit on top of it.
 
 ## Shared Bitcoin Standards
 

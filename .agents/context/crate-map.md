@@ -14,9 +14,12 @@ Use this map to find the right surface before editing.
 
 ## Runtime And User Surfaces
 
-- `bhwi-async`: async execution, transports, HTTP clients, and the HWI trait/API.
-- `bhwi-cli`: native `bhwi` CLI, Python-HWI-compatible `hwi` binary, discovery,
-  selectors, output formatting, and device enumeration.
+- `bhwi-async`: async execution, per-device protocol framing, HTTP clients, and the
+  HWI trait/API.
+- `bhwi-async-transport`: native `Channel` implementations (HID, USB, serial, TCP/UDP,
+  unix sockets) and the `DeviceSource` that enumerates them.
+- `bhwi-cli`: native `bhwi` CLI, Python-HWI-compatible `hwi` binary, and output
+  formatting over `bhwi-async-transport`.
 - `bhwi-wasm`: browser-facing transports and device support where the existing
   browser surface requires parity.
 - `website`: website and demo build surface.
