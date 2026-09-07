@@ -7,8 +7,9 @@ use prost::Message;
 
 use crate::Interpreter;
 use crate::common::HostRequest;
-use crate::keepkey::{HostPassphrase, KEEPKEY_LOCKED, api, proto};
+use crate::keepkey::{KEEPKEY_LOCKED, api, proto};
 use crate::miniscript::descriptor::DescriptorPublicKey;
+use crate::passphrase::HostPassphrase;
 use crate::trezor::error::TrezorError;
 use crate::trezor::interpreter::{
     DeviceFeatures, Engine, EngineCommand, EngineTransmit, Profile, RestoreCtx, SetupCtx,
@@ -103,6 +104,9 @@ impl Profile for KeepKeyProfile {
     const TOGGLE_PENDING_PIN: bool = true;
     const EXTERNAL_INPUTS: bool = true;
     const DEFAULT_ON_DEVICE_PASSPHRASE: bool = false;
+    // messages.options: PassphraseAck.passphrase max_size:51, one byte of
+    // which is the NUL terminator.
+    const MAX_PASSPHRASE_BYTES: usize = 50;
     fn pin_failure_needs_features(failure: &pb::Failure) -> bool {
         failure.code == Some(pb::failure::FailureType::FailureUnexpectedMessage as i32)
     }
@@ -156,10 +160,6 @@ impl Profile for KeepKeyProfile {
 
     fn passphrase_ack(_on_device: bool, passphrase: &str) -> Vec<u8> {
         api::passphrase_ack_from_host(passphrase)
-    }
-
-    fn passphrase_too_long(passphrase: &HostPassphrase) -> bool {
-        passphrase.is_too_long() || passphrase.as_str().len() > crate::trezor::MAX_PASSPHRASE_LENGTH
     }
 
     fn reset_device(_features: &DeviceFeatures, context: SetupCtx) -> Result<Vec<u8>, TrezorError> {

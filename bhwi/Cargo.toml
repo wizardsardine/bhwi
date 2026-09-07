@@ -26,13 +26,8 @@ bitbox = [
     "dep:noise-rust-crypto",
     "dep:prost",
     "dep:semver",
-    "dep:zeroize_derive",
 ]
-trezor = [
-    "dep:prost",
-    "dep:unicode-normalization",
-    "dep:zeroize_derive",
-]
+trezor = ["dep:prost"]
 
 [dependencies]
 base64ct = { workspace = true, features = ["alloc"] }
@@ -61,8 +56,7 @@ getrandom = { version = "=0.2.16", optional = true }
 itertools = { version = "=0.14.0", optional = true }
 prost = { version = "=0.13.5", optional = true }
 semver = { version = "=1.0.27", optional = true }
-unicode-normalization = { version = "=0.1.24", optional = true }
-# zeroize_derive feature needed for #[derive(zeroize::Zeroize)] in trezor code;
+unicode-normalization = "=0.1.24"
 # previously enabled only transitively via noise-rust-crypto (bitbox feature)
 zeroize = { version = "=1.8.1", features = ["zeroize_derive"] }
-zeroize_derive = { version = "=1.4.3", optional = true }
+zeroize_derive = "=1.4.3"

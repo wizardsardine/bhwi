@@ -4,7 +4,8 @@ use bhwi::{
     Interpreter,
     bitcoin::Network,
     common,
-    trezor::{HostPassphrase, TrezorCommand, TrezorError, TrezorInterpreter, TrezorResponse},
+    passphrase::HostPassphrase,
+    trezor::{TrezorCommand, TrezorError, TrezorInterpreter, TrezorResponse},
 };
 
 pub struct Trezor<T> {

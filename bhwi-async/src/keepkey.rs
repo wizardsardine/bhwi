@@ -4,7 +4,8 @@ use bhwi::{
     Interpreter,
     bitcoin::Network,
     common,
-    keepkey::{HostPassphrase, KeepKeyCommand, KeepKeyError, KeepKeyInterpreter, KeepKeyResponse},
+    keepkey::{KeepKeyCommand, KeepKeyError, KeepKeyInterpreter, KeepKeyResponse},
+    passphrase::HostPassphrase,
 };
 
 pub struct KeepKey<T> {

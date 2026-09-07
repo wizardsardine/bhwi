@@ -1,4 +1,4 @@
-use bhwi::trezor::HostPassphrase;
+use bhwi::passphrase::HostPassphrase;
 use bitcoin::{Network, bip32::Fingerprint};
 
 use crate::DeviceType;

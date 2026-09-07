@@ -12,7 +12,7 @@ use bhwi::{
     common::{MultisigAddressType, MultisigDisplayAddress},
     keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED},
     ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
-    trezor::HostPassphrase,
+    passphrase::HostPassphrase,
 };
 use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions};
 use bitcoin::{
