@@ -1,16 +1,10 @@
-use crate::management::{bitbox_restore_context, bitbox_setup_context};
-use crate::management::{keepkey_restore_context, keepkey_setup_context};
-use crate::management::{trezor_restore_context, trezor_setup_context};
-use crate::udev::{UdevRuleSelection, install_udev_rules};
-use crate::{
-    Device, DeviceManager, DeviceSelector, DeviceType, device_manager,
-    get_descriptors::{GetDescriptorOptions, get_descriptor},
-};
+#[cfg(feature = "keepkey")]
+use bhwi::keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED};
+#[cfg(feature = "ledger")]
 use bhwi::ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy};
 use bhwi::{
     bitcoin::psbt::Psbt,
     common::{MultisigAddressType, MultisigDisplayAddress},
-    keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED},
     passphrase::HostPassphrase,
 };
 use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions};
@@ -39,6 +33,18 @@ use std::{
     path::PathBuf,
     process::ExitCode,
     str::FromStr,
+};
+
+#[cfg(feature = "bitbox")]
+use crate::management::{bitbox_restore_context, bitbox_setup_context};
+#[cfg(feature = "keepkey")]
+use crate::management::{keepkey_restore_context, keepkey_setup_context};
+#[cfg(feature = "trezor")]
+use crate::management::{trezor_restore_context, trezor_setup_context};
+use crate::udev::{UdevRuleSelection, install_udev_rules};
+use crate::{
+    Device, DeviceManager, DeviceSelector, DeviceType, device_manager,
+    get_descriptors::{GetDescriptorOptions, get_descriptor},
 };
 
 type HwiResult<T> = std::result::Result<T, HwiError>;
@@ -866,12 +872,14 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
                     .and_then(|info| info.needs_passphrase_sent)
                     .unwrap_or(false);
                 if needs_pin_sent {
-                    let locked = if device.device_type() == DeviceType::KeepKey {
-                        KEEPKEY_LOCKED
-                    } else {
-                        bhwi::trezor::TrezorError::LOCKED
-                    };
-                    error = Some(locked.to_owned());
+                    #[cfg(feature = "keepkey")]
+                    if device.device_type() == DeviceType::KeepKey {
+                        error = Some(KEEPKEY_LOCKED.to_owned());
+                    }
+                    #[cfg(feature = "trezor")]
+                    if device.device_type() == DeviceType::Trezor {
+                        error = Some(bhwi::trezor::TrezorError::LOCKED.to_owned());
+                    }
                     code = Some(HwiErrorCode::DeviceNotReady.code());
                 } else if error.is_none() {
                     if needs_passphrase_sent && manager.selector.passphrase.is_none() {
@@ -1050,8 +1058,11 @@ async fn setup_device(
     }
 
     let context = match device.device_type() {
+        #[cfg(feature = "keepkey")]
         DeviceType::KeepKey => keepkey_setup_context(),
+        #[cfg(feature = "trezor")]
         DeviceType::Trezor => trezor_setup_context(),
+        #[cfg(feature = "bitbox")]
         DeviceType::BitBox02 => match bitbox_setup_context(device.is_emulated()) {
             Ok(context) => context,
             Err(err) => {
@@ -1159,6 +1170,7 @@ async fn restore_device(
         ));
     }
     let context = match device.device_type() {
+        #[cfg(feature = "bitbox")]
         DeviceType::BitBox02 => {
             if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
                 return HwiResponse::Error(HwiError::new(
@@ -1176,6 +1188,7 @@ async fn restore_device(
                 }
             }
         }
+        #[cfg(feature = "keepkey")]
         DeviceType::KeepKey => match keepkey_restore_context() {
             Ok(context) => Some(context),
             Err(err) => {
@@ -1185,6 +1198,7 @@ async fn restore_device(
                 ));
             }
         },
+        #[cfg(feature = "trezor")]
         DeviceType::Trezor => match trezor_restore_context() {
             Ok(context) => Some(context),
             Err(err) => {
@@ -1317,10 +1331,19 @@ async fn device_for_pin_command(
 }
 
 fn locked_device_error(message: &str) -> Option<HwiError> {
-    [bhwi::trezor::TrezorError::LOCKED, KEEPKEY_LOCKED]
-        .into_iter()
-        .find(|locked| message.contains(*locked))
-        .map(|locked| HwiError::new(HwiErrorCode::DeviceNotReady, locked))
+    #[cfg(feature = "trezor")]
+    if message.contains(bhwi::trezor::TrezorError::LOCKED) {
+        return Some(HwiError::new(
+            HwiErrorCode::DeviceNotReady,
+            bhwi::trezor::TrezorError::LOCKED,
+        ));
+    }
+    #[cfg(feature = "keepkey")]
+    if message.contains(KEEPKEY_LOCKED) {
+        return Some(HwiError::new(HwiErrorCode::DeviceNotReady, KEEPKEY_LOCKED));
+    }
+    let _ = message;
+    None
 }
 
 /// A device waiting for its PIN reports being locked rather than failing to connect.
@@ -1333,6 +1356,7 @@ fn device_error(err: impl std::fmt::Display) -> HwiError {
 /// Reports the bare device message rather than the wrapped transport error.
 fn pin_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
     let message = err.to_string();
+    #[cfg(feature = "trezor")]
     for known in [
         bhwi::trezor::TrezorError::NO_PIN_NEEDED,
         bhwi::trezor::TrezorError::PIN_ALREADY_SENT,
@@ -1353,10 +1377,13 @@ fn pin_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
 fn send_pin_error_response(err: &(dyn std::error::Error + 'static)) -> HwiResponse {
     let mut source = Some(err);
     while let Some(current) = source {
+        #[cfg(feature = "trezor")]
         let action_cancelled = matches!(
             current.downcast_ref::<bhwi::trezor::TrezorError>(),
             Some(bhwi::trezor::TrezorError::ActionCancelled)
         );
+        #[cfg(not(feature = "trezor"))]
+        let action_cancelled = false;
         // The common KeepKey adapter converts the same protocol error before
         // the async HWI boundary sees it.
         let converted_action_cancelled = matches!(
@@ -1387,6 +1414,15 @@ async fn prompt_pin_device(selector: HwiSelector) -> HwiResponse {
     }
 }
 
+#[cfg(not(any(feature = "trezor", feature = "keepkey")))]
+async fn send_pin_device(_selector: HwiSelector, _pin: String) -> HwiResponse {
+    HwiResponse::Error(HwiError::new(
+        HwiErrorCode::UnsupportedCommand,
+        "no host-PIN device support is compiled into this build",
+    ))
+}
+
+#[cfg(any(feature = "trezor", feature = "keepkey"))]
 async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
     let pin = match bhwi::trezor::HostPin::new(pin) {
         Ok(pin) => pin,
@@ -1407,13 +1443,22 @@ async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
     };
 
     let context = match device.device_type() {
+        #[cfg(feature = "keepkey")]
         DeviceType::KeepKey => bhwi::common::DeviceContext::KeepKeyManagement(
             bhwi::keepkey::ManagementContext::Pin(pin),
         ),
+        #[cfg(feature = "trezor")]
         DeviceType::Trezor => {
             bhwi::common::DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Pin(pin))
         }
-        _ => unreachable!("PIN support checked above"),
+        #[allow(unreachable_patterns)]
+        device_type => {
+            let _ = pin;
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::UnsupportedCommand,
+                format!("{device_type} support is not compiled into this build"),
+            ));
+        }
     };
     match device.device().send_pin(Some(context)).await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
@@ -1523,6 +1568,7 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
     };
 
     let original = parsed.to_string();
+    #[cfg(feature = "ledger")]
     if device.device_type() == DeviceType::Ledger {
         let contexts = match ledger_signing_contexts(&mut device, &parsed, network).await {
             Ok(contexts) if contexts.is_empty() => {
@@ -2030,15 +2076,21 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
 
     HwiResponse::GetKeypool(entries)
 }
+
+#[cfg(feature = "ledger")]
 #[derive(Debug)]
 enum LedgerSigningError {
     BadArgument(String),
     Device(HwiError),
 }
+
+#[cfg(feature = "ledger")]
 struct LedgerSigningContext {
     address_type: LedgerAddressType,
     context: DeviceContext,
 }
+
+#[cfg(feature = "ledger")]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum LedgerAddressType {
     Tap,
@@ -2046,6 +2098,8 @@ enum LedgerAddressType {
     ShWit,
     Legacy,
 }
+
+#[cfg(feature = "ledger")]
 impl LedgerAddressType {
     fn priority(self) -> u8 {
         match self {
@@ -2065,6 +2119,8 @@ impl LedgerAddressType {
         }
     }
 }
+
+#[cfg(feature = "ledger")]
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum LedgerSigningPlan {
     Default {
@@ -2077,6 +2133,8 @@ enum LedgerSigningPlan {
         policy: String,
     },
 }
+
+#[cfg(feature = "ledger")]
 impl LedgerSigningPlan {
     fn priority(&self) -> u8 {
         match self {
@@ -2086,6 +2144,8 @@ impl LedgerSigningPlan {
         }
     }
 }
+
+#[cfg(feature = "ledger")]
 async fn ledger_signing_contexts(
     device: &mut Device,
     psbt: &Psbt,
@@ -2174,6 +2234,8 @@ async fn ledger_signing_contexts(
 
     Ok(contexts)
 }
+
+#[cfg(feature = "ledger")]
 fn strip_legacy_witness_utxos(psbt: &mut Psbt) {
     for (index, input) in psbt.inputs.iter_mut().enumerate() {
         let Some(utxo) = input.non_witness_utxo.as_ref().and_then(|tx| {
@@ -2187,6 +2249,8 @@ fn strip_legacy_witness_utxos(psbt: &mut Psbt) {
         }
     }
 }
+
+#[cfg(feature = "ledger")]
 fn merge_psbt_signatures(target: &mut Psbt, signed: Psbt) {
     for (target, signed) in target.inputs.iter_mut().zip(signed.inputs) {
         target.partial_sigs.extend(signed.partial_sigs);
@@ -2196,6 +2260,8 @@ fn merge_psbt_signatures(target: &mut Psbt, signed: Psbt) {
         }
     }
 }
+
+#[cfg(feature = "ledger")]
 fn ledger_signing_plans(
     psbt: &Psbt,
     fingerprint: Fingerprint,
@@ -2264,6 +2330,8 @@ fn ledger_signing_plans(
     plans.sort_by_key(LedgerSigningPlan::priority);
     Ok(plans)
 }
+
+#[cfg(feature = "ledger")]
 fn ledger_singlesig_plan(
     input: &Input,
     utxo: &TxOut,
@@ -2338,6 +2406,8 @@ fn ledger_singlesig_plan(
         account_path,
     }))
 }
+
+#[cfg(feature = "ledger")]
 fn singlesig_address_type(input: &Input, utxo: &TxOut) -> Option<LedgerAddressType> {
     if utxo.script_pubkey.is_p2pkh() {
         Some(LedgerAddressType::Legacy)
@@ -2356,6 +2426,8 @@ fn singlesig_address_type(input: &Input, utxo: &TxOut) -> Option<LedgerAddressTy
         None
     }
 }
+
+#[cfg(feature = "ledger")]
 fn singlesig_key_matches(
     key: bitcoin::secp256k1::PublicKey,
     address_type: LedgerAddressType,
@@ -2379,6 +2451,8 @@ fn singlesig_key_matches(
         LedgerAddressType::Tap => false,
     }
 }
+
+#[cfg(feature = "ledger")]
 fn validate_standard_singlesig_path(
     path: &DerivationPath,
     address_type: LedgerAddressType,
@@ -2410,18 +2484,24 @@ fn validate_standard_singlesig_path(
     }
     Ok(DerivationPath::from(children[..3].to_vec()))
 }
+
+#[cfg(feature = "ledger")]
 fn hardened_index(child: ChildNumber) -> Option<u32> {
     match child {
         ChildNumber::Hardened { index } => Some(index),
         ChildNumber::Normal { .. } => None,
     }
 }
+
+#[cfg(feature = "ledger")]
 fn normal_index(child: ChildNumber) -> Option<u32> {
     match child {
         ChildNumber::Normal { index } => Some(index),
         ChildNumber::Hardened { .. } => None,
     }
 }
+
+#[cfg(feature = "ledger")]
 fn ledger_multisig_plan(
     psbt: &Psbt,
     input: &Input,
@@ -2467,10 +2547,14 @@ fn ledger_multisig_plan(
         policy,
     })
 }
+
+#[cfg(feature = "ledger")]
 struct ResolvedMultisigKey {
     expression: String,
     suffix: (u32, u32),
 }
+
+#[cfg(feature = "ledger")]
 fn global_xpub_key_expression(
     psbt: &Psbt,
     key_source: &KeySource,
@@ -2534,6 +2618,8 @@ fn global_xpub_key_expression(
     };
     Ok(ResolvedMultisigKey { expression, suffix })
 }
+
+#[cfg(feature = "ledger")]
 fn input_has_fingerprint(input: &Input, fingerprint: Fingerprint) -> bool {
     input
         .bip32_derivation
@@ -2544,6 +2630,8 @@ fn input_has_fingerprint(input: &Input, fingerprint: Fingerprint) -> bool {
             .values()
             .any(|(_, (key_fingerprint, _))| *key_fingerprint == fingerprint)
 }
+
+#[cfg(feature = "ledger")]
 fn input_utxo(psbt: &Psbt, input_index: usize) -> Result<Option<TxOut>, String> {
     let input = &psbt.inputs[input_index];
     let txin = &psbt.unsigned_tx.input[input_index];
@@ -2571,12 +2659,16 @@ fn input_utxo(psbt: &Psbt, input_index: usize) -> Result<Option<TxOut>, String> 
     }
     Ok(input.witness_utxo.clone().or(non_witness))
 }
+
+#[cfg(feature = "ledger")]
 fn extend_account_path_for_policy(path: &DerivationPath) -> DerivationPath {
     let mut children = path.as_ref().to_vec();
     children.push(ChildNumber::from_normal_idx(0).expect("valid receive branch"));
     children.push(ChildNumber::from_normal_idx(0).expect("valid address index"));
     DerivationPath::from(children)
 }
+
+#[cfg(feature = "ledger")]
 fn multisig_script(
     input: &Input,
     utxo: &TxOut,
@@ -2620,6 +2712,8 @@ fn multisig_script(
         Ok(Some((LedgerAddressType::Legacy, redeem_script.clone())))
     }
 }
+
+#[cfg(feature = "ledger")]
 fn parse_multisig_script(script: &ScriptBuf) -> Result<Option<(usize, Vec<PublicKey>)>, String> {
     let mut instructions = script.instructions();
     let Some(first) = instructions.next() else {
@@ -2667,6 +2761,8 @@ fn parse_multisig_script(script: &ScriptBuf) -> Result<Option<(usize, Vec<Public
     }
     Ok(Some((threshold, pubkeys)))
 }
+
+#[cfg(feature = "ledger")]
 fn multisig_policy_descriptor(
     address_type: LedgerAddressType,
     threshold: usize,
@@ -2838,6 +2934,7 @@ async fn ledger_multisig_display_address(
     ))
 }
 
+#[cfg(feature = "ledger")]
 fn pushnum(op: bitcoin::blockdata::opcodes::Opcode) -> Option<usize> {
     if op == OP_PUSHNUM_1 {
         return Some(1);
@@ -2847,6 +2944,8 @@ fn pushnum(op: bitcoin::blockdata::opcodes::Opcode) -> Option<usize> {
     }
     None
 }
+
+#[cfg(feature = "ledger")]
 fn push_bytes_as_bytes(bytes: &PushBytes) -> &[u8] {
     bytes.as_bytes()
 }
@@ -3559,6 +3658,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
     // rejects an unknown type once `get_client` is reached.
     let device_type = args.device_type;
     let mut device_path = args.device_path;
+    #[cfg(feature = "keepkey")]
     if matches!(&args.command, HwiCliCommand::Enumerate)
         && device_path.is_none()
         && device_type
@@ -3806,6 +3906,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "keepkey")]
     fn keepkey_selector_pathless_simulator_matches_only_emulated_model() {
         let request =
             parse_args(["hwi", "--device-type", "keepkey_simulator", "enumerate"]).unwrap();
@@ -4891,6 +4992,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "trezor")]
     fn send_pin_action_cancelled_matches_hwi_false_contract() {
         for error in [
             bhwi_async::HWIDeviceError::new(bhwi::trezor::TrezorError::ActionCancelled),
@@ -4953,6 +5055,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "keepkey", feature = "trezor"))]
     fn keepkey_locked_and_bad_pin_errors_use_python_hwi_codes() {
         let locked = device_error(format!("transport failed: {KEEPKEY_LOCKED}"));
         assert_eq!(locked.code, HwiErrorCode::DeviceNotReady.code());
@@ -5019,6 +5122,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "keepkey")]
     fn classify_anyhow_device_error_preserves_locked_descriptor_lookup() {
         let err = anyhow::Error::new(std::io::Error::other(KEEPKEY_LOCKED))
             .context("getting descriptor fingerprint");
@@ -5500,6 +5604,8 @@ mod tests {
             );
         }
     }
+
+    #[cfg(feature = "ledger")]
     #[test]
     fn ledger_signing_plans_cover_all_default_wallets() {
         let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
@@ -5591,6 +5697,8 @@ mod tests {
             }]
         );
     }
+
+    #[cfg(feature = "ledger")]
     #[test]
     fn ledger_signing_plans_support_multiple_singlesig_accounts() {
         let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
@@ -5647,6 +5755,8 @@ mod tests {
             }
         )));
     }
+
+    #[cfg(feature = "ledger")]
     #[test]
     fn ledger_signing_plans_support_mixed_default_and_registered_policies() {
         let (multisig, fingerprint) = sample_multisig_psbt(LedgerAddressType::Wit, true);
@@ -5678,6 +5788,8 @@ mod tests {
         assert!(matches!(plans[0], LedgerSigningPlan::Default { .. }));
         assert!(matches!(plans[1], LedgerSigningPlan::Registered { .. }));
     }
+
+    #[cfg(feature = "ledger")]
     #[test]
     fn ledger_multisig_plans_cover_all_hwi_wrappers() {
         for address_type in [
@@ -5702,6 +5814,8 @@ mod tests {
             }
         }
     }
+
+    #[cfg(feature = "ledger")]
     #[test]
     fn ledger_multisig_plan_rejects_missing_global_xpub() {
         let (mut psbt, fingerprint) = sample_multisig_psbt(LedgerAddressType::Wit, true);
@@ -5711,6 +5825,8 @@ mod tests {
             ledger_signing_plans(&psbt, fingerprint, Network::Testnet).expect_err("missing xpub");
         assert!(err.contains("expected one account-level global xpub"));
     }
+
+    #[cfg(feature = "ledger")]
     #[test]
     fn ledger_multisig_plan_rejects_unsorted_script() {
         let (psbt, fingerprint) = sample_multisig_psbt(LedgerAddressType::Wit, false);
@@ -5724,6 +5840,8 @@ mod tests {
         Xpub::from_str("tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT")
             .expect("sample xpub")
     }
+
+    #[cfg(feature = "ledger")]
     fn sample_child_pubkey(index: u32) -> PublicKey {
         let secp = Secp256k1::verification_only();
         let xpub = sample_xpub()
@@ -5737,6 +5855,8 @@ mod tests {
             .expect("derive pubkey");
         PublicKey::new(xpub.public_key)
     }
+
+    #[cfg(feature = "ledger")]
     fn multisig_script_buf(threshold: i64, pubkeys: &[PublicKey]) -> ScriptBuf {
         let mut builder = Builder::new().push_int(threshold);
         for pubkey in pubkeys {
@@ -5747,6 +5867,8 @@ mod tests {
             .push_opcode(OP_CHECKMULTISIG)
             .into_script()
     }
+
+    #[cfg(feature = "ledger")]
     fn sample_multisig_psbt(address_type: LedgerAddressType, sorted: bool) -> (Psbt, Fingerprint) {
         let secp = Secp256k1::new();
         let account_path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();

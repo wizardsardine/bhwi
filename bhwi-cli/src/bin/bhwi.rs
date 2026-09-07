@@ -1,9 +1,13 @@
 use anyhow::Result;
+#[cfg(feature = "ledger")]
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::passphrase::HostPassphrase;
 use bhwi_async::{DeviceBackup, DeviceContext, RestoreOptions, SetupOptions, WalletRegistration};
+#[cfg(feature = "bitbox")]
 use bhwi_cli::management::{bitbox_restore_context, bitbox_setup_context};
+#[cfg(feature = "keepkey")]
 use bhwi_cli::management::{keepkey_pin_context, keepkey_restore_context, keepkey_setup_context};
+#[cfg(feature = "trezor")]
 use bhwi_cli::management::{trezor_pin_context, trezor_restore_context, trezor_setup_context};
 use bhwi_cli::udev::{UdevRuleSelection, install_udev_rules};
 use bhwi_cli::{
@@ -411,8 +415,11 @@ async fn main() -> Result<()> {
         Commands::Device(DeviceCommands::Setup { label }) => {
             if let Some(mut device) = select_device(&dev_man).await? {
                 let context = match device.device_type() {
+                    #[cfg(feature = "bitbox")]
                     DeviceType::BitBox02 => bitbox_setup_context(device.is_emulated())?,
+                    #[cfg(feature = "trezor")]
                     DeviceType::Trezor => trezor_setup_context(),
+                    #[cfg(feature = "keepkey")]
                     DeviceType::KeepKey => keepkey_setup_context(),
                     other => anyhow::bail!("device setup is not supported for {other}"),
                 };
@@ -453,8 +460,11 @@ async fn main() -> Result<()> {
         Commands::Device(DeviceCommands::Restore { label, word_count }) => {
             if let Some(mut device) = select_device(&dev_man).await? {
                 let context = match device.device_type() {
+                    #[cfg(feature = "bitbox")]
                     DeviceType::BitBox02 => bitbox_restore_context()?,
+                    #[cfg(feature = "trezor")]
                     DeviceType::Trezor => trezor_restore_context()?,
+                    #[cfg(feature = "keepkey")]
                     DeviceType::KeepKey => keepkey_restore_context()?,
                     device_type => {
                         anyhow::bail!("device restore is not supported for {device_type}")
@@ -531,9 +541,15 @@ async fn main() -> Result<()> {
                     );
                 }
                 let context = match device.device_type() {
+                    #[cfg(feature = "keepkey")]
                     DeviceType::KeepKey => keepkey_pin_context(positions)?,
+                    #[cfg(feature = "trezor")]
                     DeviceType::Trezor => trezor_pin_context(positions)?,
-                    _ => unreachable!("PIN support checked above"),
+                    #[allow(unreachable_patterns)]
+                    device_type => {
+                        let _ = positions;
+                        anyhow::bail!("{device_type} support is not compiled into this build");
+                    }
                 };
                 if !device.device().send_pin(Some(context)).await? {
                     anyhow::bail!("device rejected the PIN");
@@ -614,6 +630,7 @@ async fn main() -> Result<()> {
             let psbt = Psbt::from_str(psbt_text.trim())?;
             let hmac = hmac.as_deref().map(parse_hmac).transpose()?;
             let context = match (name, descriptor, hmac) {
+                #[cfg(feature = "ledger")]
                 (Some(name), Some(policy), hmac) => Some(DeviceContext::Ledger {
                     wallet_policy: LedgerWalletPolicy::new(name, Version::V2, policy),
                     wallet_hmac: hmac,

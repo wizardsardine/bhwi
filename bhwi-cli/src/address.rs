@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+#[cfg(feature = "ledger")]
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi_async::{DeviceContext, DisplayAddress};
 use bitcoin::address::AddressType;
@@ -64,6 +65,7 @@ impl AddressOutput for DeviceManager {
                 // BitBox re-supplies the policy descriptor each time; Ledger needs the
                 // registered policy plus its hmac; Coldcard/Jade resolve by name on-device.
                 let context = match device.device_type() {
+                    #[cfg(feature = "bitbox")]
                     DeviceType::BitBox02 => {
                         let wallet_policy = wallet_descriptor.ok_or_else(|| {
                             anyhow::anyhow!(
@@ -74,6 +76,7 @@ impl AddressOutput for DeviceManager {
                             policy: wallet_policy,
                         })
                     }
+                    #[cfg(feature = "ledger")]
                     DeviceType::Ledger => match (hmac, wallet_descriptor) {
                         (Some(hmac_hex), Some(wallet_policy)) => {
                             let hmac = hex::decode(&hmac_hex)
