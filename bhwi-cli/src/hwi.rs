@@ -7,6 +7,8 @@ use bhwi::{
     common::{MultisigAddressType, MultisigDisplayAddress},
     passphrase::HostPassphrase,
 };
+#[cfg(feature = "ledger")]
+use bhwi_async::psbt::{merge_psbt_signatures, strip_legacy_witness_utxos};
 use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions};
 use bitcoin::{
     Address, CompressedPublicKey, Network, NetworkKind, PublicKey, ScriptBuf, TxOut,
@@ -2239,32 +2241,6 @@ async fn ledger_signing_contexts(
     }
 
     Ok(contexts)
-}
-
-#[cfg(feature = "ledger")]
-fn strip_legacy_witness_utxos(psbt: &mut Psbt) {
-    for (index, input) in psbt.inputs.iter_mut().enumerate() {
-        let Some(utxo) = input.non_witness_utxo.as_ref().and_then(|tx| {
-            tx.output
-                .get(psbt.unsigned_tx.input[index].previous_output.vout as usize)
-        }) else {
-            continue;
-        };
-        if !utxo.script_pubkey.is_witness_program() {
-            input.witness_utxo = None;
-        }
-    }
-}
-
-#[cfg(feature = "ledger")]
-fn merge_psbt_signatures(target: &mut Psbt, signed: Psbt) {
-    for (target, signed) in target.inputs.iter_mut().zip(signed.inputs) {
-        target.partial_sigs.extend(signed.partial_sigs);
-        target.tap_script_sigs.extend(signed.tap_script_sigs);
-        if signed.tap_key_sig.is_some() {
-            target.tap_key_sig = signed.tap_key_sig;
-        }
-    }
 }
 
 #[cfg(feature = "ledger")]

@@ -10,6 +10,7 @@ pub mod jade;
 pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
+pub mod psbt;
 pub mod transport;
 #[cfg(feature = "trezor")]
 pub mod trezor;
