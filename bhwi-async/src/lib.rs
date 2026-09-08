@@ -11,6 +11,7 @@ pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
 pub mod psbt;
+pub mod signing;
 pub mod transport;
 #[cfg(feature = "trezor")]
 pub mod trezor;
