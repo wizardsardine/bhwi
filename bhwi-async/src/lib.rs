@@ -4,6 +4,7 @@ pub mod bitbox;
 pub mod coldcard;
 pub mod descriptors;
 pub mod device;
+pub mod display_address;
 #[cfg(feature = "jade")]
 pub mod jade;
 #[cfg(feature = "keepkey")]
