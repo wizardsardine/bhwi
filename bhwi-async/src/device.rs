@@ -49,6 +49,30 @@ impl fmt::Display for DeviceType {
     }
 }
 
+/// These take the multisig descriptor at display time; the rest need it registered first.
+pub fn supports_multisig_display_address(device_type: DeviceType) -> bool {
+    matches!(
+        device_type,
+        DeviceType::Coldcard | DeviceType::Jade | DeviceType::KeepKey | DeviceType::Trezor
+    )
+}
+
+pub fn can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
+    match device_type {
+        DeviceType::BitBox02 => false,
+        DeviceType::Ledger => true,
+        DeviceType::Jade => false,
+        DeviceType::KeepKey => false,
+        DeviceType::Coldcard => model.contains("edge"),
+        DeviceType::Specter => false,
+        DeviceType::Trezor => model != "trezor_one",
+    }
+}
+
+pub fn reports_device_info(device_type: DeviceType) -> bool {
+    matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor)
+}
+
 #[derive(Debug, Clone)]
 pub struct DeviceSelector {
     pub network: Network,
@@ -733,5 +757,39 @@ mod tests {
             Some(unlocked)
         );
         assert_eq!(skipped.len(), 1);
+    }
+
+    #[test]
+    fn taproot_support_matches_python_hwi() {
+        assert!(can_sign_taproot(
+            DeviceType::Ledger,
+            "ledger_nano_s_simulator"
+        ));
+        assert!(!can_sign_taproot(
+            DeviceType::BitBox02,
+            "bitbox02_simulator"
+        ));
+        assert!(!can_sign_taproot(DeviceType::Jade, "jade_simulator"));
+        assert!(can_sign_taproot(
+            DeviceType::Coldcard,
+            "coldcard_simulator_edge"
+        ));
+        assert!(!can_sign_taproot(
+            DeviceType::Coldcard,
+            "coldcard_simulator"
+        ));
+        assert!(can_sign_taproot(DeviceType::Trezor, "trezor_t"));
+        assert!(!can_sign_taproot(DeviceType::Trezor, "trezor_one"));
+    }
+
+    #[test]
+    fn only_the_trezor_family_reports_device_info() {
+        for device_type in DeviceType::ALL {
+            assert_eq!(
+                reports_device_info(device_type),
+                matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor),
+                "{device_type}"
+            );
+        }
     }
 }
