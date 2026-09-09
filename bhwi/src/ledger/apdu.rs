@@ -63,6 +63,10 @@ pub enum StatusWord {
     /// Security status not satisfied; also user rejection (upstream HWI
     /// treats 0x6982 and 0x6985 as cancellations)
     SecurityStatusNotSatisfied = 0x6982,
+    /// Rejected by user on Stax and Flex, which answer 0x5501 rather than
+    /// 0x6985. Absent from Python HWI's `cancels` list and from
+    /// `ledger_bitcoin_client`, so both report it as an unknown status word.
+    UserRefusedOnDevice = 0x5501,
     /// Incorrect Data
     IncorrectData = 0x6A80,
     /// Not Supported
@@ -94,6 +98,7 @@ impl TryFrom<u16> for StatusWord {
         match value {
             0x6985 => Ok(StatusWord::Deny),
             0x6982 => Ok(StatusWord::SecurityStatusNotSatisfied),
+            0x5501 => Ok(StatusWord::UserRefusedOnDevice),
             0x6901 => Ok(StatusWord::CommandNotAllowed),
             0x6A80 => Ok(StatusWord::IncorrectData),
             0x6A82 => Ok(StatusWord::NotSupported),

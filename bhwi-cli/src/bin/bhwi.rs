@@ -2,7 +2,9 @@ use anyhow::Result;
 #[cfg(feature = "ledger")]
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::passphrase::HostPassphrase;
-use bhwi_async::{DeviceBackup, DeviceContext, RestoreOptions, SetupOptions, WalletRegistration};
+use bhwi_async::{
+    DeviceBackup, DeviceContext, HWIDeviceError, RestoreOptions, SetupOptions, WalletRegistration,
+};
 #[cfg(feature = "bitbox")]
 use bhwi_cli::management::{bitbox_restore_context, bitbox_setup_context};
 #[cfg(feature = "keepkey")]
@@ -17,7 +19,7 @@ use bhwi_cli::{
     device_manager,
     get_descriptors::GetKeypoolOptions,
     hwi::{PIN_MATRIX_DESCRIPTION, SEND_PIN_INSTRUCTION},
-    networks_string, select_device, warn_skipped,
+    is_user_cancelled, networks_string, select_device, warn_skipped,
 };
 use bhwi_cli::{address::AddressOutput, get_descriptors::DescriptorOutput};
 
@@ -330,29 +332,46 @@ async fn main() -> Result<()> {
         }
         Commands::Device(DeviceCommands::List) => {
             let mut scan = dev_man.enumerate().await?;
-            for skipped in &scan.skipped {
-                warn_skipped(skipped);
-            }
+            let mut skipped = std::mem::take(&mut scan.skipped);
             let mut listed = 0usize;
             let mut json_devices: Vec<DeviceJson> = Vec::new();
             for device in scan.devices.iter_mut() {
+                let (device_type, model, path) = (
+                    device.device_type(),
+                    device.model().to_string(),
+                    device.path().to_string(),
+                );
+                let mut skip = |err: HWIDeviceError| -> anyhow::Result<()> {
+                    if is_user_cancelled(&err) {
+                        return Err(err.into());
+                    }
+                    skipped.push(SkippedDevice::new(device_type, &model, &path, &err));
+                    Ok(())
+                };
                 // XXX: Coldcard always needs unlocking
                 if let Err(err) = device.device().unlock(dev_man.selector.network).await {
-                    warn_skipped(&SkippedDevice::new(
-                        device.device_type(),
-                        device.model(),
-                        device.path(),
-                        &err,
-                    ));
+                    skip(err)?;
                     continue;
                 }
                 let name = device.name().to_string();
                 let is_emulated = device.is_emulated();
-                let info = device.info().await?;
+                let info = match device.info().await {
+                    Ok(info) => info,
+                    Err(err) => {
+                        skip(err)?;
+                        continue;
+                    }
+                };
                 let fingerprint = if info.initialized == Some(false) {
                     None
                 } else {
-                    Some(device.fingerprint().await?)
+                    match device.fingerprint().await {
+                        Ok(fingerprint) => Some(fingerprint),
+                        Err(err) => {
+                            skip(err)?;
+                            continue;
+                        }
+                    }
                 };
                 listed += 1;
                 match format {
@@ -379,6 +398,15 @@ async fn main() -> Result<()> {
                         Some(fingerprint) => println!("{fingerprint}"),
                         None => println!("{}", device.path()),
                     },
+                }
+            }
+            if listed == 0 {
+                if let Some(first) = skipped.first() {
+                    anyhow::bail!("{}", first.error);
+                }
+            } else {
+                for entry in &skipped {
+                    warn_skipped(entry);
                 }
             }
             if let Some(OutputFormat::Json) = format {

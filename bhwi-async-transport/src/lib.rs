@@ -118,22 +118,16 @@ impl DeviceSource for NativeSource {
                     .filter(|d| Self::is_supported(*d))
                     .collect()
             });
-        let targeted = selector.device_type.is_some()
-            || selector.device_path.is_some()
-            || selector.fingerprint.is_some();
         let res = join_all(device_types.into_iter().map(|device_type| {
             Self::enumerate_device_type(device_type, selector, pairing_code, host_interaction)
         }))
         .await;
-        collect_scans(targeted, res)
+        collect_scans(res)
     }
 }
 
-/// One bus failing does not hide what the others found.
-fn collect_scans(
-    targeted: bool,
-    results: Vec<NativeResult<DeviceScan>>,
-) -> NativeResult<DeviceScan> {
+/// One bus failing does not hide what the others found; finding nothing reports why.
+fn collect_scans(results: Vec<NativeResult<DeviceScan>>) -> NativeResult<DeviceScan> {
     let mut scan = DeviceScan::default();
     let mut first_error = None;
     for result in results {
@@ -147,7 +141,7 @@ fn collect_scans(
         }
     }
     if scan.devices.is_empty()
-        && targeted
+        && scan.skipped.is_empty()
         && let Some(err) = first_error
     {
         return Err(err);
@@ -191,34 +185,34 @@ mod tests {
     }
 
     #[test]
-    fn an_untargeted_scan_keeps_what_the_other_buses_found() {
+    fn a_scan_keeps_what_the_other_buses_found() {
         let results = vec![
             Ok(scan_with_skipped("hid:1")),
             Err(error("unrelated")),
             Ok(scan_with_skipped("hid:2")),
         ];
 
-        let scan = collect_scans(false, results).expect("untargeted scan tolerates one failure");
+        let scan = collect_scans(results).expect("a scan tolerates one bus failing");
         assert_eq!(scan.skipped.len(), 2);
     }
 
     #[test]
-    fn a_targeted_scan_reports_the_first_failure() {
+    fn a_scan_that_found_nothing_reports_the_first_failure() {
         let results = vec![Err(error("first")), Err(error("second"))];
 
-        let err = collect_scans(true, results)
+        let err = collect_scans(results)
             .err()
-            .expect("a targeted scan reports the failure");
+            .expect("a scan that found nothing reports the failure");
         assert_eq!(err.to_string(), "first");
     }
 
     #[test]
-    fn a_targeted_scan_that_found_nothing_reports_the_failure() {
+    fn one_bus_failing_alone_reports_the_failure() {
         let results = vec![Err(error("path failed"))];
 
-        let err = collect_scans(true, results)
+        let err = collect_scans(results)
             .err()
-            .expect("a targeted scan reports the failure");
+            .expect("a scan that found nothing reports the failure");
         assert_eq!(err.to_string(), "path failed");
     }
 }

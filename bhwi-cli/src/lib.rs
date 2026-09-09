@@ -3,7 +3,8 @@ use std::rc::Rc;
 #[cfg(target_os = "linux")]
 pub use bhwi_async_transport::udev;
 pub use bhwi_async_transport::{
-    Device, DeviceSelector, DeviceType, NativeSource, SkippedDevice, networks_string,
+    Device, DeviceSelector, DeviceType, NativeSource, SkippedDevice, is_user_cancelled,
+    networks_string, no_device,
 };
 use bitcoin::{Network, bip32::Fingerprint};
 use clap::ValueEnum;
