@@ -4,7 +4,7 @@ use std::{ops::Deref, rc::Rc};
 pub use bhwi_async_transport::udev;
 pub use bhwi_async_transport::{
     Device, DeviceSelector, DeviceType, Info, NativeError, NativeSource, SelectError,
-    SkippedDevice, networks_string,
+    SkippedDevice, is_user_cancelled, networks_string, no_device,
 };
 use bitcoin::{Network, bip32::Fingerprint};
 use clap::ValueEnum;
