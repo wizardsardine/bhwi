@@ -176,6 +176,50 @@ pub async fn get_descriptor(
     })
 }
 
+/// The descriptor types a standard wallet is made of, receive and change.
+pub const PUBKEY_DESCRIPTOR_TYPES: [DescriptorType; 4] = [
+    DescriptorType::Pkh,
+    DescriptorType::Wpkh,
+    DescriptorType::ShWpkh,
+    DescriptorType::Tr,
+];
+
+/// Receive and internal descriptors for every type in [`PUBKEY_DESCRIPTOR_TYPES`].
+#[derive(Debug, Clone)]
+pub struct PubkeyDescriptors {
+    pub receive: Vec<Descriptor<DescriptorPublicKey>>,
+    pub internal: Vec<Descriptor<DescriptorPublicKey>>,
+}
+
+/// Derives the descriptor set a standard wallet needs for one account.
+pub async fn get_pubkey_descriptors(
+    device: &mut dyn HWIDevice,
+    master_fingerprint: Fingerprint,
+    account: u32,
+    network: Network,
+) -> Result<PubkeyDescriptors, DescriptorError> {
+    let mut descriptors = PubkeyDescriptors {
+        receive: Vec::with_capacity(PUBKEY_DESCRIPTOR_TYPES.len()),
+        internal: Vec::with_capacity(PUBKEY_DESCRIPTOR_TYPES.len()),
+    };
+    for descriptor_type in PUBKEY_DESCRIPTOR_TYPES {
+        for (is_change, out) in [
+            (false, &mut descriptors.receive),
+            (true, &mut descriptors.internal),
+        ] {
+            let options = GetDescriptorOptions::with_account(
+                master_fingerprint,
+                account,
+                is_change,
+                descriptor_type,
+                network,
+            );
+            out.push(get_descriptor(device, options).await?);
+        }
+    }
+    Ok(descriptors)
+}
+
 /// Gets a ranged keypool descriptor from an account/parent path.
 pub async fn get_keypool_descriptor(
     device: &mut dyn HWIDevice,
