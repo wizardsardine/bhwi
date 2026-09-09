@@ -703,6 +703,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::display_address::multisig_display_address_from_descriptor;
 
     #[test]
     fn ledger_signing_plans_cover_all_default_wallets() {
@@ -1046,5 +1047,187 @@ mod tests {
     fn sample_xpub() -> Xpub {
         Xpub::from_str("tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT")
             .expect("sample xpub")
+    }
+
+    fn ledger_display_test_key_info(seed: u8, origin: &str) -> String {
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(NetworkKind::Test, &[seed; 32]).unwrap();
+        let path = DerivationPath::from_str(&format!("m/{origin}")).unwrap();
+        let xpub = Xpub::from_priv(&secp, &master.derive_priv(&secp, &path).unwrap());
+        format!("[{}/{origin}]{xpub}", master.fingerprint(&secp))
+    }
+
+    fn wrap_multisig_descriptor(address_type: MultisigAddressType, body: &str) -> String {
+        match address_type {
+            MultisigAddressType::Legacy => format!("sh({body})"),
+            MultisigAddressType::ShWit => format!("sh(wsh({body}))"),
+            MultisigAddressType::Wit => format!("wsh({body})"),
+        }
+    }
+
+    fn ledger_display_plan_from_descriptor(
+        descriptor: &str,
+    ) -> Result<LedgerMultisigDisplayPlan, String> {
+        let multisig =
+            multisig_display_address_from_descriptor(descriptor).map_err(|err| err.to_string())?;
+        ledger_multisig_display_plan(multisig)
+    }
+
+    #[test]
+    fn ledger_multisig_display_plans_cover_wrappers_operators_and_suffixes() {
+        let key_infos = [
+            ledger_display_test_key_info(1, "48'/1'/0'/2'"),
+            ledger_display_test_key_info(2, "48'/1'/0'/2'"),
+        ];
+        let cases = [
+            (MultisigAddressType::Legacy, true, 0, 0),
+            (MultisigAddressType::Legacy, false, 1, 1),
+            (MultisigAddressType::ShWit, true, 0, 7),
+            (MultisigAddressType::ShWit, false, 1, 8),
+            (MultisigAddressType::Wit, true, 0, 2_147_483_647),
+            (MultisigAddressType::Wit, false, 1, 42),
+        ];
+
+        for (address_type, sorted, branch, index) in cases {
+            let operator = if sorted { "sortedmulti" } else { "multi" };
+            let ordered_key_infos = if !sorted && matches!(address_type, MultisigAddressType::Wit) {
+                key_infos.iter().rev().collect::<Vec<_>>()
+            } else {
+                key_infos.iter().collect::<Vec<_>>()
+            };
+            let descriptor_keys = ordered_key_infos
+                .iter()
+                .map(|key| format!("{key}/{branch}/{index}"))
+                .collect::<Vec<_>>();
+            let descriptor = wrap_multisig_descriptor(
+                address_type,
+                &format!("{operator}(2,{})", descriptor_keys.join(",")),
+            );
+            let policy_keys = ordered_key_infos
+                .iter()
+                .map(|key| format!("{key}/<0;1>/*"))
+                .collect::<Vec<_>>();
+            let expected_policy = wrap_multisig_descriptor(
+                address_type,
+                &format!("{operator}(2,{})", policy_keys.join(",")),
+            );
+
+            let plan =
+                ledger_display_plan_from_descriptor(&descriptor).expect("Ledger display plan");
+
+            assert_eq!(plan.name, "2 of 2 Multisig");
+            assert_eq!(plan.policy_text, expected_policy);
+            assert_eq!(plan.change, branch == 1);
+            assert_eq!(plan.address_index, index);
+        }
+    }
+
+    #[test]
+    fn ledger_multisig_display_rejects_invalid_thresholds_and_key_count() {
+        let key = ledger_display_test_key_info(1, "48'/1'/0'/2'");
+        let descriptor = wrap_multisig_descriptor(
+            MultisigAddressType::Wit,
+            &format!("sortedmulti(1,{key}/0/0)"),
+        );
+        let valid = multisig_display_address_from_descriptor(&descriptor).unwrap();
+
+        for threshold in [0, 2] {
+            let mut multisig = valid.clone();
+            multisig.threshold = threshold;
+            let error =
+                ledger_multisig_display_plan(multisig).expect_err("invalid multisig threshold");
+            assert_eq!(error, "Invalid threshold or number of keys");
+        }
+
+        let mut empty = valid.clone();
+        empty.keys.clear();
+        let error = ledger_multisig_display_plan(empty).expect_err("empty multisig key set");
+        assert_eq!(error, "Invalid threshold or number of keys");
+
+        let mut too_many = valid;
+        too_many.keys = vec![too_many.keys[0].clone(); 17];
+        let error = ledger_multisig_display_plan(too_many).expect_err("too many multisig keys");
+        assert_eq!(error, "Invalid threshold or number of keys");
+    }
+
+    #[test]
+    fn ledger_multisig_display_rejects_unsupported_key_shapes() {
+        let key_a = ledger_display_test_key_info(1, "48'/1'/0'/2'");
+        let key_b = ledger_display_test_key_info(2, "48'/1'/0'/2'");
+        let long_origin = ledger_display_test_key_info(3, "48'/1'/0'/2'/3'");
+        let originless_xpub = sample_xpub();
+        let cases = [
+            (
+                "raw key",
+                "wsh(sortedmulti(1,[f5acc2fd/48h/1h/0h/2h]0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798))".to_owned(),
+                "Ledger multisig display requires extended public keys with origin information",
+            ),
+            (
+                "originless xpub",
+                format!("wsh(sortedmulti(1,{originless_xpub}/0/0))"),
+                "Ledger multisig display requires extended public keys with origin information",
+            ),
+            (
+                "wildcard",
+                format!("wsh(sortedmulti(1,{key_a}/0/0/*))"),
+                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
+            ),
+            (
+                "multipath",
+                format!("wsh(sortedmulti(1,{key_a}/<0;1>/0))"),
+                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
+            ),
+            (
+                "hardened suffix",
+                format!("wsh(sortedmulti(1,{key_a}/0/1'))"),
+                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
+            ),
+            (
+                "short suffix",
+                format!("wsh(sortedmulti(1,{key_a}/0))"),
+                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
+            ),
+            (
+                "long suffix",
+                format!("wsh(sortedmulti(1,{key_a}/0/0/1))"),
+                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
+            ),
+            (
+                "invalid branch",
+                format!("wsh(sortedmulti(1,{key_a}/2/0))"),
+                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
+            ),
+            (
+                "mismatched suffixes",
+                format!("wsh(sortedmulti(2,{key_a}/0/0,{key_b}/1/0))"),
+                "Ledger Bitcoin app requires all derivation paths to end with /0/*, or all with /1/* for multisig",
+            ),
+            (
+                "overlong origin",
+                format!("wsh(sortedmulti(1,{long_origin}/0/0))"),
+                "Ledger Bitcoin app requires extended keys with derivation length at most 4",
+            ),
+        ];
+
+        for (case, descriptor, expected) in cases {
+            let error = ledger_display_plan_from_descriptor(&descriptor)
+                .expect_err("unsupported Ledger multisig key");
+            assert_eq!(error, expected, "{case}");
+        }
+
+        let valid_descriptor = format!("wsh(sortedmulti(1,{key_a}/0/0))");
+        let mut multisig = multisig_display_address_from_descriptor(&valid_descriptor).unwrap();
+        let DescriptorPublicKey::XPub(xpub) = &mut multisig.keys[0] else {
+            panic!("xpub descriptor key");
+        };
+        xpub.derivation_path = DerivationPath::from(vec![
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index: 0x8000_0000 },
+        ]);
+        let error = ledger_multisig_display_plan(multisig).expect_err("out-of-range address index");
+        assert_eq!(
+            error,
+            "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig"
+        );
     }
 }

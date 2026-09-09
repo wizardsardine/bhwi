@@ -2,10 +2,10 @@
 use bhwi::keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED};
 #[cfg(feature = "ledger")]
 use bhwi::ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy};
-use bhwi::{
-    bitcoin::psbt::Psbt,
-    common::{MultisigAddressType, MultisigDisplayAddress},
-    passphrase::HostPassphrase,
+use bhwi::{bitcoin::psbt::Psbt, passphrase::HostPassphrase};
+use bhwi_async::display_address::{
+    DisplayAddressError, multisig_display_address_from_descriptor,
+    singlesig_display_address_from_descriptor,
 };
 #[cfg(feature = "ledger")]
 use bhwi_async::psbt::{merge_psbt_signatures, strip_legacy_witness_utxos};
@@ -19,7 +19,6 @@ use bitcoin::{
     Network, NetworkKind,
     base64::prelude::{BASE64_STANDARD, Engine as _},
     bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
-    secp256k1::{PublicKey as SecpPublicKey, XOnlyPublicKey},
 };
 use chrono::{Datelike, Local, Timelike};
 use clap::{ArgAction, ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
@@ -1721,7 +1720,10 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
             ))
         }
         HwiDisplayAddressRequest::Descriptor { descriptor } => {
-            match singlesig_display_address_from_descriptor(&mut device, &descriptor).await {
+            match singlesig_display_address_from_descriptor(&mut device, &descriptor)
+                .await
+                .map_err(display_address_error)
+            {
                 Ok(address) => Ok((address, None)),
                 Err(single_sig_error) => {
                     if device.device_type() == DeviceType::Ledger {
@@ -2193,7 +2195,8 @@ async fn ledger_multisig_display_address(
     device: &mut Device,
     descriptor: &str,
 ) -> Result<(DisplayAddress, DeviceContext), HwiError> {
-    let multisig = multisig_display_address_from_descriptor(descriptor)?;
+    let multisig =
+        multisig_display_address_from_descriptor(descriptor).map_err(display_address_error)?;
     let plan = ledger_multisig_display_plan(multisig)
         .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err))?;
     let registration = device
@@ -2267,244 +2270,11 @@ fn address_type_for(addr_type: HwiAddressType) -> bitcoin::address::AddressType 
     }
 }
 
-async fn singlesig_display_address_from_descriptor(
-    device: &mut Device,
-    descriptor: &str,
-) -> Result<DisplayAddress, HwiError> {
-    let descriptor = strip_descriptor_checksum(descriptor);
-    let parsed = parse_singlesig_display_descriptor(descriptor)?;
-    let fingerprint = device
-        .fingerprint()
-        .await
-        .map_err(|err| classify_device_error(&err))?;
-    if parsed.fingerprint != fingerprint {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Descriptor fingerprint does not match device: {descriptor}"),
-        ));
+fn display_address_error(err: DisplayAddressError) -> HwiError {
+    match err {
+        DisplayAddressError::Device(err) => classify_device_error(&err),
+        err => HwiError::new(HwiErrorCode::BadArgument, err.to_string()),
     }
-
-    let xpub = device
-        .device()
-        .get_extended_pubkey(parsed.origin_path.clone(), false)
-        .await
-        .map_err(|err| classify_anyhow_device_error(&anyhow::Error::new(err)))?;
-
-    if !descriptor_key_matches_xpub(&parsed.key, xpub) {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Key in descriptor does not match device: {descriptor}"),
-        ));
-    }
-
-    Ok(DisplayAddress::ByPath {
-        path: parsed.full_path,
-        display: true,
-        address_format: Some(address_type_for(parsed.addr_type)),
-    })
-}
-
-#[derive(Debug)]
-struct ParsedSingleSigDisplayDescriptor {
-    addr_type: HwiAddressType,
-    fingerprint: Fingerprint,
-    origin_path: DerivationPath,
-    full_path: DerivationPath,
-    key: String,
-}
-
-fn parse_singlesig_display_descriptor(
-    descriptor: &str,
-) -> Result<ParsedSingleSigDisplayDescriptor, HwiError> {
-    let (addr_type, key_expr) = if let Some(inner) = descriptor
-        .strip_prefix("sh(wpkh(")
-        .and_then(|value| value.strip_suffix("))"))
-    {
-        (HwiAddressType::ShWit, inner)
-    } else if let Some(inner) = descriptor
-        .strip_prefix("wpkh(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        (HwiAddressType::Wit, inner)
-    } else if let Some(inner) = descriptor
-        .strip_prefix("pkh(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        (HwiAddressType::Legacy, inner)
-    } else if let Some(inner) = descriptor
-        .strip_prefix("tr(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        (HwiAddressType::Tap, inner)
-    } else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Unsupported displayaddress descriptor: {descriptor}"),
-        ));
-    };
-
-    let Some(rest) = key_expr.strip_prefix('[') else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Descriptor missing origin info: {descriptor}"),
-        ));
-    };
-    let Some((origin, key_and_suffix)) = rest.split_once(']') else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Descriptor missing origin info: {descriptor}"),
-        ));
-    };
-    let (fingerprint, origin_path) = parse_key_origin(origin)?;
-    let (key, suffix_path) = split_key_suffix(key_and_suffix)?;
-    validate_singlesig_display_key(key)?;
-    let full_path = join_derivation_path(&origin_path, &suffix_path);
-
-    Ok(ParsedSingleSigDisplayDescriptor {
-        addr_type,
-        fingerprint,
-        origin_path,
-        full_path,
-        key: key.to_owned(),
-    })
-}
-
-fn validate_singlesig_display_key(key: &str) -> Result<(), HwiError> {
-    if SecpPublicKey::from_str(key).is_ok() || XOnlyPublicKey::from_str(key).is_ok() {
-        return Ok(());
-    }
-
-    Xpub::from_str(key).map(|_| ()).map_err(|err| {
-        let error = invalid_base58_character(key).map_or_else(
-            || err.to_string(),
-            |ch| format!("Character '{ch}' is not a valid base58 character"),
-        );
-        HwiError::new(HwiErrorCode::BadArgument, error)
-    })
-}
-
-fn invalid_base58_character(value: &str) -> Option<char> {
-    const BASE58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
-    value.chars().find(|ch| !BASE58_ALPHABET.contains(*ch))
-}
-
-fn multisig_display_address_from_descriptor(
-    descriptor: &str,
-) -> Result<MultisigDisplayAddress, HwiError> {
-    let descriptor = strip_descriptor_checksum(descriptor);
-    let (address_type, sorted, inner) =
-        parse_multisig_descriptor_envelope(descriptor).ok_or_else(|| {
-            HwiError::new(
-                HwiErrorCode::BadArgument,
-                format!("Unsupported displayaddress descriptor: {descriptor}"),
-            )
-        })?;
-
-    let mut parts = inner.split(',');
-    let threshold = parts
-        .next()
-        .ok_or_else(|| {
-            HwiError::new(
-                HwiErrorCode::BadArgument,
-                format!("Invalid multisig descriptor: {descriptor}"),
-            )
-        })?
-        .parse::<u8>()
-        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
-    let keys = parts
-        .map(|key| {
-            DescriptorPublicKey::from_str(key)
-                .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if keys.is_empty() || threshold == 0 || usize::from(threshold) > keys.len() {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "Either the redeem script provided is invalid or the keypaths provided are insufficient",
-        ));
-    }
-    Ok(MultisigDisplayAddress {
-        threshold,
-        address_type,
-        sorted,
-        keys,
-    })
-}
-
-fn parse_multisig_descriptor_envelope(
-    descriptor: &str,
-) -> Option<(MultisigAddressType, bool, &str)> {
-    let wrappers = [
-        ("sh(wsh(", "))", MultisigAddressType::ShWit),
-        ("wsh(", ")", MultisigAddressType::Wit),
-        ("sh(", ")", MultisigAddressType::Legacy),
-    ];
-    for (prefix, suffix, address_type) in wrappers {
-        let Some(inner) = descriptor
-            .strip_prefix(prefix)
-            .and_then(|value| value.strip_suffix(suffix))
-        else {
-            continue;
-        };
-        if let Some(inner) = inner
-            .strip_prefix("sortedmulti(")
-            .and_then(|value| value.strip_suffix(')'))
-        {
-            return Some((address_type, true, inner));
-        }
-        if let Some(inner) = inner
-            .strip_prefix("multi(")
-            .and_then(|value| value.strip_suffix(')'))
-        {
-            return Some((address_type, false, inner));
-        }
-    }
-    None
-}
-
-fn strip_descriptor_checksum(descriptor: &str) -> &str {
-    descriptor
-        .split_once('#')
-        .map_or(descriptor, |(desc, _)| desc)
-}
-
-fn parse_key_origin(origin: &str) -> Result<(Fingerprint, DerivationPath), HwiError> {
-    let (fingerprint, path) = origin
-        .split_once('/')
-        .map_or((origin, ""), |(fp, path)| (fp, path));
-    let fingerprint = Fingerprint::from_str(fingerprint)
-        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
-    let path = if path.is_empty() {
-        DerivationPath::master()
-    } else {
-        DerivationPath::from_str(&format!("m/{path}"))
-            .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?
-    };
-    Ok((fingerprint, path))
-}
-
-fn split_key_suffix(key_and_suffix: &str) -> Result<(&str, DerivationPath), HwiError> {
-    let Some((key, suffix)) = key_and_suffix.split_once('/') else {
-        return Ok((key_and_suffix, DerivationPath::master()));
-    };
-    let suffix = DerivationPath::from_str(&format!("m/{suffix}"))
-        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
-    Ok((key, suffix))
-}
-
-fn join_derivation_path(base: &DerivationPath, suffix: &DerivationPath) -> DerivationPath {
-    let mut children = base.as_ref().to_vec();
-    children.extend_from_slice(suffix.as_ref());
-    DerivationPath::from(children)
-}
-
-fn descriptor_key_matches_xpub(key: &str, xpub: Xpub) -> bool {
-    key == xpub.to_string()
-        || key.eq_ignore_ascii_case(&hex::encode(xpub.public_key.serialize()))
-        || key.eq_ignore_ascii_case(&hex::encode(
-            xpub.public_key.x_only_public_key().0.serialize(),
-        ))
 }
 
 /// Maps typed device errors from the async stack onto Python HWI's error
@@ -3054,9 +2824,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bhwi_async::signing::ledger::LedgerMultisigDisplayPlan;
-    use bitcoin::{bip32::Xpriv, secp256k1::Secp256k1};
     use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn display_address_errors_keep_python_hwi_codes() {
+        let parse = display_address_error(DisplayAddressError::UnsupportedDescriptor(
+            "wsh(x)".to_owned(),
+        ));
+        assert_eq!(parse.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(parse.error, "Unsupported displayaddress descriptor: wsh(x)");
+
+        let device = display_address_error(DisplayAddressError::Device(
+            bhwi_async::HWIDeviceError::new(std::io::Error::other("boom")),
+        ));
+        assert_eq!(device.code, HwiErrorCode::DeviceConnectionError.code());
+        assert_eq!(device.error, "hwi device error: boom");
+    }
 
     #[test]
     fn device_type_accepts_model_qualified_names() {
@@ -4500,259 +4283,6 @@ mod tests {
 
         assert_eq!(err.code, HwiErrorCode::BadArgument.code());
         assert_eq!(err.error, "Path must end with /*");
-    }
-
-    #[test]
-    fn parses_singlesig_display_descriptor() {
-        let descriptor = "sh(wpkh([f5acc2fd/49h/1h/0h]tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/0/7))#checksum";
-
-        let parsed = parse_singlesig_display_descriptor(strip_descriptor_checksum(descriptor))
-            .expect("display descriptor");
-
-        assert_eq!(parsed.addr_type, HwiAddressType::ShWit);
-        assert_eq!(
-            parsed.fingerprint,
-            Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd])
-        );
-        assert_eq!(
-            parsed.origin_path,
-            DerivationPath::from_str("m/49h/1h/0h").unwrap()
-        );
-        assert_eq!(
-            parsed.full_path,
-            DerivationPath::from_str("m/49h/1h/0h/0/7").unwrap()
-        );
-        assert_eq!(
-            parsed.key,
-            "tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT"
-        );
-    }
-
-    #[test]
-    fn display_descriptor_requires_origin() {
-        let err = parse_singlesig_display_descriptor("wpkh(tpubDD8d3xExampleKeyMaterial/0/7)")
-            .expect_err("missing origin");
-
-        assert_eq!(err.code, HwiErrorCode::BadArgument.code());
-        assert!(err.error.contains("Descriptor missing origin info"));
-    }
-
-    #[test]
-    fn display_descriptor_rejects_invalid_base58_key_like_python_hwi() {
-        let err = parse_singlesig_display_descriptor("wpkh([0f056943/84h/1h/0h]not_an_xpub/0/0)")
-            .expect_err("invalid key");
-
-        assert_eq!(err.code, HwiErrorCode::BadArgument.code());
-        assert_eq!(err.error, "Character '_' is not a valid base58 character");
-    }
-
-    #[test]
-    fn parses_coldcard_sortedmulti_display_descriptor() {
-        let descriptor = "sh(wsh(sortedmulti(2,[f5acc2fd/48h/1h/0h/0h/0]0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,[aaaaaaaa/48h/1h/1h/0h/0]03f028892bad7ed57d2fb57bf33081d5cfcf6f9ed3d3d7f159c2e2fff579dc341a)))";
-
-        let parsed = multisig_display_address_from_descriptor(descriptor)
-            .expect("multisig display descriptor");
-
-        assert_eq!(parsed.threshold, 2);
-        assert!(matches!(parsed.address_type, MultisigAddressType::ShWit));
-        assert!(parsed.sorted);
-        assert_eq!(parsed.keys.len(), 2);
-        let origins = parsed
-            .keys
-            .iter()
-            .map(|key| match key {
-                DescriptorPublicKey::Single(key) => key.origin.clone().unwrap().1,
-                _ => panic!("expected concrete public key"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            origins,
-            vec![
-                DerivationPath::from_str("m/48h/1h/0h/0h/0").unwrap(),
-                DerivationPath::from_str("m/48h/1h/1h/0h/0").unwrap(),
-            ]
-        );
-    }
-    fn ledger_display_test_key_info(seed: u8, origin: &str) -> String {
-        let secp = Secp256k1::new();
-        let master = Xpriv::new_master(NetworkKind::Test, &[seed; 32]).unwrap();
-        let path = DerivationPath::from_str(&format!("m/{origin}")).unwrap();
-        let xpub = Xpub::from_priv(&secp, &master.derive_priv(&secp, &path).unwrap());
-        format!("[{}/{origin}]{xpub}", master.fingerprint(&secp))
-    }
-
-    fn wrap_multisig_descriptor(address_type: MultisigAddressType, body: &str) -> String {
-        match address_type {
-            MultisigAddressType::Legacy => format!("sh({body})"),
-            MultisigAddressType::ShWit => format!("sh(wsh({body}))"),
-            MultisigAddressType::Wit => format!("wsh({body})"),
-        }
-    }
-
-    fn ledger_display_plan_from_descriptor(
-        descriptor: &str,
-    ) -> Result<LedgerMultisigDisplayPlan, String> {
-        let multisig =
-            multisig_display_address_from_descriptor(descriptor).map_err(|err| err.error)?;
-        ledger_multisig_display_plan(multisig)
-    }
-
-    #[test]
-    fn ledger_multisig_display_plans_cover_wrappers_operators_and_suffixes() {
-        let key_infos = [
-            ledger_display_test_key_info(1, "48'/1'/0'/2'"),
-            ledger_display_test_key_info(2, "48'/1'/0'/2'"),
-        ];
-        let cases = [
-            (MultisigAddressType::Legacy, true, 0, 0),
-            (MultisigAddressType::Legacy, false, 1, 1),
-            (MultisigAddressType::ShWit, true, 0, 7),
-            (MultisigAddressType::ShWit, false, 1, 8),
-            (MultisigAddressType::Wit, true, 0, 2_147_483_647),
-            (MultisigAddressType::Wit, false, 1, 42),
-        ];
-
-        for (address_type, sorted, branch, index) in cases {
-            let operator = if sorted { "sortedmulti" } else { "multi" };
-            let ordered_key_infos = if !sorted && matches!(address_type, MultisigAddressType::Wit) {
-                key_infos.iter().rev().collect::<Vec<_>>()
-            } else {
-                key_infos.iter().collect::<Vec<_>>()
-            };
-            let descriptor_keys = ordered_key_infos
-                .iter()
-                .map(|key| format!("{key}/{branch}/{index}"))
-                .collect::<Vec<_>>();
-            let descriptor = wrap_multisig_descriptor(
-                address_type,
-                &format!("{operator}(2,{})", descriptor_keys.join(",")),
-            );
-            let policy_keys = ordered_key_infos
-                .iter()
-                .map(|key| format!("{key}/<0;1>/*"))
-                .collect::<Vec<_>>();
-            let expected_policy = wrap_multisig_descriptor(
-                address_type,
-                &format!("{operator}(2,{})", policy_keys.join(",")),
-            );
-
-            let plan =
-                ledger_display_plan_from_descriptor(&descriptor).expect("Ledger display plan");
-
-            assert_eq!(plan.name, "2 of 2 Multisig");
-            assert_eq!(plan.policy_text, expected_policy);
-            assert_eq!(plan.change, branch == 1);
-            assert_eq!(plan.address_index, index);
-        }
-    }
-
-    #[test]
-    fn ledger_multisig_display_rejects_invalid_thresholds_and_key_count() {
-        let key = ledger_display_test_key_info(1, "48'/1'/0'/2'");
-        let descriptor = wrap_multisig_descriptor(
-            MultisigAddressType::Wit,
-            &format!("sortedmulti(1,{key}/0/0)"),
-        );
-        let valid = multisig_display_address_from_descriptor(&descriptor).unwrap();
-
-        for threshold in [0, 2] {
-            let mut multisig = valid.clone();
-            multisig.threshold = threshold;
-            let error =
-                ledger_multisig_display_plan(multisig).expect_err("invalid multisig threshold");
-            assert_eq!(error, "Invalid threshold or number of keys");
-        }
-
-        let mut empty = valid.clone();
-        empty.keys.clear();
-        let error = ledger_multisig_display_plan(empty).expect_err("empty multisig key set");
-        assert_eq!(error, "Invalid threshold or number of keys");
-
-        let mut too_many = valid;
-        too_many.keys = vec![too_many.keys[0].clone(); 17];
-        let error = ledger_multisig_display_plan(too_many).expect_err("too many multisig keys");
-        assert_eq!(error, "Invalid threshold or number of keys");
-    }
-
-    #[test]
-    fn ledger_multisig_display_rejects_unsupported_key_shapes() {
-        let key_a = ledger_display_test_key_info(1, "48'/1'/0'/2'");
-        let key_b = ledger_display_test_key_info(2, "48'/1'/0'/2'");
-        let long_origin = ledger_display_test_key_info(3, "48'/1'/0'/2'/3'");
-        let originless_xpub = sample_xpub();
-        let cases = [
-            (
-                "raw key",
-                "wsh(sortedmulti(1,[f5acc2fd/48h/1h/0h/2h]0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798))".to_owned(),
-                "Ledger multisig display requires extended public keys with origin information",
-            ),
-            (
-                "originless xpub",
-                format!("wsh(sortedmulti(1,{originless_xpub}/0/0))"),
-                "Ledger multisig display requires extended public keys with origin information",
-            ),
-            (
-                "wildcard",
-                format!("wsh(sortedmulti(1,{key_a}/0/0/*))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "multipath",
-                format!("wsh(sortedmulti(1,{key_a}/<0;1>/0))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "hardened suffix",
-                format!("wsh(sortedmulti(1,{key_a}/0/1'))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "short suffix",
-                format!("wsh(sortedmulti(1,{key_a}/0))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "long suffix",
-                format!("wsh(sortedmulti(1,{key_a}/0/0/1))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "invalid branch",
-                format!("wsh(sortedmulti(1,{key_a}/2/0))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "mismatched suffixes",
-                format!("wsh(sortedmulti(2,{key_a}/0/0,{key_b}/1/0))"),
-                "Ledger Bitcoin app requires all derivation paths to end with /0/*, or all with /1/* for multisig",
-            ),
-            (
-                "overlong origin",
-                format!("wsh(sortedmulti(1,{long_origin}/0/0))"),
-                "Ledger Bitcoin app requires extended keys with derivation length at most 4",
-            ),
-        ];
-
-        for (case, descriptor, expected) in cases {
-            let error = ledger_display_plan_from_descriptor(&descriptor)
-                .expect_err("unsupported Ledger multisig key");
-            assert_eq!(error, expected, "{case}");
-        }
-
-        let valid_descriptor = format!("wsh(sortedmulti(1,{key_a}/0/0))");
-        let mut multisig = multisig_display_address_from_descriptor(&valid_descriptor).unwrap();
-        let DescriptorPublicKey::XPub(xpub) = &mut multisig.keys[0] else {
-            panic!("xpub descriptor key");
-        };
-        xpub.derivation_path = DerivationPath::from(vec![
-            ChildNumber::Normal { index: 0 },
-            ChildNumber::Normal { index: 0x8000_0000 },
-        ]);
-        let error = ledger_multisig_display_plan(multisig).expect_err("out-of-range address index");
-        assert_eq!(
-            error,
-            "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig"
-        );
     }
 
     #[test]
