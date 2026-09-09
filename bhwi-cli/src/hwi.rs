@@ -1452,13 +1452,9 @@ async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
 
     let context = match device.device_type() {
         #[cfg(feature = "keepkey")]
-        DeviceType::KeepKey => bhwi::common::DeviceContext::KeepKeyManagement(
-            bhwi::keepkey::ManagementContext::Pin(pin),
-        ),
+        DeviceType::KeepKey => bhwi_async::management::keepkey_pin_context(pin),
         #[cfg(feature = "trezor")]
-        DeviceType::Trezor => {
-            bhwi::common::DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Pin(pin))
-        }
+        DeviceType::Trezor => bhwi_async::management::trezor_pin_context(pin),
         #[allow(unreachable_patterns)]
         device_type => {
             let _ = pin;

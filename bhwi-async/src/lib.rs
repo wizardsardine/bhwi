@@ -11,6 +11,8 @@ pub mod jade;
 pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
+#[cfg(any(feature = "bitbox", feature = "trezor"))]
+pub mod management;
 pub mod psbt;
 pub mod signing;
 pub mod transport;

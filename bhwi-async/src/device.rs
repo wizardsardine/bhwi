@@ -580,11 +580,11 @@ mod tests {
     }
 
     #[test]
-    fn only_trezor_reports_device_info() {
+    fn only_the_trezor_family_reports_device_info() {
         for device_type in DeviceType::ALL {
             assert_eq!(
                 reports_device_info(device_type),
-                device_type == DeviceType::Trezor,
+                matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor),
                 "{device_type}"
             );
         }
