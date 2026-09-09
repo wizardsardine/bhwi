@@ -2,7 +2,7 @@
 use anyhow::Context;
 use anyhow::Result;
 #[cfg(feature = "bitbox")]
-use bhwi::bitbox::{ManagementContext, SetupEntropy, SetupMode};
+use bhwi::bitbox::{SetupEntropy, SetupMode};
 use bhwi::common::DeviceContext;
 #[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 use chrono::Local;
@@ -12,46 +12,40 @@ use rand_core::{OsRng, RngCore};
 pub fn trezor_setup_context() -> DeviceContext {
     let mut host_entropy = [0; 32];
     OsRng.fill_bytes(&mut host_entropy);
-    DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Setup { host_entropy })
+    bhwi_async::management::trezor_setup_context(host_entropy)
 }
 
 #[cfg(feature = "trezor")]
 pub fn trezor_pin_context(positions: String) -> Result<DeviceContext> {
-    let pin = bhwi::trezor::HostPin::new(positions)?;
-    Ok(DeviceContext::TrezorManagement(
-        bhwi::trezor::ManagementContext::Pin(pin),
-    ))
+    Ok(bhwi_async::management::trezor_pin_context_from_positions(
+        positions,
+    )?)
 }
 
 #[cfg(feature = "trezor")]
 pub fn trezor_restore_context() -> Result<DeviceContext> {
     let u2f_counter = u2f_counter_from(Local::now().timestamp())?;
-    Ok(DeviceContext::TrezorManagement(
-        bhwi::trezor::ManagementContext::Restore { u2f_counter },
-    ))
+    Ok(bhwi_async::management::trezor_restore_context(u2f_counter))
 }
 
 #[cfg(feature = "keepkey")]
 pub fn keepkey_setup_context() -> DeviceContext {
     let mut host_entropy = [0; 32];
     OsRng.fill_bytes(&mut host_entropy);
-    DeviceContext::KeepKeyManagement(bhwi::keepkey::ManagementContext::Setup { host_entropy })
+    bhwi_async::management::keepkey_setup_context(host_entropy)
 }
 
 #[cfg(feature = "keepkey")]
 pub fn keepkey_pin_context(positions: String) -> Result<DeviceContext> {
-    let pin = bhwi::keepkey::HostPin::new(positions)?;
-    Ok(DeviceContext::KeepKeyManagement(
-        bhwi::keepkey::ManagementContext::Pin(pin),
-    ))
+    Ok(bhwi_async::management::keepkey_pin_context_from_positions(
+        positions,
+    )?)
 }
 
 #[cfg(feature = "keepkey")]
 pub fn keepkey_restore_context() -> Result<DeviceContext> {
     let u2f_counter = u2f_counter_from(Local::now().timestamp())?;
-    Ok(DeviceContext::KeepKeyManagement(
-        bhwi::keepkey::ManagementContext::Restore { u2f_counter },
-    ))
+    Ok(bhwi_async::management::keepkey_restore_context(u2f_counter))
 }
 
 #[cfg(any(feature = "keepkey", feature = "trezor"))]
@@ -71,21 +65,19 @@ pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
             entropy: SetupEntropy::new(entropy),
         }
     };
-    Ok(DeviceContext::BitBoxManagement(ManagementContext::Setup {
+    Ok(bhwi_async::management::bitbox_setup_context(
         mode,
         timestamp,
         timezone_offset,
-    }))
+    ))
 }
 
 #[cfg(feature = "bitbox")]
 pub fn bitbox_restore_context() -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
-    Ok(DeviceContext::BitBoxManagement(
-        ManagementContext::Restore {
-            timestamp,
-            timezone_offset,
-        },
+    Ok(bhwi_async::management::bitbox_restore_context(
+        timestamp,
+        timezone_offset,
     ))
 }
 
@@ -104,18 +96,26 @@ fn timestamp_and_timezone_offset_from(timestamp: i64, timezone_offset: i32) -> R
 #[cfg(all(test, feature = "bitbox"))]
 mod tests {
     use super::*;
+    use bhwi::bitbox::ManagementContext;
 
     #[test]
     fn simulator_setup_uses_mnemonic_restore_without_entropy() {
-        let context = bitbox_setup_context(true).unwrap();
         assert!(matches!(
-            context,
+            bitbox_setup_context(true).unwrap(),
             DeviceContext::BitBoxManagement(ManagementContext::Setup {
                 mode: SetupMode::RestoreFromMnemonic,
                 ..
             })
         ));
+        assert!(matches!(
+            bitbox_setup_context(false).unwrap(),
+            DeviceContext::BitBoxManagement(ManagementContext::Setup {
+                mode: SetupMode::NewWallet { .. },
+                ..
+            })
+        ));
     }
+
     #[test]
     fn timestamp_and_timezone_offset_preserves_seconds_east_of_utc() {
         assert_eq!(
