@@ -44,7 +44,8 @@ pub use bhwi_async::Info;
 pub use bhwi_async::device::{
     Device, DeviceManager, DeviceScan, DeviceSelector, DeviceSource, DeviceType,
     HostInteractionFactory, NoUsableDevice, PairingCodePrompt, ScanEntry, SelectError,
-    SkippedDevice, is_user_cancelled, networks_string, no_device,
+    SkippedDevice, can_sign_taproot, is_user_cancelled, networks_string, no_device,
+    reports_device_info,
 };
 pub use error::{NativeError, NativeResult};
 
