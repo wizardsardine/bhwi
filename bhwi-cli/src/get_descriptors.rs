@@ -3,7 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 pub use bhwi_async::descriptors::*;
-use miniscript::{Descriptor, DescriptorPublicKey, descriptor::DescriptorType};
+use miniscript::{Descriptor, DescriptorPublicKey};
 use serde::{Serialize, Serializer};
 
 use crate::{OutputFormat, select_device};
@@ -95,32 +95,13 @@ impl DescriptorOutput for DeviceManager {
         };
         let network = self.selector.network;
         let fingerprint = device.fingerprint().await?;
-        let dev = device.device();
-        let mut receive = vec![];
-        let mut internal = vec![];
-        for desc_type in [
-            DescriptorType::Pkh,
-            DescriptorType::Wpkh,
-            DescriptorType::ShWpkh,
-            DescriptorType::Tr,
-        ] {
-            let opts_receive = GetDescriptorOptions::with_account(
-                fingerprint,
-                account.unwrap_or(0),
-                false,
-                desc_type,
-                network,
-            );
-            let opts_internal = GetDescriptorOptions::with_account(
-                fingerprint,
-                account.unwrap_or(0),
-                true,
-                desc_type,
-                network,
-            );
-            receive.push(get_descriptor(dev.as_mut(), opts_receive).await?);
-            internal.push(get_descriptor(dev.as_mut(), opts_internal).await?);
-        }
+        let PubkeyDescriptors { receive, internal } = get_pubkey_descriptors(
+            device.device().as_mut(),
+            fingerprint,
+            account.unwrap_or(0),
+            network,
+        )
+        .await?;
         match format {
             Some(OutputFormat::Pretty) => {
                 let header = format!("{:<10} | {:<120}", "Purpose", "Descriptor");
