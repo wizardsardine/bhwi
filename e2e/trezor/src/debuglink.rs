@@ -1,4 +1,5 @@
 use std::io;
+use std::net::UdpSocket as StdUdpSocket;
 use std::time::Duration;
 
 use bhwi::trezor::api;
@@ -38,6 +39,38 @@ pub fn input_reports(text: &str) -> Vec<[u8; REPORT_SIZE]> {
     payload.push(text.len() as u8);
     payload.extend_from_slice(text.as_bytes());
     decision_reports(&payload)
+}
+
+fn send_sync(socket: &StdUdpSocket, reports: Vec<[u8; REPORT_SIZE]>) -> io::Result<()> {
+    for report in reports {
+        socket.send(&report)?;
+    }
+    Ok(())
+}
+
+pub fn drive_model_t_recovery(pin: &str, mnemonic: &str) -> io::Result<()> {
+    let screen = Duration::from_millis(1200);
+    let key = Duration::from_millis(350);
+    let socket = StdUdpSocket::bind("127.0.0.1:0")?;
+    socket.connect(DEFAULT_DEBUGLINK_ADDR)?;
+
+    std::thread::sleep(screen);
+    send_sync(&socket, button_reports(DebugButton::Yes))?;
+    std::thread::sleep(screen);
+    send_sync(&socket, input_reports(pin))?;
+    std::thread::sleep(screen);
+    send_sync(&socket, input_reports(pin))?;
+    std::thread::sleep(screen);
+    send_sync(&socket, input_reports("12"))?;
+    std::thread::sleep(screen);
+    send_sync(&socket, button_reports(DebugButton::Yes))?;
+    std::thread::sleep(screen);
+    for word in mnemonic.split_whitespace() {
+        send_sync(&socket, input_reports(word))?;
+        std::thread::sleep(key);
+    }
+    std::thread::sleep(screen);
+    send_sync(&socket, button_reports(DebugButton::Yes))
 }
 
 fn decision_reports(payload: &[u8]) -> Vec<[u8; REPORT_SIZE]> {
