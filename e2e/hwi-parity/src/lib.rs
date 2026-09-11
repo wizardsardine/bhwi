@@ -3684,11 +3684,60 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         if device_type == "keepkey" {
             cases.extend(keepkey_multisig_display_cases(device_type, &fingerprint)?);
         }
+        if device_type == "ledger" {
+            cases.extend(ledger_multisig_display_cases(device_type)?);
+        }
         if device_type == "coldcard" {
             for wallet in coldcard_multisig_display_wallets(device_type, &fingerprint)? {
                 let args = displayaddress_desc_args(device_type, &wallet.display_descriptor);
                 cases.push(DisplayAddressCase::registered(args.clone(), wallet));
                 cases.push(DisplayAddressCase::unregistered(args));
+            }
+        }
+
+        Ok(cases)
+    }
+
+    fn ledger_multisig_display_cases(device_type: &str) -> Result<Vec<DisplayAddressCase>> {
+        let fingerprint = reference_fingerprint(device_type)?;
+        let secp = Secp256k1::new();
+        let mut cases = Vec::new();
+
+        for (wrapper, account_path, origin) in [
+            (
+                LedgerMultisigWrapper::Legacy,
+                "m/48'/1'/0'/0'",
+                "48h/1h/0h/0h",
+            ),
+            (
+                LedgerMultisigWrapper::ShWit,
+                "m/48'/1'/0'/1'",
+                "48h/1h/0h/1h",
+            ),
+            (LedgerMultisigWrapper::Wit, "m/48'/1'/0'/2'", "48h/1h/0h/2h"),
+        ] {
+            let device_path = DerivationPath::from_str(account_path)?;
+            let device_xpub = reference_xpub(device_type, account_path)?;
+            let (cosigner_fingerprint, cosigner_xpub, _) =
+                ledger_multisig_cosigner(&secp, device_xpub, fingerprint, &device_path)?;
+            let device_key = format!("[{fingerprint}/{origin}]{device_xpub}/0/0");
+            let cosigner_key = format!("[{cosigner_fingerprint}/{origin}]{cosigner_xpub}/0/0");
+            let sorted = format!("sortedmulti(2,{device_key},{cosigner_key})");
+            let descriptor = match wrapper {
+                LedgerMultisigWrapper::Legacy => format!("sh({sorted})"),
+                LedgerMultisigWrapper::ShWit => format!("sh(wsh({sorted}))"),
+                LedgerMultisigWrapper::Wit => format!("wsh({sorted})"),
+            };
+            cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &descriptor,
+            )));
+
+            if matches!(wrapper, LedgerMultisigWrapper::Wit) {
+                cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                    device_type,
+                    &format!("wsh(multi(2,{cosigner_key},{device_key}))"),
+                )));
             }
         }
 
@@ -4023,7 +4072,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
 
     fn set_ledger_displayaddress_automation() -> Result<()> {
         let automation = serde_json::from_str(include_str!(
-            "../../ledger/automations/display_address.json"
+            "../../ledger/automations/register_wallet_accept.json"
         ))?;
         post_speculos_automation(&automation)
     }
