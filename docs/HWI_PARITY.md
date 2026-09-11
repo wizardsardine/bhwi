@@ -72,11 +72,6 @@ device matches. With a device attached an invalid path is `-7` (except BitBox
 an unknown `-t` with `-d` (and no fingerprint) is `-4` from the `get_client`
 path. `enumerate` ignores an unrecognized `-t`, like upstream.
 
-Known divergence: values rejected by a numeric value parser, such as
-`getkeypool notanum 5`, stay on the runtime path and exit `0` with code `-7`
-where upstream exits `2` with code `-2`. That difference is tracked
-separately.
-
 ## Final acceptance gate
 
 Parity is accepted only when the unmodified Bitcoin Core HWI 3.2.0 device

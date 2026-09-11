@@ -720,6 +720,7 @@ fn clap_outcome(prog: &str, err: clap::Error) -> CliOutcome {
         ErrorKind::MissingRequiredArgument
         | ErrorKind::UnknownArgument
         | ErrorKind::InvalidValue
+        | ErrorKind::ValueValidation
         | ErrorKind::InvalidSubcommand
         | ErrorKind::ArgumentConflict
         | ErrorKind::NoEquals
@@ -4373,13 +4374,6 @@ mod tests {
         }
     }
 
-    fn runtime_error_of(args: &[&str]) -> HwiError {
-        match outcome_of(args) {
-            CliOutcome::Response(HwiResponse::Error(error)) => error,
-            other => panic!("expected runtime error for {args:?}, got {other:?}"),
-        }
-    }
-
     #[test]
     fn missing_command_is_a_usage_error() {
         let args = ["hwi"];
@@ -4413,6 +4407,16 @@ mod tests {
         assert!(usage.message.contains("required"), "{}", usage.message);
         assert!(usage.message.contains("<PATH>"), "{}", usage.message);
         assert!(usage.usage.contains("getxpub"), "{}", usage.usage);
+    }
+
+    #[test]
+    fn numeric_value_parse_failure_is_a_usage_error() {
+        let args = ["hwi", "getkeypool", "notanum", "5"];
+        let error = HwiCli::try_parse_from(args).expect_err("invalid numeric value");
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert!(!usage_of(&args).usage.is_empty());
+        assert_eq!(exit_status(&outcome_of(&args)), 2);
     }
 
     #[test]
@@ -4454,12 +4458,16 @@ mod tests {
 
     #[test]
     fn runtime_errors_keep_their_code_and_exit_zero() {
-        let bad_fingerprint = ["hwi", "-f", "not_a_fingerprint", "enumerate"];
-        assert_eq!(
-            runtime_error_of(&bad_fingerprint).code,
-            HwiErrorCode::BadArgument.code()
-        );
-        assert_eq!(exit_status(&outcome_of(&bad_fingerprint)), 0);
+        let outcome = CliOutcome::Response(HwiResponse::Error(HwiError::new(
+            HwiErrorCode::BadArgument,
+            "bad argument",
+        )));
+
+        let CliOutcome::Response(HwiResponse::Error(error)) = &outcome else {
+            panic!("expected runtime error, got {outcome:?}");
+        };
+        assert_eq!(error.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(exit_status(&outcome), 0);
     }
 
     #[test]

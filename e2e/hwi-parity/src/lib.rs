@@ -534,12 +534,13 @@ mod tests {
             return Ok(());
         }
 
-        let cases: [&[&str]; 7] = [
+        let cases: [&[&str]; 8] = [
             &[],
             &["boguscmd"],
             &["getxpub"],
             &["--chain", "foo", "enumerate"],
             &["displayaddress"],
+            &["getkeypool", "notanum", "5"],
             &["getmasterxpub", "--addr-type", "bogus"],
             &["--bogus", "enumerate"],
         ];
