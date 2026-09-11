@@ -489,11 +489,15 @@ jobs:
   trezor-e2e:
     needs: nix-flake
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
-        model: [trezor-one, trezor-t]
+        include:
+          - model: trezor-one
+            upstream_app: hwi-upstream-trezor
+          - model: trezor-t
+            upstream_app: hwi-upstream-trezor-t
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
@@ -543,9 +547,84 @@ jobs:
       - name: Run HWI parity tests
         run: |
           set -o pipefail
-          nix run .#hwi-parity-trezor -- -- --test-threads=1 2>&1 | tee trezor-hwi-parity.log || {
+          timeout 20m nix run .#hwi-parity-trezor -- -- --test-threads=1 2>&1 | tee trezor-hwi-parity.log || {
             bash nix/scripts/emit-gh-error-log.sh "Trezor HWI parity log" trezor-hwi-parity.log
             cat trezor-hwi-parity.log || true
+            exit 1
+          }
+      - name: Stop shared Trezor emulator
+        run: |
+          bash nix/scripts/stop-emulator.sh trezor.pid
+          rm -f trezor.pid
+      - name: Run direct Model T restore lifecycle
+        if: matrix.model == 'trezor-t'
+        run: |
+          set -o pipefail
+          profile="$RUNNER_TEMP/trezor-direct-restore"
+          rm -rf "$profile"
+          mkdir -p "$profile"
+          TREZOR_PROFILE_DIR="$profile" nix run .#trezor-t > trezor-direct-restore.log 2>&1 &
+          echo $! > trezor.pid
+          bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 21324 120 "$(cat trezor.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Direct Trezor restore startup log" trezor-direct-restore.log
+            cat trezor-direct-restore.log || true
+            exit 1
+          }
+          TREZOR_MODEL=trezor-t timeout 10m nix develop .#trezor -c cargo test -p bhwi-e2e-trezor tests::can_restore_from_a_recovery_phrase -- --ignored --exact --test-threads=1 2>&1 | tee trezor-direct-restore-test.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Direct Trezor restore lifecycle log" trezor-direct-restore-test.log
+            cat trezor-direct-restore-test.log || true
+            exit 1
+          }
+          bash nix/scripts/stop-emulator.sh trezor.pid
+          rm -f trezor.pid
+      - name: Run native CLI Model T restore lifecycle
+        if: matrix.model == 'trezor-t'
+        run: |
+          set -o pipefail
+          profile="$RUNNER_TEMP/trezor-cli-restore"
+          rm -rf "$profile"
+          mkdir -p "$profile"
+          TREZOR_PROFILE_DIR="$profile" nix run .#trezor-t > trezor-cli-restore.log 2>&1 &
+          echo $! > trezor.pid
+          bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 21324 120 "$(cat trezor.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Native CLI Trezor restore startup log" trezor-cli-restore.log
+            cat trezor-cli-restore.log || true
+            exit 1
+          }
+          BHWI_BIN="$PWD/target/debug/bhwi" timeout 10m nix develop .#trezor -c cargo test -p bhwi-e2e-cli trezor::trezor_restore_management_lifecycle -- --ignored --exact --test-threads=1 2>&1 | tee trezor-cli-restore-test.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Native CLI Trezor restore lifecycle log" trezor-cli-restore-test.log
+            cat trezor-cli-restore-test.log || true
+            exit 1
+          }
+          bash nix/scripts/stop-emulator.sh trezor.pid
+          rm -f trezor.pid
+      - name: Run candidate HWI Model T restore lifecycle
+        if: matrix.model == 'trezor-t'
+        run: |
+          set -o pipefail
+          profile="$RUNNER_TEMP/trezor-hwi-restore"
+          rm -rf "$profile"
+          mkdir -p "$profile"
+          TREZOR_PROFILE_DIR="$profile" nix run .#trezor-t > trezor-hwi-restore.log 2>&1 &
+          echo $! > trezor.pid
+          bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 21324 120 "$(cat trezor.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Candidate HWI Trezor restore startup log" trezor-hwi-restore.log
+            cat trezor-hwi-restore.log || true
+            exit 1
+          }
+          TREZOR_MODEL=trezor-t timeout 10m nix run .#hwi-parity-trezor -- tests::candidate_trezor_restore_management_lifecycle -- --ignored --exact --test-threads=1 2>&1 | tee trezor-hwi-restore-test.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Candidate HWI Trezor restore lifecycle log" trezor-hwi-restore-test.log
+            cat trezor-hwi-restore-test.log || true
+            exit 1
+          }
+          bash nix/scripts/stop-emulator.sh trezor.pid
+          rm -f trezor.pid
+      - name: Run upstream HWI Trezor suite
+        run: |
+          set -o pipefail
+          timeout 90m nix run .#${{ matrix.upstream_app }} 2>&1 | tee trezor-hwi-upstream.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Trezor upstream HWI log" trezor-hwi-upstream.log
+            cat trezor-hwi-upstream.log || true
             exit 1
           }
       - name: Stop Trezor emulator
