@@ -383,6 +383,11 @@
               + ''
 
                 set -euo pipefail
+                # The harness asserts a spawned command writes nothing to
+                # stderr, and sh warns there when the inherited locale is not
+                # generated in the shell.
+                export LC_ALL=C
+                export LANG=C
                 export REFERENCE_HWI_BIN="${pkgs.lib.getExe hwiReferenceBhwi}"
                 export HWI_BIN="''${HWI_BIN:-''${CARGO_TARGET_DIR:-$PWD/target}/debug/hwi}"
                 export HWI_PARITY_DEVICE_TYPE="${device}"
