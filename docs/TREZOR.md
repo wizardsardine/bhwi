@@ -83,19 +83,71 @@ BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#trezor \
   -c cargo test -p bhwi-e2e-cli trezor -- --test-threads=1
 ```
 
-Restore is covered by two `#[ignore]`d lifecycle tests that each require a fresh
-uninitialized Model T and leave it initialized:
+## Model T restore lifecycles
+
+Emulator CI runs three ignored restore checks. Each check gets its own freshly
+cleared `TREZOR_PROFILE_DIR`, starts an uninitialized Model T without running
+`trezor-init`, and stops that emulator before the next check starts. Set
+`RUNNER_TEMP` to a scratch directory when reproducing the CI sequence locally.
+
+### Direct device
 
 ```sh
-TREZOR_MODEL=trezor-t cargo test -p bhwi-e2e-trezor \
-  can_restore_from_a_recovery_phrase -- --ignored
-BHWI_BIN="$PWD/target/debug/bhwi" cargo test -p bhwi-e2e-cli \
-  trezor_restore_management_lifecycle -- --ignored
+profile="$RUNNER_TEMP/trezor-direct-restore"
+rm -rf "$profile"
+mkdir -p "$profile"
+TREZOR_PROFILE_DIR="$profile" nix run .#trezor-t > trezor-direct-restore.log 2>&1 &
+echo $! > trezor.pid
+bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 21324 120 "$(cat trezor.pid)"
+TREZOR_MODEL=trezor-t timeout 10m nix develop .#trezor -c cargo test -p bhwi-e2e-trezor tests::can_restore_from_a_recovery_phrase -- --ignored --exact --test-threads=1
+bash nix/scripts/stop-emulator.sh trezor.pid
+rm -f trezor.pid
 ```
 
-They restore the Python HWI test mnemonic, so the device ends on fingerprint
-`95d8f670` rather than the `trezor-init` seed. Re-run `trezor-init` on a wiped
-emulator before the regular suites.
+### Native CLI
+
+```sh
+profile="$RUNNER_TEMP/trezor-cli-restore"
+rm -rf "$profile"
+mkdir -p "$profile"
+TREZOR_PROFILE_DIR="$profile" nix run .#trezor-t > trezor-cli-restore.log 2>&1 &
+echo $! > trezor.pid
+bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 21324 120 "$(cat trezor.pid)"
+BHWI_BIN="$PWD/target/debug/bhwi" timeout 10m nix develop .#trezor -c cargo test -p bhwi-e2e-cli trezor::trezor_restore_management_lifecycle -- --ignored --exact --test-threads=1
+bash nix/scripts/stop-emulator.sh trezor.pid
+rm -f trezor.pid
+```
+
+### Candidate `hwi`
+
+```sh
+profile="$RUNNER_TEMP/trezor-hwi-restore"
+rm -rf "$profile"
+mkdir -p "$profile"
+TREZOR_PROFILE_DIR="$profile" nix run .#trezor-t > trezor-hwi-restore.log 2>&1 &
+echo $! > trezor.pid
+bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 21324 120 "$(cat trezor.pid)"
+TREZOR_MODEL=trezor-t timeout 10m nix run .#hwi-parity-trezor -- tests::candidate_trezor_restore_management_lifecycle -- --ignored --exact --test-threads=1
+bash nix/scripts/stop-emulator.sh trezor.pid
+rm -f trezor.pid
+```
+
+All three restore the Python HWI test mnemonic and leave the device initialized
+with fingerprint `95d8f670`. The ordinary seeded suites instead depend on the
+`trezor-init` seed.
+
+## Upstream HWI gates
+
+Run each model's tailored upstream gate only after stopping the shared seeded
+emulator and any restore emulator:
+
+```sh
+timeout 90m nix run .#hwi-upstream-trezor
+timeout 90m nix run .#hwi-upstream-trezor-t
+```
+
+Do not keep a shared Trezor emulator running during either upstream gate. Each
+gate starts the prepared emulator for its own model.
 
 ## Upstream references
 
