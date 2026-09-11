@@ -407,6 +407,8 @@ mod tests {
         transaction::Version as TxVersion,
     };
 
+    const BITBOX_FINGERPRINT: &str = "4c00739d";
+    const BITBOX_PATH: &str = "127.0.0.1:15423";
     const KEEPKEY_FINGERPRINT: &str = "95d8f670";
     const KEEPKEY_PIN: &str = "1234";
     const KEEPKEY_XPUB_44: &str = "tpubDCknDegFqAdP4V2AhHhs635DPe8N1aTjfKE9m2UFbdej8zmeNbtqDzK59SxnsYSRSx5uS3AujbwgANUiAk4oHmDNUKoGGkWWUY6c48WgjEx";
@@ -1224,13 +1226,6 @@ mod tests {
             return Ok(());
         }
 
-        let base = [
-            "--emulators",
-            "--chain",
-            "test",
-            "--device-type",
-            "bitbox02",
-        ];
         for command in [
             vec!["setup"],
             vec![
@@ -1243,18 +1238,96 @@ mod tests {
             vec!["restore"],
             vec!["--interactive", "restore", "--word_count", "12"],
         ] {
-            assert_error_json_parity(base.into_iter().chain(command).map(str::to_owned).collect())?;
+            assert_error_json_parity(bitbox_hwi_args(&command))?;
         }
 
         // The reference toggles the setting once and the candidate toggles it back, so the
         // shared simulator is returned to its original state after the parity assertion.
-        assert_json_parity(
-            base.into_iter()
-                .chain(["togglepassphrase"])
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-        )?;
+        assert_json_parity(bitbox_hwi_args(&["togglepassphrase"]))?;
         Ok(())
+    }
+
+    fn bitbox_hwi_args(command: &[&str]) -> Vec<String> {
+        [
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            "bitbox02",
+            "--device-path",
+            BITBOX_PATH,
+        ]
+        .into_iter()
+        .chain(command.iter().copied())
+        .map(str::to_owned)
+        .collect()
+    }
+
+    fn run_candidate_bitbox(command: &[&str]) -> Result<HwiOutput> {
+        let output = HwiBinary::candidate()?.run(bitbox_hwi_args(command))?;
+        assert_success("candidate", &output)?;
+        Ok(output)
+    }
+
+    fn assert_candidate_bitbox_state(initialized: bool) -> Result<()> {
+        let output = run_candidate_bitbox(&["enumerate"])?;
+        let device = assert_enumerate_contains_device("candidate", &output.json, "bitbox02")?;
+        if initialized {
+            assert_eq!(device["fingerprint"], BITBOX_FINGERPRINT);
+            assert!(device.get("error").is_none());
+            assert!(device.get("code").is_none());
+        } else {
+            assert!(device.get("fingerprint").is_none());
+            assert_eq!(device["error"], "Not initialized");
+            assert_eq!(device["code"], -18);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a fresh uninitialized simulator and ends by resetting it"]
+    fn candidate_bitbox_setup_management_lifecycle() -> Result<()> {
+        if env::var("HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("bitbox02")
+        {
+            return Ok(());
+        }
+
+        assert_candidate_bitbox_state(false)?;
+        let setup = run_candidate_bitbox(&["--interactive", "setup", "--label", "BHWI HWI Setup"])?;
+        assert_eq!(setup.json, serde_json::json!({"success": true}));
+        assert_candidate_bitbox_state(true)?;
+
+        for _ in 0..2 {
+            let toggle = run_candidate_bitbox(&["togglepassphrase"])?;
+            assert_eq!(toggle.json, serde_json::json!({"success": true}));
+        }
+
+        let wipe = run_candidate_bitbox(&["wipe"])?;
+        assert_eq!(wipe.json, serde_json::json!({"success": true}));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a separate fresh uninitialized simulator"]
+    fn candidate_bitbox_restore_management_lifecycle() -> Result<()> {
+        if env::var("HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("bitbox02")
+        {
+            return Ok(());
+        }
+
+        assert_candidate_bitbox_state(false)?;
+        let restore = run_candidate_bitbox(&[
+            "--interactive",
+            "restore",
+            "--word_count",
+            "24",
+            "--label",
+            "BHWI HWI Restore",
+        ])?;
+        assert_eq!(restore.json, serde_json::json!({"success": true}));
+        assert_candidate_bitbox_state(true)
     }
 
     struct KeepKeyPassphraseStateGuard {

@@ -900,6 +900,12 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
                                 // Deriving it required the passphrase, so it has been sent.
                                 needs_passphrase_sent = false;
                             }
+                            Err(err)
+                                if is_uninitialized_bitbox_error(device.device_type(), &err) =>
+                            {
+                                error = Some("Not initialized".to_owned());
+                                code = Some(HwiErrorCode::DeviceNotInitialized.code());
+                            }
                             Err(err) => {
                                 let classified = classify_anyhow_device_error(&err);
                                 error = Some(classified.error);
@@ -908,6 +914,10 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
                         }
                     }
                 }
+            }
+            Err(err) if is_uninitialized_bitbox_error(device.device_type(), &err) => {
+                error = Some("Not initialized".to_owned());
+                code = Some(HwiErrorCode::DeviceNotInitialized.code());
             }
             Err(err) => {
                 let classified = classify_device_error(&err);
@@ -3285,6 +3295,13 @@ fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
 
 fn reports_device_info(device_type: DeviceType) -> bool {
     matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor)
+}
+
+fn is_uninitialized_bitbox_error(device_type: DeviceType, error: &impl std::fmt::Display) -> bool {
+    device_type == DeviceType::BitBox02
+        && error
+            .to_string()
+            .ends_with("can't call this endpoint: wrong state")
 }
 
 fn label_for(device_type: DeviceType, label: Option<String>) -> Option<Option<String>> {
