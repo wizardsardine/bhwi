@@ -78,6 +78,13 @@
         emulatorSystem = system == "x86_64-linux" || system == "aarch64-darwin";
         keepkeySystem = system == "x86_64-linux" || system == "aarch64-darwin";
         isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
+        # `pkgs.gcc`'s wrapper hook sets CC=gcc, and gcc on aarch64-darwin
+        # predefines neither __ARM_NEON nor __ARM_FEATURE_CRYPTO, which
+        # aws-lc-sys requires.
+        darwinCcEnv = pkgs.lib.optionalString isDarwin ''
+          export CC=clang
+          export CXX=clang++
+        '';
         coldcardRuntimeLibraryPath = coldcardPkgs.lib.makeLibraryPath (
           [
             coldcardPkgs.SDL2
@@ -347,11 +354,13 @@
           program = pkgs.lib.getExe program;
         };
         commonE2eEnv = ''
+          ${darwinCcEnv}
           export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
           export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
           export RUST_TEST_THREADS=1
         '';
         coldcardE2eEnv = ''
+          ${darwinCcEnv}
           export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
           export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardRuntimeLibraryPath}"
           export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
@@ -959,6 +968,7 @@
             default = pkgs.mkShell {
               packages = inputs;
               shellHook = ''
+                ${darwinCcEnv}
                 export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
                 export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
                 export CC_wasm32_unknown_unknown=${pkgs.llvmPackages.clang-unwrapped}/bin/clang
