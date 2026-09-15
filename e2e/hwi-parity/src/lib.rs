@@ -390,7 +390,9 @@ mod tests {
         DebugLink as KeepKeyDebugLink, KeepKeyHostInteraction, SYNTHETIC_MNEMONIC,
         lock_device as lock_keepkey,
     };
-    use bhwi_e2e_trezor::debuglink::{DEFAULT_DEBUGLINK_ADDR, DebugButton, button_reports};
+    use bhwi_e2e_trezor::debuglink::{
+        DEFAULT_DEBUGLINK_ADDR, DebugButton, button_reports, drive_model_t_recovery,
+    };
 
     use bitcoin::{
         Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
@@ -407,6 +409,8 @@ mod tests {
         transaction::Version as TxVersion,
     };
 
+    const BITBOX_FINGERPRINT: &str = "4c00739d";
+    const BITBOX_PATH: &str = "127.0.0.1:15423";
     const KEEPKEY_FINGERPRINT: &str = "95d8f670";
     const KEEPKEY_PIN: &str = "1234";
     const KEEPKEY_XPUB_44: &str = "tpubDCknDegFqAdP4V2AhHhs635DPe8N1aTjfKE9m2UFbdej8zmeNbtqDzK59SxnsYSRSx5uS3AujbwgANUiAk4oHmDNUKoGGkWWUY6c48WgjEx";
@@ -534,12 +538,13 @@ mod tests {
             return Ok(());
         }
 
-        let cases: [&[&str]; 7] = [
+        let cases: [&[&str]; 8] = [
             &[],
             &["boguscmd"],
             &["getxpub"],
             &["--chain", "foo", "enumerate"],
             &["displayaddress"],
+            &["getkeypool", "notanum", "5"],
             &["getmasterxpub", "--addr-type", "bogus"],
             &["--bogus", "enumerate"],
         ];
@@ -877,8 +882,8 @@ mod tests {
                     || format!("signtx Ledger {wrapper:?} singlesig parity failed"),
                 )?;
             }
-            for wrapper in LedgerMultisigWrapper::ALL {
-                let case = build_ledger_multisig_signtx_case(&device_type, wrapper)?;
+            for wrapper in MultisigWrapper::ALL {
+                let case = build_strict_bip48_multisig_signtx_case(&device_type, wrapper)?;
                 assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case)
                     .with_context(|| format!("signtx Ledger {wrapper:?} multisig parity failed"))?;
             }
@@ -896,7 +901,7 @@ mod tests {
                 assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case)
                     .with_context(|| format!("signtx KeepKey {wrapper:?} parity failed"))?;
             }
-            for wrapper in LedgerMultisigWrapper::ALL {
+            for wrapper in MultisigWrapper::ALL {
                 let case = build_keepkey_multisig_signtx_case(&device_type, wrapper)?;
                 assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case).with_context(
                     || format!("signtx KeepKey {wrapper:?} multisig parity failed"),
@@ -909,6 +914,16 @@ mod tests {
             let singlesig = build_singlesig_signtx_case(&device_type, LedgerSinglesigWrapper::Wit)?;
             assert_signtx_parity(signtx_args(&device_type, &singlesig.psbt), &singlesig)
                 .with_context(|| format!("signtx singlesig parity failed for {device_type}"))?;
+
+            if device_type == "trezor" {
+                for wrapper in MultisigWrapper::ALL {
+                    let case = build_strict_bip48_multisig_signtx_case(&device_type, wrapper)?;
+                    assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case)
+                        .with_context(|| {
+                            format!("signtx Trezor {wrapper:?} multisig parity failed")
+                        })?;
+                }
+            }
         }
 
         Ok(())
@@ -1223,13 +1238,6 @@ mod tests {
             return Ok(());
         }
 
-        let base = [
-            "--emulators",
-            "--chain",
-            "test",
-            "--device-type",
-            "bitbox02",
-        ];
         for command in [
             vec!["setup"],
             vec![
@@ -1242,17 +1250,146 @@ mod tests {
             vec!["restore"],
             vec!["--interactive", "restore", "--word_count", "12"],
         ] {
-            assert_error_json_parity(base.into_iter().chain(command).map(str::to_owned).collect())?;
+            assert_error_json_parity(bitbox_hwi_args(&command))?;
         }
 
         // The reference toggles the setting once and the candidate toggles it back, so the
         // shared simulator is returned to its original state after the parity assertion.
-        assert_json_parity(
-            base.into_iter()
-                .chain(["togglepassphrase"])
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-        )?;
+        assert_json_parity(bitbox_hwi_args(&["togglepassphrase"]))?;
+        Ok(())
+    }
+
+    fn bitbox_hwi_args(command: &[&str]) -> Vec<String> {
+        [
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            "bitbox02",
+            "--device-path",
+            BITBOX_PATH,
+        ]
+        .into_iter()
+        .chain(command.iter().copied())
+        .map(str::to_owned)
+        .collect()
+    }
+
+    fn run_candidate_bitbox(command: &[&str]) -> Result<HwiOutput> {
+        let output = HwiBinary::candidate()?.run(bitbox_hwi_args(command))?;
+        assert_success("candidate", &output)?;
+        Ok(output)
+    }
+
+    fn assert_candidate_bitbox_state(initialized: bool) -> Result<()> {
+        let output = run_candidate_bitbox(&["enumerate"])?;
+        let device = assert_enumerate_contains_device("candidate", &output.json, "bitbox02")?;
+        if initialized {
+            assert_eq!(device["fingerprint"], BITBOX_FINGERPRINT);
+            assert!(device.get("error").is_none());
+            assert!(device.get("code").is_none());
+        } else {
+            assert!(device.get("fingerprint").is_none());
+            assert_eq!(device["error"], "Not initialized");
+            assert_eq!(device["code"], -18);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a fresh uninitialized simulator and ends by resetting it"]
+    fn candidate_bitbox_setup_management_lifecycle() -> Result<()> {
+        if env::var("HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("bitbox02")
+        {
+            return Ok(());
+        }
+
+        assert_candidate_bitbox_state(false)?;
+        let setup = run_candidate_bitbox(&["--interactive", "setup", "--label", "BHWI HWI Setup"])?;
+        assert_eq!(setup.json, serde_json::json!({"success": true}));
+        assert_candidate_bitbox_state(true)?;
+
+        for _ in 0..2 {
+            let toggle = run_candidate_bitbox(&["togglepassphrase"])?;
+            assert_eq!(toggle.json, serde_json::json!({"success": true}));
+        }
+
+        let wipe = run_candidate_bitbox(&["wipe"])?;
+        assert_eq!(wipe.json, serde_json::json!({"success": true}));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a separate fresh uninitialized simulator"]
+    fn candidate_bitbox_restore_management_lifecycle() -> Result<()> {
+        if env::var("HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("bitbox02")
+        {
+            return Ok(());
+        }
+
+        assert_candidate_bitbox_state(false)?;
+        let restore = run_candidate_bitbox(&[
+            "--interactive",
+            "restore",
+            "--word_count",
+            "24",
+            "--label",
+            "BHWI HWI Restore",
+        ])?;
+        assert_eq!(restore.json, serde_json::json!({"success": true}));
+        assert_candidate_bitbox_state(true)
+    }
+
+    #[test]
+    #[ignore = "requires a fresh uninitialized Model T and leaves it initialized"]
+    fn candidate_trezor_restore_management_lifecycle() -> Result<()> {
+        if env::var("HWI_BIN").is_err()
+            || expected_device_type_from_env()?.as_deref() != Some("trezor")
+            || env::var("TREZOR_MODEL").as_deref() != Ok("trezor-t")
+        {
+            return Ok(());
+        }
+
+        let driver = std::thread::spawn(|| {
+            drive_model_t_recovery(
+                "1234",
+                "alcohol woman abuse must during monitor noble actual mixed trade anger aisle",
+            )
+        });
+        let binary = HwiBinary::candidate()?;
+        let restore = binary.run(args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            "trezor",
+            "--device-path",
+            "udp:127.0.0.1:21324",
+            "--interactive",
+            "restore",
+            "--word_count",
+            "12",
+        ]));
+        driver.join().expect("Model T recovery driver panicked")?;
+        let restore = restore?;
+        assert_success("candidate", &restore)?;
+        assert_eq!(restore.json, serde_json::json!({"success": true}));
+
+        let enumerated = binary.run(args([
+            "--emulators",
+            "--chain",
+            "test",
+            "--device-type",
+            "trezor",
+            "--device-path",
+            "udp:127.0.0.1:21324",
+            "enumerate",
+        ]))?;
+        assert_success("candidate", &enumerated)?;
+        let device = assert_enumerate_contains_device("candidate", &enumerated.json, "trezor")?;
+        assert_eq!(device["fingerprint"], "95d8f670");
         Ok(())
     }
 
@@ -2986,13 +3123,13 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
     }
 
     #[derive(Clone, Copy, Debug)]
-    enum LedgerMultisigWrapper {
+    enum MultisigWrapper {
         Legacy,
         ShWit,
         Wit,
     }
 
-    impl LedgerMultisigWrapper {
+    impl MultisigWrapper {
         const ALL: [Self; 3] = [Self::Legacy, Self::ShWit, Self::Wit];
     }
 
@@ -3115,15 +3252,15 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         }
     }
 
-    fn build_ledger_multisig_signtx_case(
+    fn build_strict_bip48_multisig_signtx_case(
         device_type: &str,
-        wrapper: LedgerMultisigWrapper,
+        wrapper: MultisigWrapper,
     ) -> Result<SigntxCase> {
         let fingerprint = reference_fingerprint(device_type)?;
         let account_path = match wrapper {
-            LedgerMultisigWrapper::Legacy => "m/48'/1'/0'/0'",
-            LedgerMultisigWrapper::ShWit => "m/48'/1'/0'/1'",
-            LedgerMultisigWrapper::Wit => "m/48'/1'/0'/2'",
+            MultisigWrapper::Legacy => "m/48'/1'/0'/0'",
+            MultisigWrapper::ShWit => "m/48'/1'/0'/1'",
+            MultisigWrapper::Wit => "m/48'/1'/0'/2'",
         };
         let device_xpub = reference_xpub(device_type, account_path)?;
         let device_path = DerivationPath::from_str(account_path)?;
@@ -3133,7 +3270,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             ChildNumber::from_normal_idx(0)?,
         ]);
         let (cosigner_fingerprint, cosigner_xpub, receive) =
-            ledger_multisig_cosigner(&secp, device_xpub, fingerprint, &device_path)?;
+            device_first_multisig_cosigner(&secp, device_xpub, fingerprint, &device_path)?;
         let change = sorted_multisig_keys(
             &secp,
             device_xpub,
@@ -3151,17 +3288,16 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
 
         psbt.inputs[0] = Input {
             non_witness_utxo: Some(previous_tx(input_script_pubkey.clone())),
-            witness_utxo: (!matches!(wrapper, LedgerMultisigWrapper::Legacy)).then_some(TxOut {
+            witness_utxo: (!matches!(wrapper, MultisigWrapper::Legacy)).then_some(TxOut {
                 value: Amount::from_sat(50_000),
                 script_pubkey: input_script_pubkey,
             }),
             redeem_script: match wrapper {
-                LedgerMultisigWrapper::Legacy => Some(input_script.clone()),
-                LedgerMultisigWrapper::ShWit => Some(input_script.to_p2wsh()),
-                LedgerMultisigWrapper::Wit => None,
+                MultisigWrapper::Legacy => Some(input_script.clone()),
+                MultisigWrapper::ShWit => Some(input_script.to_p2wsh()),
+                MultisigWrapper::Wit => None,
             },
-            witness_script: (!matches!(wrapper, LedgerMultisigWrapper::Legacy))
-                .then_some(input_script),
+            witness_script: (!matches!(wrapper, MultisigWrapper::Legacy)).then_some(input_script),
             bip32_derivation: [
                 (
                     receive[0].inner,
@@ -3177,12 +3313,11 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         };
         psbt.outputs[0] = PsbtOutput {
             redeem_script: match wrapper {
-                LedgerMultisigWrapper::Legacy => Some(change_script.clone()),
-                LedgerMultisigWrapper::ShWit => Some(change_script.to_p2wsh()),
-                LedgerMultisigWrapper::Wit => None,
+                MultisigWrapper::Legacy => Some(change_script.clone()),
+                MultisigWrapper::ShWit => Some(change_script.to_p2wsh()),
+                MultisigWrapper::Wit => None,
             },
-            witness_script: (!matches!(wrapper, LedgerMultisigWrapper::Legacy))
-                .then_some(change_script),
+            witness_script: (!matches!(wrapper, MultisigWrapper::Legacy)).then_some(change_script),
             bip32_derivation: [
                 (
                     change[0].inner,
@@ -3215,14 +3350,14 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 pubkey: expected_pubkey,
                 kind: ExpectedSignatureKind::Ecdsa,
             }],
-            ledger_registers_wallet: true,
+            ledger_registers_wallet: device_type == "ledger",
             verify_signatures: true,
         })
     }
 
     fn build_keepkey_multisig_signtx_case(
         device_type: &str,
-        wrapper: LedgerMultisigWrapper,
+        wrapper: MultisigWrapper,
     ) -> Result<SigntxCase> {
         let fingerprint = reference_fingerprint(device_type)?;
         let account_path = DerivationPath::from_str("m/48'/1'/0'/0'")?;
@@ -3266,17 +3401,16 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
 
         psbt.inputs[0] = Input {
             non_witness_utxo: Some(previous_tx(input_script_pubkey.clone())),
-            witness_utxo: (!matches!(wrapper, LedgerMultisigWrapper::Legacy)).then_some(TxOut {
+            witness_utxo: (!matches!(wrapper, MultisigWrapper::Legacy)).then_some(TxOut {
                 value: Amount::from_sat(50_000),
                 script_pubkey: input_script_pubkey,
             }),
             redeem_script: match wrapper {
-                LedgerMultisigWrapper::Legacy => Some(input_script.clone()),
-                LedgerMultisigWrapper::ShWit => Some(input_script.to_p2wsh()),
-                LedgerMultisigWrapper::Wit => None,
+                MultisigWrapper::Legacy => Some(input_script.clone()),
+                MultisigWrapper::ShWit => Some(input_script.to_p2wsh()),
+                MultisigWrapper::Wit => None,
             },
-            witness_script: (!matches!(wrapper, LedgerMultisigWrapper::Legacy))
-                .then_some(input_script),
+            witness_script: (!matches!(wrapper, MultisigWrapper::Legacy)).then_some(input_script),
             bip32_derivation: [
                 (
                     receive[0].inner,
@@ -3292,12 +3426,11 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         };
         psbt.outputs[0] = PsbtOutput {
             redeem_script: match wrapper {
-                LedgerMultisigWrapper::Legacy => Some(change_script.clone()),
-                LedgerMultisigWrapper::ShWit => Some(change_script.to_p2wsh()),
-                LedgerMultisigWrapper::Wit => None,
+                MultisigWrapper::Legacy => Some(change_script.clone()),
+                MultisigWrapper::ShWit => Some(change_script.to_p2wsh()),
+                MultisigWrapper::Wit => None,
             },
-            witness_script: (!matches!(wrapper, LedgerMultisigWrapper::Legacy))
-                .then_some(change_script),
+            witness_script: (!matches!(wrapper, MultisigWrapper::Legacy)).then_some(change_script),
             bip32_derivation: [
                 (
                     change[0].inner,
@@ -3330,17 +3463,17 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         })
     }
 
-    fn multisig_script_pubkey(wrapper: LedgerMultisigWrapper, script: &ScriptBuf) -> ScriptBuf {
+    fn multisig_script_pubkey(wrapper: MultisigWrapper, script: &ScriptBuf) -> ScriptBuf {
         match wrapper {
-            LedgerMultisigWrapper::Legacy => script.to_p2sh(),
-            LedgerMultisigWrapper::ShWit => script.to_p2wsh().to_p2sh(),
-            LedgerMultisigWrapper::Wit => script.to_p2wsh(),
+            MultisigWrapper::Legacy => script.to_p2sh(),
+            MultisigWrapper::ShWit => script.to_p2wsh().to_p2sh(),
+            MultisigWrapper::Wit => script.to_p2wsh(),
         }
     }
 
     fn build_ledger_mixed_policy_signtx_case(device_type: &str) -> Result<SigntxCase> {
         let singlesig = build_singlesig_signtx_case(device_type, LedgerSinglesigWrapper::Wit)?;
-        let multisig = build_ledger_multisig_signtx_case(device_type, LedgerMultisigWrapper::Wit)?;
+        let multisig = build_strict_bip48_multisig_signtx_case(device_type, MultisigWrapper::Wit)?;
         let mut single_input = singlesig.original.unsigned_tx.input[0].clone();
         let multi_input = multisig.original.unsigned_tx.input[0].clone();
         single_input.sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
@@ -3382,7 +3515,6 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             verify_signatures: true,
         })
     }
-
     fn build_mixed_singlesig_signtx_case(device_type: &str) -> Result<SigntxCase> {
         let legacy = build_singlesig_signtx_case(device_type, LedgerSinglesigWrapper::Legacy)?;
         let witness = build_singlesig_signtx_case(device_type, LedgerSinglesigWrapper::Wit)?;
@@ -3423,7 +3555,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         })
     }
 
-    fn ledger_multisig_cosigner<
+    fn device_first_multisig_cosigner<
         C: bitcoin::secp256k1::Signing + bitcoin::secp256k1::Verification,
     >(
         secp: &Secp256k1<C>,
@@ -3456,7 +3588,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 return Ok((cosigner_fingerprint, cosigner_xpub, receive));
             }
         }
-        bail!("could not find deterministic Ledger multisig cosigner");
+        bail!("could not find deterministic device-first multisig cosigner");
     }
 
     #[derive(Clone)]
@@ -3683,11 +3815,109 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         if device_type == "keepkey" {
             cases.extend(keepkey_multisig_display_cases(device_type, &fingerprint)?);
         }
+        if device_type == "ledger" {
+            cases.extend(ledger_multisig_display_cases(device_type)?);
+        }
+        if device_type == "trezor" {
+            cases.extend(trezor_multisig_display_cases(device_type)?);
+        }
         if device_type == "coldcard" {
             for wallet in coldcard_multisig_display_wallets(device_type, &fingerprint)? {
                 let args = displayaddress_desc_args(device_type, &wallet.display_descriptor);
                 cases.push(DisplayAddressCase::registered(args.clone(), wallet));
                 cases.push(DisplayAddressCase::unregistered(args));
+            }
+        }
+
+        Ok(cases)
+    }
+
+    fn ledger_multisig_display_cases(device_type: &str) -> Result<Vec<DisplayAddressCase>> {
+        let fingerprint = reference_fingerprint(device_type)?;
+        let secp = Secp256k1::new();
+        let mut cases = Vec::new();
+
+        for (wrapper, account_path, origin) in [
+            (MultisigWrapper::Legacy, "m/48'/1'/0'/0'", "48h/1h/0h/0h"),
+            (MultisigWrapper::ShWit, "m/48'/1'/0'/1'", "48h/1h/0h/1h"),
+            (MultisigWrapper::Wit, "m/48'/1'/0'/2'", "48h/1h/0h/2h"),
+        ] {
+            let device_path = DerivationPath::from_str(account_path)?;
+            let device_xpub = reference_xpub(device_type, account_path)?;
+            let (cosigner_fingerprint, cosigner_xpub, _) =
+                device_first_multisig_cosigner(&secp, device_xpub, fingerprint, &device_path)?;
+            let device_key = format!("[{fingerprint}/{origin}]{device_xpub}/0/0");
+            let cosigner_key = format!("[{cosigner_fingerprint}/{origin}]{cosigner_xpub}/0/0");
+            let sorted = format!("sortedmulti(2,{device_key},{cosigner_key})");
+            let descriptor = match wrapper {
+                MultisigWrapper::Legacy => format!("sh({sorted})"),
+                MultisigWrapper::ShWit => format!("sh(wsh({sorted}))"),
+                MultisigWrapper::Wit => format!("wsh({sorted})"),
+            };
+            cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &descriptor,
+            )));
+
+            if matches!(wrapper, MultisigWrapper::Wit) {
+                cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                    device_type,
+                    &format!("wsh(multi(2,{cosigner_key},{device_key}))"),
+                )));
+            }
+        }
+
+        Ok(cases)
+    }
+
+    fn trezor_multisig_display_cases(device_type: &str) -> Result<Vec<DisplayAddressCase>> {
+        let fingerprint = reference_fingerprint(device_type)?;
+        let secp = Secp256k1::new();
+        let suffix = DerivationPath::from_str("m/0/0")?;
+        let mut cases = Vec::new();
+
+        for (wrapper, account_path, origin) in [
+            (MultisigWrapper::Legacy, "m/48'/1'/0'/0'", "48h/1h/0h/0h"),
+            (MultisigWrapper::ShWit, "m/48'/1'/0'/1'", "48h/1h/0h/1h"),
+            (MultisigWrapper::Wit, "m/48'/1'/0'/2'", "48h/1h/0h/2h"),
+        ] {
+            let device_path = DerivationPath::from_str(account_path)?;
+            let device_xpub = reference_xpub(device_type, account_path)?;
+            let (cosigner_fingerprint, cosigner_xpub, _) =
+                device_first_multisig_cosigner(&secp, device_xpub, fingerprint, &device_path)?;
+            let device_child = device_xpub.derive_pub(&secp, &suffix)?;
+            let cosigner_child = cosigner_xpub.derive_pub(&secp, &suffix)?;
+            let key_pairs = [
+                (
+                    format!("[{fingerprint}/{origin}]{device_xpub}/0/0"),
+                    format!("[{cosigner_fingerprint}/{origin}]{cosigner_xpub}/0/0"),
+                ),
+                (
+                    format!("[{fingerprint}/{origin}/0/0]{}", device_child.public_key),
+                    format!(
+                        "[{cosigner_fingerprint}/{origin}/0/0]{}",
+                        cosigner_child.public_key
+                    ),
+                ),
+            ];
+
+            for (device_key, cosigner_key) in key_pairs {
+                for sorted in [true, false] {
+                    let body = if sorted {
+                        format!("sortedmulti(2,{device_key},{cosigner_key})")
+                    } else {
+                        format!("multi(2,{cosigner_key},{device_key})")
+                    };
+                    let descriptor = match wrapper {
+                        MultisigWrapper::Legacy => format!("sh({body})"),
+                        MultisigWrapper::ShWit => format!("sh(wsh({body}))"),
+                        MultisigWrapper::Wit => format!("wsh({body})"),
+                    };
+                    cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                        device_type,
+                        &descriptor,
+                    )));
+                }
             }
         }
 
@@ -4022,7 +4252,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
 
     fn set_ledger_displayaddress_automation() -> Result<()> {
         let automation = serde_json::from_str(include_str!(
-            "../../ledger/automations/display_address.json"
+            "../../ledger/automations/register_wallet_accept.json"
         ))?;
         post_speculos_automation(&automation)
     }

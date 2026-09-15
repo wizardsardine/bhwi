@@ -44,7 +44,14 @@ on-demand workflow.
 - `cargo test -p bhwi-e2e-coldcard -- --test-threads=1`
 - `cargo test -p bhwi-e2e-ledger -- --test-threads=1`
 - `cargo test -p bhwi-e2e-jade -- --test-threads=1`
-- `cargo test -p bhwi-e2e-trezor -- --test-threads=1`, once per model
+- `cargo test -p bhwi-e2e-trezor -- --test-threads=1`, the native CLI and
+  differential `hwi-parity-trezor` suites, once per model. The Model T leg
+  also runs `tests::can_restore_from_a_recovery_phrase`,
+  `trezor::trezor_restore_management_lifecycle`, and
+  `tests::candidate_trezor_restore_management_lifecycle`, each against its own
+  fresh emulator profile and process without `trezor-init`, then each model
+  runs its matching 90-minute `hwi-upstream-trezor` or
+  `hwi-upstream-trezor-t` final gate with no shared emulator running.
 - `cargo test -p bhwi-e2e-keepkey -- --test-threads=1`, its native CLI and
   differential HWI parity suites, three fresh-profile management lifecycles,
   and the 90-minute `hwi-upstream-keepkey` final gate
@@ -74,7 +81,10 @@ Apps:
 - `nix run .#hwi-upstream-coldcard`
 - `nix run .#hwi-upstream-ledger`
 - `nix run .#hwi-upstream-jade`
+- `nix run .#hwi-upstream-trezor`
+- `nix run .#hwi-upstream-trezor-t`
 - `nix run .#hwi-upstream-keepkey`
+- `nix run .#hwi-parity-trezor`
 - `nix run .#hwi-parity-keepkey`
 - `nix run .#jade-pinserver`
 - `nix run .#jade`
@@ -101,6 +111,8 @@ Packages/checks:
 - `nix build .#coldcard-simulator`
 - `nix build .#hwi-reference`
 - `nix build .#hwi-upstream-suite`
+- `nix build .#hwi-upstream-trezor`
+- `nix build .#hwi-upstream-trezor-t`
 - `nix build .#hwi-upstream-keepkey`
 - `nix build .#ledger-app`
 - `nix build .#jade-qemu`
@@ -171,6 +183,9 @@ nix run .#trezor-init
 
 # Terminal 2
 nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1
+
+# Terminal 2, with the same initialized emulator
+timeout 20m nix run .#hwi-parity-trezor -- -- --test-threads=1
 ```
 
 KeepKey. The main and debug UDP endpoints are 11044 and 11045.
@@ -214,8 +229,8 @@ nix run .#hwi-upstream-coldcard
 nix run .#hwi-upstream-ledger
 nix run .#hwi-upstream-jade
 nix run .#hwi-upstream-keepkey
-nix run .#hwi-upstream-trezor
-nix run .#hwi-upstream-trezor-t
+timeout 90m nix run .#hwi-upstream-trezor
+timeout 90m nix run .#hwi-upstream-trezor-t
 ```
 
 The generic dispatcher is also available:
