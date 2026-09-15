@@ -1,0 +1,19 @@
+Stop packing nanopb field descriptors
+
+`pb_field_t` is a packed struct holding pointers. Mach-O on arm64 requires
+8-byte pointer alignment, so ld64 rejects the generated `*_fields` tables with
+"unaligned pointer(s) for architecture arm64". This is nanopb's own switch for
+that case; it costs padding and changes no behaviour. The firmware vendors its
+own copy of pb.h, which is the one the build compiles against.
+
+--- a/include/pb.h
++++ b/include/pb.h
+@@ -15,7 +15,7 @@
+
+ /* Define this if your CPU / compiler combination does not support
+  * unaligned memory access to packed structures. */
+-/* #define PB_NO_PACKED_STRUCTS 1 */
++#define PB_NO_PACKED_STRUCTS 1
+
+ /* Increase the number of required fields that are tracked.
+  * A compiler warning will tell if you need this. */

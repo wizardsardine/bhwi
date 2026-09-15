@@ -71,7 +71,7 @@
         };
         coldcardPkgs = import nixpkgs-coldcard {inherit system;};
         emulatorSystem = system == "x86_64-linux" || system == "aarch64-darwin";
-        keepkeySystem = system == "x86_64-linux";
+        keepkeySystem = system == "x86_64-linux" || system == "aarch64-darwin";
         isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
         coldcardRuntimeLibraryPath = coldcardPkgs.lib.makeLibraryPath (
           [
@@ -362,6 +362,8 @@
           export KEEPKEY_GOOGLETEST_PATCH="${python-hwi}/test/data/keepkey-googletest.patch"
           export KEEPKEY_NANOPB_PATCH="${python-hwi}/test/data/nanopb-deprecated-mode.patch"
           export KEEPKEY_CMAKE_PATCH="${./nix/patches/keepkey/cmake-minimum.patch}"
+          export KEEPKEY_MEMCHECK_PATCH="${./nix/patches/keepkey/keepkey-emulator-memcheck.patch}"
+          export KEEPKEY_UNPACKED_PATCH="${./nix/patches/keepkey/keepkey-unpacked-structs.patch}"
           export KEEPKEY_PROTOC="${pkgs.protobuf}/bin/protoc"
         '';
         mkHwiParityRunner = name: device: runtimeInputs: env:
@@ -829,6 +831,8 @@
           // pkgs.lib.optionalAttrs keepkeySystem {
             keepkey = mkApp keepkeyRunner;
             keepkey-init = mkApp keepkeyInitRunner;
+          }
+          // pkgs.lib.optionalAttrs (keepkeySystem && !isDarwin) {
             hwi-parity-keepkey = mkApp hwiParityKeepKey;
             hwi-upstream-keepkey = mkApp hwiUpstreamKeepKey;
           }
@@ -907,7 +911,7 @@
             hwi-upstream-trezor = hwiUpstreamTrezor;
             hwi-upstream-trezor-t = hwiUpstreamTrezorT;
           }
-          // pkgs.lib.optionalAttrs keepkeySystem {
+          // pkgs.lib.optionalAttrs (keepkeySystem && !isDarwin) {
             hwi-upstream-keepkey = hwiUpstreamKeepKey;
           }
           // linuxPackages;

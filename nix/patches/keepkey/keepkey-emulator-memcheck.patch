@@ -1,0 +1,32 @@
+Make the stack guard a no-op in the emulator
+
+`memcheck` compares the stack pointer against `end`, the ELF symbol marking the
+end of .bss. GNU ld synthesises it; Apple's ld64 does not, so the emulator fails
+to link on darwin. The check is hardware-only regardless: it casts 64-bit
+addresses to `unsigned`, so on any hosted build the arithmetic is already
+meaningless. Its only callers are the recursive EIP-712 parser in
+lib/firmware/eip712.c.
+
+--- a/lib/board/memory.c
++++ b/lib/board/memory.c
+@@ -44,6 +44,12 @@
+ uint8_t *emulator_flash_base = NULL;
+ #endif
+
++#ifdef EMULATOR
++int memcheck(unsigned stackGuardSize) {
++    (void)stackGuardSize;
++    return STACK_GOOD;
++}
++#else
+ extern unsigned end;    // This is at the end of the data + bss, used for recursion guard
+ int memcheck(unsigned stackGuardSize) {
+     void *stackBottom;    // this is the bottom of the stack, it is shrinking toward static mem at variable "end".
+@@ -57,6 +63,7 @@
+         return STACK_GOOD;
+     }
+ }
++#endif
+
+ void mpu_config(int priv_level) {
+   // Entry:

@@ -28,6 +28,8 @@ else
   googletest_patch="${KEEPKEY_GOOGLETEST_PATCH:?KEEPKEY_GOOGLETEST_PATCH must point to keepkey-googletest.patch}"
   nanopb_patch="${KEEPKEY_NANOPB_PATCH:?KEEPKEY_NANOPB_PATCH must point to nanopb-deprecated-mode.patch}"
   cmake_patch="${KEEPKEY_CMAKE_PATCH:?KEEPKEY_CMAKE_PATCH must point to the KeepKey CMake compatibility patch}"
+  memcheck_patch="${KEEPKEY_MEMCHECK_PATCH:?KEEPKEY_MEMCHECK_PATCH must point to the emulator stack-guard patch}"
+  unpacked_patch="${KEEPKEY_UNPACKED_PATCH:?KEEPKEY_UNPACKED_PATCH must point to the nanopb unpacked-structs patch}"
   protoc="${KEEPKEY_PROTOC:?KEEPKEY_PROTOC must point to protoc}"
   : "${KEEPKEY_BUILD_TOOLCHAIN:?KEEPKEY_BUILD_TOOLCHAIN must be set}"
 
@@ -37,7 +39,8 @@ else
       exit 2
     fi
   done
-  for file in "$build_patch" "$googletest_patch" "$nanopb_patch" "$cmake_patch"; do
+  for file in "$build_patch" "$googletest_patch" "$nanopb_patch" "$cmake_patch" \
+    "$memcheck_patch" "$unpacked_patch"; do
     if [[ ! -f "$file" ]]; then
       echo "required KeepKey patch does not exist: $file" >&2
       exit 2
@@ -48,7 +51,7 @@ else
     exit 2
   fi
 
-  build_key="firmware=$firmware_rev nanopb=$nanopb_rev build_patch=$(sha256sum "$build_patch" | cut -d' ' -f1) googletest_patch=$(sha256sum "$googletest_patch" | cut -d' ' -f1) nanopb_patch=$(sha256sum "$nanopb_patch" | cut -d' ' -f1) cmake_patch=$(sha256sum "$cmake_patch" | cut -d' ' -f1) firmware_src=$KEEPKEY_FIRMWARE_SRC nanopb_src=$KEEPKEY_NANOPB_SRC toolchain=$KEEPKEY_BUILD_TOOLCHAIN recipe=9"
+  build_key="firmware=$firmware_rev nanopb=$nanopb_rev build_patch=$(sha256sum "$build_patch" | cut -d' ' -f1) googletest_patch=$(sha256sum "$googletest_patch" | cut -d' ' -f1) nanopb_patch=$(sha256sum "$nanopb_patch" | cut -d' ' -f1) cmake_patch=$(sha256sum "$cmake_patch" | cut -d' ' -f1) memcheck_patch=$(sha256sum "$memcheck_patch" | cut -d' ' -f1) unpacked_patch=$(sha256sum "$unpacked_patch" | cut -d' ' -f1) firmware_src=$KEEPKEY_FIRMWARE_SRC nanopb_src=$KEEPKEY_NANOPB_SRC toolchain=$KEEPKEY_BUILD_TOOLCHAIN recipe=10"
   work="$cache_root/build"
   key_file="$work/.bhwi-build-key"
   emulator="$work/firmware/bin/kkemu"
@@ -66,6 +69,10 @@ else
     patch -d "$work/firmware/deps/googletest" -p1 < "$googletest_patch" >&2
     patch -d "$work/nanopb" -p1 < "$nanopb_patch" >&2
     patch -d "$work/firmware" -p1 < "$cmake_patch" >&2
+    # Apple's ld64 neither synthesises the `end` symbol memcheck reads nor
+    # accepts nanopb's packed pointer tables on arm64.
+    patch -d "$work/firmware" -p1 < "$memcheck_patch" >&2
+    patch -d "$work/firmware" -p1 < "$unpacked_patch" >&2
     make -C "$work/nanopb/generator/proto" >&2
     python_bin="$(command -v python3)"
     mkdir -p "$work/bin"
