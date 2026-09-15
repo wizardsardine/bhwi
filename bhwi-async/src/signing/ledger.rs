@@ -10,9 +10,13 @@ use bhwi::bitcoin::{
     psbt::{Input, Psbt},
     secp256k1::Secp256k1,
 };
-use bhwi::common::{DeviceContext, MultisigAddressType, MultisigDisplayAddress};
-use bhwi::ledger::{LedgerWalletPolicy, Version};
+use bhwi::common::{DeviceContext, DisplayAddress, MultisigAddressType, MultisigDisplayAddress};
+use bhwi::ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy};
 use bhwi::miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, Wildcard};
+
+use crate::HWIDeviceError;
+use crate::device::Device;
+use crate::display_address::multisig_display_address_from_descriptor;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LedgerAddressType {
@@ -688,6 +692,119 @@ pub fn registered_context(
         wallet_policy: LedgerWalletPolicy::new(name, Version::V2, policy),
         wallet_hmac: hmac,
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LedgerSigningError {
+    #[error("{0}")]
+    BadArgument(String),
+
+    #[error(transparent)]
+    Device(#[from] HWIDeviceError),
+
+    #[error("Ledger wallet registration returned no HMAC")]
+    MissingHmac,
+
+    #[error("Ledger wallet registration returned a {0}-byte HMAC instead of 32 bytes")]
+    HmacLength(usize),
+}
+
+pub struct LedgerSigningContext {
+    pub address_type: LedgerAddressType,
+    pub context: DeviceContext,
+}
+
+/// Turns the plans a PSBT needs into signing contexts, registering the multisig
+/// policies the device does not already hold.
+pub async fn ledger_signing_contexts(
+    device: &mut Device,
+    psbt: &Psbt,
+    network: Network,
+) -> Result<Vec<LedgerSigningContext>, LedgerSigningError> {
+    let fingerprint = device.fingerprint().await?;
+    let plans = ledger_signing_plans(psbt, fingerprint, network)
+        .map_err(LedgerSigningError::BadArgument)?;
+    let mut contexts = Vec::with_capacity(plans.len());
+
+    for plan in plans {
+        match plan {
+            LedgerSigningPlan::Default {
+                address_type,
+                account_path,
+            } => {
+                let xpub = device
+                    .device()
+                    .get_extended_pubkey(account_path.clone(), false)
+                    .await?;
+                let policy = singlesig_wallet_policy(
+                    &extend_account_path_for_policy(&account_path),
+                    fingerprint,
+                    xpub,
+                )
+                .map_err(|err| LedgerSigningError::BadArgument(err.to_string()))?;
+                contexts.push(LedgerSigningContext {
+                    address_type,
+                    context: DeviceContext::Ledger {
+                        wallet_policy: LedgerWalletPolicy::new(String::new(), Version::V2, policy),
+                        wallet_hmac: None,
+                    },
+                });
+            }
+            LedgerSigningPlan::Registered {
+                address_type,
+                name,
+                policy,
+            } => {
+                let registration = device.device().register_wallet(&name, &policy).await?;
+                let hmac = registration.hmac().ok_or(LedgerSigningError::MissingHmac)?;
+                if hmac.len() != 32 {
+                    return Err(LedgerSigningError::HmacLength(hmac.len()));
+                }
+                let wallet_policy = WalletPolicy::from_str(&policy)
+                    .map_err(|err| LedgerSigningError::BadArgument(err.to_string()))?;
+                contexts.push(LedgerSigningContext {
+                    address_type,
+                    context: DeviceContext::Ledger {
+                        wallet_policy: LedgerWalletPolicy::new(name, Version::V2, wallet_policy),
+                        wallet_hmac: Some(hmac),
+                    },
+                });
+            }
+        }
+    }
+
+    Ok(contexts)
+}
+
+/// Registers the policy so the device can be asked to show the address.
+pub async fn ledger_multisig_display_address(
+    device: &mut Device,
+    descriptor: &str,
+) -> Result<(DisplayAddress, DeviceContext), LedgerSigningError> {
+    let multisig = multisig_display_address_from_descriptor(descriptor)
+        .map_err(|err| LedgerSigningError::BadArgument(err.to_string()))?;
+    let plan = ledger_multisig_display_plan(multisig).map_err(LedgerSigningError::BadArgument)?;
+    let registration = device
+        .device()
+        .register_wallet(&plan.name, &plan.policy_text)
+        .await?;
+    let hmac = registration.hmac().ok_or(LedgerSigningError::MissingHmac)?;
+    if hmac.len() != 32 {
+        return Err(LedgerSigningError::HmacLength(hmac.len()));
+    }
+
+    Ok((
+        DisplayAddress::ByDescriptor {
+            index: plan.address_index,
+            change: plan.change,
+            display: true,
+            descriptor_name: String::new(),
+        },
+        DeviceContext::Ledger {
+            wallet_policy: LedgerWalletPolicy::new(plan.name, Version::V2, plan.policy),
+            wallet_hmac: Some(hmac),
+        },
+    ))
 }
 
 #[cfg(test)]

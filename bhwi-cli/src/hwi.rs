@@ -1,7 +1,5 @@
 #[cfg(feature = "keepkey")]
 use bhwi::keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED};
-#[cfg(feature = "ledger")]
-use bhwi::ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy};
 use bhwi::{bitcoin::psbt::Psbt, passphrase::HostPassphrase};
 use bhwi_async::display_address::{
     DisplayAddressError, multisig_display_address_from_descriptor,
@@ -11,10 +9,9 @@ use bhwi_async::display_address::{
 use bhwi_async::psbt::{merge_psbt_signatures, strip_legacy_witness_utxos};
 #[cfg(feature = "ledger")]
 use bhwi_async::signing::ledger::{
-    LedgerAddressType, LedgerSigningPlan, extend_account_path_for_policy,
-    ledger_multisig_display_plan, ledger_signing_plans,
+    LedgerAddressType, LedgerSigningError, ledger_multisig_display_address, ledger_signing_contexts,
 };
-use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions};
+use bhwi_async::{DeviceBackup, DisplayAddress, RestoreOptions, SetupOptions};
 use bitcoin::{
     Network, NetworkKind,
     base64::prelude::{BASE64_STANDARD, Engine as _},
@@ -24,7 +21,7 @@ use chrono::{Datelike, Local, Timelike};
 use clap::{ArgAction, ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use miniscript::{
     Descriptor, DescriptorPublicKey,
-    descriptor::{DescriptorType, WalletPolicy, checksum},
+    descriptor::{DescriptorType, checksum},
 };
 use serde::{Serialize, Serializer};
 use std::{
@@ -1586,7 +1583,13 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
                 return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err));
             }
             Err(LedgerSigningError::Device(err)) => {
-                return HwiResponse::Error(err);
+                return HwiResponse::Error(classify_device_error_for(DeviceType::Ledger, &err));
+            }
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceConnectionError,
+                    err.to_string(),
+                ));
             }
         };
 
@@ -1723,12 +1726,35 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
                 Ok(address) => Ok((address, None)),
                 Err(single_sig_error) => {
                     if device.device_type() == DeviceType::Ledger {
+                        #[cfg(not(feature = "ledger"))]
+                        {
+                            return HwiResponse::Error(single_sig_error);
+                        }
+                        #[cfg(feature = "ledger")]
                         if multisig_display_address_from_descriptor(&descriptor).is_err() {
                             return HwiResponse::Error(single_sig_error);
                         }
+                        #[cfg(feature = "ledger")]
                         match ledger_multisig_display_address(&mut device, &descriptor).await {
                             Ok((address, context)) => Ok((address, Some(context))),
-                            Err(error) => return HwiResponse::Error(error),
+                            Err(LedgerSigningError::BadArgument(err)) => {
+                                return HwiResponse::Error(HwiError::new(
+                                    HwiErrorCode::BadArgument,
+                                    err,
+                                ));
+                            }
+                            Err(LedgerSigningError::Device(err)) => {
+                                return HwiResponse::Error(classify_device_error_for(
+                                    DeviceType::Ledger,
+                                    &err,
+                                ));
+                            }
+                            Err(err) => {
+                                return HwiResponse::Error(HwiError::new(
+                                    HwiErrorCode::DeviceConnectionError,
+                                    err.to_string(),
+                                ));
+                            }
                         }
                     } else if matches!(
                         device.device_type(),
@@ -2081,144 +2107,6 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
     }
 
     HwiResponse::GetKeypool(entries)
-}
-
-#[cfg(feature = "ledger")]
-#[derive(Debug)]
-enum LedgerSigningError {
-    BadArgument(String),
-    Device(HwiError),
-}
-
-#[cfg(feature = "ledger")]
-struct LedgerSigningContext {
-    address_type: LedgerAddressType,
-    context: DeviceContext,
-}
-
-#[cfg(feature = "ledger")]
-async fn ledger_signing_contexts(
-    device: &mut Device,
-    psbt: &Psbt,
-    network: Network,
-) -> Result<Vec<LedgerSigningContext>, LedgerSigningError> {
-    let fingerprint = device
-        .fingerprint()
-        .await
-        .map_err(|err| LedgerSigningError::Device(classify_device_error(&err)))?;
-    let plans = ledger_signing_plans(psbt, fingerprint, network)
-        .map_err(LedgerSigningError::BadArgument)?;
-    let mut contexts = Vec::with_capacity(plans.len());
-
-    for plan in plans {
-        match plan {
-            LedgerSigningPlan::Default {
-                address_type,
-                account_path,
-            } => {
-                let xpub = device
-                    .device()
-                    .get_extended_pubkey(account_path.clone(), false)
-                    .await
-                    .map_err(|err| {
-                        LedgerSigningError::Device(classify_device_error_for(
-                            DeviceType::Ledger,
-                            &err,
-                        ))
-                    })?;
-                let policy = singlesig_wallet_policy(
-                    &extend_account_path_for_policy(&account_path),
-                    fingerprint,
-                    xpub,
-                )
-                .map_err(|err| LedgerSigningError::BadArgument(err.to_string()))?;
-                contexts.push(LedgerSigningContext {
-                    address_type,
-                    context: DeviceContext::Ledger {
-                        wallet_policy: LedgerWalletPolicy::new(String::new(), Version::V2, policy),
-                        wallet_hmac: None,
-                    },
-                });
-            }
-            LedgerSigningPlan::Registered {
-                address_type,
-                name,
-                policy,
-            } => {
-                let registration = device
-                    .device()
-                    .register_wallet(&name, &policy)
-                    .await
-                    .map_err(|err| {
-                        LedgerSigningError::Device(classify_device_error_for(
-                            DeviceType::Ledger,
-                            &err,
-                        ))
-                    })?;
-                let hmac = registration.hmac().ok_or_else(|| {
-                    LedgerSigningError::Device(HwiError::new(
-                        HwiErrorCode::DeviceConnectionError,
-                        "Ledger wallet registration returned no HMAC",
-                    ))
-                })?;
-                if hmac.len() != 32 {
-                    return Err(LedgerSigningError::Device(HwiError::new(
-                        HwiErrorCode::DeviceConnectionError,
-                        format!(
-                            "Ledger wallet registration returned a {}-byte HMAC instead of 32 bytes",
-                            hmac.len()
-                        ),
-                    )));
-                }
-                let wallet_policy = WalletPolicy::from_str(&policy)
-                    .map_err(|err| LedgerSigningError::BadArgument(err.to_string()))?;
-                contexts.push(LedgerSigningContext {
-                    address_type,
-                    context: DeviceContext::Ledger {
-                        wallet_policy: LedgerWalletPolicy::new(name, Version::V2, wallet_policy),
-                        wallet_hmac: Some(hmac),
-                    },
-                });
-            }
-        }
-    }
-
-    Ok(contexts)
-}
-
-#[cfg(feature = "ledger")]
-async fn ledger_multisig_display_address(
-    device: &mut Device,
-    descriptor: &str,
-) -> Result<(DisplayAddress, DeviceContext), HwiError> {
-    let multisig =
-        multisig_display_address_from_descriptor(descriptor).map_err(display_address_error)?;
-    let plan = ledger_multisig_display_plan(multisig)
-        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err))?;
-    let registration = device
-        .device()
-        .register_wallet(&plan.name, &plan.policy_text)
-        .await
-        .map_err(|err| classify_device_error_for(DeviceType::Ledger, &err))?;
-    let hmac = registration.hmac().ok_or_else(|| {
-        HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            "Ledger wallet registration returned no HMAC",
-        )
-    })?;
-
-    Ok((
-        DisplayAddress::ByDescriptor {
-            index: plan.address_index,
-            change: plan.change,
-            display: true,
-            descriptor_name: String::new(),
-        },
-        DeviceContext::Ledger {
-            wallet_policy: LedgerWalletPolicy::new(plan.name, Version::V2, plan.policy),
-            wallet_hmac: Some(hmac),
-        },
-    ))
 }
 
 fn master_xpub_path(
