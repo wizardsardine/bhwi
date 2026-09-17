@@ -23,8 +23,10 @@ trezor = ["bhwi/trezor"]
 [dependencies]
 async-trait.workspace = true
 bhwi.workspace = true
-futures.workspace = true
 serde_cbor = { workspace = true, optional = true }
 thiserror.workspace = true
 
 byteorder = "1.5"
+
+[dev-dependencies]
+futures.workspace = true
