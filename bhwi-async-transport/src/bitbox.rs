@@ -24,31 +24,39 @@ use tokio::{
 };
 
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
-    PairingCodePrompt, ScanEntry, hid::HidChannel,
+    Device, DeviceCandidate, DeviceEnumerator, DeviceSelector, DeviceType, HostInteractionFactory,
+    PairingCodePrompt,
+    hid::{HidChannel, find_hid, hid_path},
 };
 
 pub struct BitBoxDevice;
 
 impl BitBoxDevice {
-    async fn hid_device(
-        hid_dev: HidDevice,
+    /// A BitBox02 also exposes a FIDO/U2F HID interface (usage page 0xf1d0);
+    /// only the firmware interface speaks the HWW protocol.
+    fn is_bitbox(dev: &HidDevice) -> NativeResult<bool> {
+        let DeviceId { vid, pid, .. } = BITBOX02_DEVICE_ID;
+        let pid = pid.ok_or(NativeError::MissingDeviceId("bitbox02 pid not set"))?;
+        Ok(dev.vendor_id == vid
+            && dev.product_id == pid
+            && dev.usage_page == BITBOX02_HID_USAGE_PAGE
+            && BITBOX02_PRODUCT_STRINGS
+                .iter()
+                .any(|s| dev.name.contains(s)))
+    }
+
+    async fn open_hid(
+        candidate: &DeviceCandidate,
         network: bitcoin::Network,
         pairing_code: Option<&PairingCodePrompt>,
-    ) -> NativeResult<ScanEntry> {
-        let path = hid_path(&hid_dev);
-        let name = hid_dev.name.clone();
-        let opened = match hid_dev.open().await {
-            Ok(opened) => opened,
-            Err(err) => {
-                return Ok(ScanEntry::skipped(
-                    DeviceType::BitBox02,
-                    "bitbox02",
-                    path,
-                    &err,
-                ));
-            }
-        };
+    ) -> NativeResult<Device> {
+        let dev = find_hid(|dev| {
+            hid_path(dev) == candidate.path && Self::is_bitbox(dev).unwrap_or(false)
+        })
+        .await?
+        .ok_or_else(|| NativeError::Gone(candidate.path.clone()))?;
+        let name = dev.name.clone();
+        let opened = dev.open().await?;
         // No cached pairing data yet — a filesystem-backed store can be plugged in later.
         // First-time pairing: the interpreter fires a hook the moment the code is
         // computed (before it blocks on the device's verification response), so the CLI
@@ -58,32 +66,32 @@ impl BitBoxDevice {
         if let Some(prompt) = pairing_code.cloned() {
             bb.set_pairing_code_hook(Box::new(move |code| prompt(code)));
         }
-        Ok(ScanEntry::Found(Device::new(
+        Ok(Device::new(
             &name,
             DeviceType::BitBox02,
-            path,
-            "bitbox02",
+            &candidate.path,
+            &candidate.model,
             Box::new(bb),
             false,
-        )))
+        ))
     }
 
-    async fn simulator_device(
-        path: &str,
-        stream: TcpStream,
+    async fn open_simulator(
+        candidate: &DeviceCandidate,
         network: bitcoin::Network,
     ) -> NativeResult<Device> {
         // The simulator speaks the same U2F-HID framing as real hardware, so the only
         // difference from the HID path is the underlying byte channel (a TCP stream here).
         // No pairing-code hook: the simulator auto-confirms pairing, so surfacing a code
         // would only add noise (and stderr) to scripted/emulator runs.
+        let stream = TcpStream::connect(simulator_tcp_addr(&candidate.path)).await?;
         let bb = BitBox::new(BitBoxTransportHID::new(BitBoxTcpChannel::new(stream)), None)
             .with_network(network);
         Ok(Device::new(
-            "BitBox02 Simulator",
+            &candidate.name,
             DeviceType::BitBox02,
-            path,
-            "bitbox02_simulator",
+            &candidate.path,
+            &candidate.model,
             Box::new(bb),
             true,
         ))
@@ -96,42 +104,29 @@ fn simulator_tcp_addr(path: &str) -> &str {
 
 #[async_trait(?Send)]
 impl DeviceEnumerator for BitBoxDevice {
-    async fn enumerate(
-        selector: &DeviceSelector,
-        pairing_code: Option<&PairingCodePrompt>,
-        _host_interaction: Option<&HostInteractionFactory>,
-    ) -> NativeResult<DeviceScan> {
-        let DeviceId {
-            vid,
-            pid,
-            emulator_path,
-            ..
-        } = BITBOX02_DEVICE_ID;
-        let pid = pid.ok_or(NativeError::MissingDeviceId("bitbox02 pid not set"))?;
-        let mut scan: DeviceScan = HidBackend::default()
+    async fn list(selector: &DeviceSelector) -> NativeResult<Vec<DeviceCandidate>> {
+        let DeviceId { emulator_path, .. } = BITBOX02_DEVICE_ID;
+        let mut candidates: Vec<DeviceCandidate> = HidBackend::default()
             .enumerate()
             .await?
-            .map(Ok)
+            .map(Ok::<HidDevice, NativeError>)
             .try_filter_map(|dev| async move {
                 let path = hid_path(&dev);
-                // A BitBox02 also exposes a FIDO/U2F HID interface (usage page 0xf1d0);
-                // only the firmware interface speaks the HWW protocol.
-                let is_bitbox = dev.vendor_id == vid
-                    && dev.product_id == pid
-                    && dev.usage_page == BITBOX02_HID_USAGE_PAGE
-                    && BITBOX02_PRODUCT_STRINGS
-                        .iter()
-                        .any(|s| dev.name.contains(s));
-                if selector.matches(DeviceType::BitBox02, &path) && is_bitbox {
-                    Self::hid_device(dev, selector.network, pairing_code)
-                        .await
-                        .map(Some)
+                if selector.matches(DeviceType::BitBox02, &path) && Self::is_bitbox(&dev)? {
+                    Ok(Some(DeviceCandidate {
+                        device_type: DeviceType::BitBox02,
+                        name: dev.name.clone(),
+                        model: "bitbox02".to_owned(),
+                        path,
+                        is_emulated: false,
+                    }))
                 } else {
                     Ok(None)
                 }
             })
             .try_collect()
             .await?;
+        // Only a connection tells us the simulator is there; it is dropped again.
         if selector.include_emulators
             && let Some(path) = emulator_path
             && {
@@ -139,18 +134,31 @@ impl DeviceEnumerator for BitBoxDevice {
                 selector.matches(DeviceType::BitBox02, path)
                     || selector.matches(DeviceType::BitBox02, addr)
             }
-            && let Ok(stream) = TcpStream::connect(simulator_tcp_addr(path)).await
+            && TcpStream::connect(simulator_tcp_addr(path)).await.is_ok()
         {
-            scan.devices
-                .push(Self::simulator_device(path, stream, selector.network).await?);
+            candidates.push(DeviceCandidate {
+                device_type: DeviceType::BitBox02,
+                name: "BitBox02 Simulator".to_owned(),
+                model: "bitbox02_simulator".to_owned(),
+                path: path.to_owned(),
+                is_emulated: true,
+            });
         }
-        Ok(scan)
+        Ok(candidates)
     }
-}
 
-fn hid_path(dev: &HidDevice) -> String {
-    let suffix = dev.serial_number.as_deref().unwrap_or(&dev.name);
-    format!("hid:{:04x}:{:04x}:{suffix}", dev.vendor_id, dev.product_id)
+    async fn open(
+        candidate: &DeviceCandidate,
+        selector: &DeviceSelector,
+        pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
+    ) -> NativeResult<Device> {
+        if candidate.is_emulated {
+            Self::open_simulator(candidate, selector.network).await
+        } else {
+            Self::open_hid(candidate, selector.network, pairing_code).await
+        }
+    }
 }
 
 /// A `Channel` over a raw TCP connection to the BitBox02 simulator.

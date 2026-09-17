@@ -11,9 +11,14 @@ pub enum NativeError {
     #[error("{0}")]
     MissingDeviceId(&'static str),
 
+    /// Listed on the bus, but no longer there when it was opened.
+    #[error("{0} is no longer connected")]
+    Gone(String),
+
     #[cfg(any(
         feature = "bitbox",
         feature = "coldcard",
+        feature = "keepkey",
         feature = "ledger",
         feature = "trezor"
     ))]
@@ -23,7 +28,7 @@ pub enum NativeError {
     #[error("{0}")]
     Io(#[from] std::io::Error),
 
-    #[cfg(feature = "trezor")]
+    #[cfg(any(feature = "keepkey", feature = "trezor"))]
     #[error("usb enumeration failed: {0}")]
     Usb(#[from] nusb::Error),
 
@@ -34,4 +39,12 @@ pub enum NativeError {
     #[cfg(any(feature = "jade", feature = "specter"))]
     #[error("serial port enumeration unavailable: /sys/class/tty is missing")]
     SerialSysfsMissing,
+
+    /// The port opened, but the device did not answer as the expected type.
+    #[cfg(feature = "specter")]
+    #[error("probing {device_type}: {source}")]
+    Probe {
+        device_type: DeviceType,
+        source: bhwi_async::HWIDeviceError,
+    },
 }

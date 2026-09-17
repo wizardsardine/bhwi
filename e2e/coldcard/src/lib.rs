@@ -62,10 +62,9 @@ impl DeviceControl {
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64, Encoding};
-    use bhwi::common::{MultisigAddressType, MultisigDisplayAddress};
     use bhwi_async::{
-        DeviceBackup, DisplayAddress, HWI, WalletRegistration,
-        transport::coldcard::DEFAULT_CKCC_SOCKET,
+        DeviceBackup, DisplayAddress, HWI, MultisigAddressType, MultisigDisplayAddress,
+        WalletRegistration, transport::coldcard::DEFAULT_CKCC_SOCKET,
     };
     use bitcoin::{
         Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,

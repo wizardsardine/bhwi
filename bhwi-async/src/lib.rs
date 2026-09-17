@@ -11,7 +11,7 @@ pub mod jade;
 pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
-#[cfg(any(feature = "bitbox", feature = "trezor"))]
+#[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 pub mod management;
 pub mod psbt;
 pub mod signing;
@@ -31,7 +31,12 @@ pub use bhwi::common::Info;
 pub use bhwi::common::RestoreOptions;
 pub use bhwi::common::SetupOptions;
 pub use bhwi::common::WalletRegistration;
+/// Named by `HostInteraction`, so implementing it needs no `bhwi` dependency.
+pub use bhwi::common::{Error as HostError, HostRequest, HostResponse, PinMatrixRequestKind};
+pub use bhwi::common::{MultisigAddressType, MultisigDisplayAddress};
 use bhwi::miniscript::descriptor::WalletPolicy;
+#[cfg(any(feature = "trezor", feature = "keepkey"))]
+pub use bhwi::passphrase::HostPassphrase;
 use bhwi::{
     Interpreter,
     bitcoin::{

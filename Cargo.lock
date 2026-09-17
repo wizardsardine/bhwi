@@ -346,7 +346,6 @@ name = "bhwi-e2e-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bhwi",
  "bhwi-async",
  "bhwi-async-transport",
  "bhwi-cli",
@@ -366,7 +365,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64ct",
- "bhwi",
  "bhwi-async",
  "bhwi-async-transport",
  "bitcoin",
@@ -379,7 +377,7 @@ name = "bhwi-e2e-hwi-parity"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bhwi",
+ "bhwi-async",
  "bhwi-e2e-keepkey",
  "bhwi-e2e-trezor",
  "bitcoin",

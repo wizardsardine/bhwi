@@ -8,16 +8,15 @@ use bhwi::keepkey::{
 use bhwi_async::{KeepKey, transport::trezor::TrezorTransport};
 use futures::stream::{StreamExt, TryStreamExt};
 
-use crate::NativeResult;
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
-    PairingCodePrompt, ScanEntry, SkippedDevice,
+    Device, DeviceCandidate, DeviceEnumerator, DeviceSelector, DeviceType, HostInteractionFactory,
+    PairingCodePrompt,
     emulator::{EMULATOR_PROBE_TIMEOUT, EmulatorClient, emulator_socket},
-    hid::HidChannel,
-    trezor::webusb_path,
+    hid::{HidChannel, find_hid, hid_path},
     uses_backend,
-    webusb::WebUsbChannel,
+    webusb::{WebUsbChannel, webusb_path},
 };
+use crate::{NativeError, NativeResult};
 
 // KeepKey reuses the Trezor V1 wire format.
 pub type KeepKeyHidDevice = KeepKey<TrezorTransport<HidChannel>>;
@@ -30,61 +29,72 @@ const SIMULATOR_MODEL: &str = "keepkey_simulator";
 pub struct KeepKeyDevice;
 
 impl KeepKeyDevice {
-    async fn hid_device(
+    /// A KeepKey also exposes a U2F interface at this vendor and product id.
+    fn is_keepkey(dev: &HidDevice) -> bool {
+        dev.vendor_id == KEEPKEY_VID
+            && dev.product_id == KEEPKEY_HID_PID
+            && dev.usage_page == KEEPKEY_HID_USAGE_PAGE
+    }
+
+    async fn open_hid(
+        candidate: &DeviceCandidate,
         selector: &DeviceSelector,
-        dev: HidDevice,
         host_interaction: Option<&HostInteractionFactory>,
-    ) -> NativeResult<ScanEntry> {
-        let path = crate::trezor::hid_path(&dev);
-        let opened = match dev.open().await {
-            Ok(opened) => opened,
-            Err(err) => return Ok(ScanEntry::skipped(DeviceType::KeepKey, MODEL, path, &err)),
-        };
+    ) -> NativeResult<Device> {
+        let dev = find_hid(|dev| hid_path(dev) == candidate.path && Self::is_keepkey(dev))
+            .await?
+            .ok_or_else(|| NativeError::Gone(candidate.path.clone()))?;
+        let opened = dev.open().await?;
         let device = KeepKeyHidDevice::new(TrezorTransport::new(HidChannel::new(opened)))
             .with_network(selector.network)
             .with_passphrase(selector.passphrase.clone());
-        Ok(ScanEntry::Found(Device::new(
-            "KeepKey",
-            DeviceType::KeepKey,
-            path,
-            MODEL,
-            Box::new(with_host_interaction(device, host_interaction)),
-            false,
-        )))
-    }
-
-    async fn webusb_device(
-        selector: &DeviceSelector,
-        info: &nusb::DeviceInfo,
-        host_interaction: Option<&HostInteractionFactory>,
-    ) -> NativeResult<Device> {
-        let channel = WebUsbChannel::open(info).await?;
-        let device = KeepKeyWebUsbDevice::new(TrezorTransport::new(channel))
-            .with_network(selector.network)
-            .with_passphrase(selector.passphrase.clone());
         Ok(Device::new(
-            "KeepKey",
+            &candidate.name,
             DeviceType::KeepKey,
-            webusb_path(info),
-            MODEL,
+            &candidate.path,
+            &candidate.model,
             Box::new(with_host_interaction(device, host_interaction)),
             false,
         ))
     }
 
-    async fn emulator_device(
+    async fn open_webusb(
+        candidate: &DeviceCandidate,
         selector: &DeviceSelector,
-        client: EmulatorClient,
         host_interaction: Option<&HostInteractionFactory>,
     ) -> NativeResult<Device> {
+        let info = nusb::list_devices()
+            .await?
+            .find(|info| webusb_path(info) == candidate.path)
+            .ok_or_else(|| NativeError::Gone(candidate.path.clone()))?;
+        let channel = WebUsbChannel::open(&info).await?;
+        let device = KeepKeyWebUsbDevice::new(TrezorTransport::new(channel))
+            .with_network(selector.network)
+            .with_passphrase(selector.passphrase.clone());
+        Ok(Device::new(
+            &candidate.name,
+            DeviceType::KeepKey,
+            &candidate.path,
+            &candidate.model,
+            Box::new(with_host_interaction(device, host_interaction)),
+            false,
+        ))
+    }
+
+    async fn open_emulator(
+        candidate: &DeviceCandidate,
+        selector: &DeviceSelector,
+        host_interaction: Option<&HostInteractionFactory>,
+    ) -> NativeResult<Device> {
+        let client = EmulatorClient::new(&candidate.path).await?;
         let device = KeepKeyEmulatorDevice::new(TrezorTransport::new(client))
             .with_network(selector.network)
             .with_passphrase(selector.passphrase.clone());
         Ok(Device::new(
-            "KeepKey Emulator",
+            &candidate.name,
             DeviceType::KeepKey,
-            DEFAULT_KEEPKEY_EMULATOR,
-            SIMULATOR_MODEL,
+            &candidate.path,
+            &candidate.model,
             Box::new(with_host_interaction(device, host_interaction)),
             true,
         ))
@@ -93,37 +103,32 @@ impl KeepKeyDevice {
 
 #[async_trait(?Send)]
 impl DeviceEnumerator for KeepKeyDevice {
-    async fn enumerate(
-        selector: &DeviceSelector,
-        _pairing_code: Option<&PairingCodePrompt>,
-        host_interaction: Option<&HostInteractionFactory>,
-    ) -> NativeResult<DeviceScan> {
+    async fn list(selector: &DeviceSelector) -> NativeResult<Vec<DeviceCandidate>> {
         let selected_path = selector.device_path.as_deref();
-        let mut scan = DeviceScan::default();
+        let mut candidates = Vec::new();
 
         if uses_backend(selected_path, "hid:") {
-            let found: DeviceScan = HidBackend::default()
+            let found: Vec<DeviceCandidate> = HidBackend::default()
                 .enumerate()
                 .await?
-                .map(Ok)
+                .map(Ok::<HidDevice, NativeError>)
                 .try_filter_map(|dev| async move {
-                    let path = crate::trezor::hid_path(&dev);
-                    if selector.matches(DeviceType::KeepKey, &path)
-                        && dev.vendor_id == KEEPKEY_VID
-                        && dev.product_id == KEEPKEY_HID_PID
-                        && dev.usage_page == KEEPKEY_HID_USAGE_PAGE
-                    {
-                        Self::hid_device(selector, dev, host_interaction)
-                            .await
-                            .map(Some)
+                    let path = hid_path(&dev);
+                    if selector.matches(DeviceType::KeepKey, &path) && Self::is_keepkey(&dev) {
+                        Ok(Some(DeviceCandidate {
+                            device_type: DeviceType::KeepKey,
+                            name: "KeepKey".to_owned(),
+                            model: MODEL.to_owned(),
+                            path,
+                            is_emulated: false,
+                        }))
                     } else {
                         Ok(None)
                     }
                 })
                 .try_collect()
                 .await?;
-            scan.devices.extend(found.devices);
-            scan.skipped.extend(found.skipped);
+            candidates.extend(found);
         }
 
         if uses_backend(selected_path, "webusb:") {
@@ -134,28 +139,48 @@ impl DeviceEnumerator for KeepKeyDevice {
                 if !selector.matches(DeviceType::KeepKey, &path) {
                     continue;
                 }
-                match Self::webusb_device(selector, &info, host_interaction).await {
-                    Ok(device) => scan.devices.push(device),
-                    Err(err) => scan.skipped.push(SkippedDevice::new(
-                        DeviceType::KeepKey,
-                        MODEL,
-                        path,
-                        &err,
-                    )),
-                }
+                candidates.push(DeviceCandidate {
+                    device_type: DeviceType::KeepKey,
+                    name: "KeepKey".to_owned(),
+                    model: MODEL.to_owned(),
+                    path,
+                    is_emulated: false,
+                });
             }
         }
 
+        // The emulator answers a UDP ping, which is how it is told apart from a
+        // socket nobody is serving.
         if selector.include_emulators
             && matches_emulator(selector)
             && let Ok(client) = EmulatorClient::new(DEFAULT_KEEPKEY_EMULATOR).await
             && client.ping(EMULATOR_PROBE_TIMEOUT).await
         {
-            scan.devices
-                .push(Self::emulator_device(selector, client, host_interaction).await?);
+            candidates.push(DeviceCandidate {
+                device_type: DeviceType::KeepKey,
+                name: "KeepKey Emulator".to_owned(),
+                model: SIMULATOR_MODEL.to_owned(),
+                path: DEFAULT_KEEPKEY_EMULATOR.to_owned(),
+                is_emulated: true,
+            });
         }
 
-        Ok(scan)
+        Ok(candidates)
+    }
+
+    async fn open(
+        candidate: &DeviceCandidate,
+        selector: &DeviceSelector,
+        _pairing_code: Option<&PairingCodePrompt>,
+        host_interaction: Option<&HostInteractionFactory>,
+    ) -> NativeResult<Device> {
+        if candidate.is_emulated {
+            Self::open_emulator(candidate, selector, host_interaction).await
+        } else if candidate.path.starts_with("webusb:") {
+            Self::open_webusb(candidate, selector, host_interaction).await
+        } else {
+            Self::open_hid(candidate, selector, host_interaction).await
+        }
     }
 }
 

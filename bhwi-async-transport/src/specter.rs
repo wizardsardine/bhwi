@@ -23,8 +23,8 @@ use tokio_serial::{
 
 use crate::serial::{is_macos_dialin, require_tty_sysfs};
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
-    NativeResult, PairingCodePrompt, ScanEntry,
+    Device, DeviceCandidate, DeviceEnumerator, DeviceSelector, DeviceType, HostInteractionFactory,
+    NativeError, NativeResult, PairingCodePrompt,
 };
 
 /// Specter-DIY's MicroPython USB vendor identifier.
@@ -133,50 +133,45 @@ impl SpecterDevice {
         info.vid == SPECTER_USB_VID
     }
 
-    async fn serial_device(network: Network, port_name: &str, info: UsbPortInfo) -> ScanEntry {
-        let stream = match SerialSpecterStream::open(port_name) {
-            Ok(stream) => stream,
-            Err(err) => {
-                return ScanEntry::skipped(DeviceType::Specter, "specter_diy", port_name, &err);
-            }
-        };
-        let device = Device::new(
-            &info.product.unwrap_or_else(|| "Specter-DIY".into()),
+    fn simulator(path: String) -> DeviceCandidate {
+        DeviceCandidate {
+            device_type: DeviceType::Specter,
+            name: "Specter-DIY Simulator".to_owned(),
+            model: "specter_diy_simulator".to_owned(),
+            path,
+            is_emulated: true,
+        }
+    }
+
+    fn open_serial(candidate: &DeviceCandidate, network: Network) -> NativeResult<Device> {
+        let stream = SerialSpecterStream::open(&candidate.path)?;
+        Ok(Device::new(
+            &candidate.name,
             DeviceType::Specter,
-            port_name,
-            "specter_diy",
+            &candidate.path,
+            &candidate.model,
             Box::new(SpecterSerialDevice::new(
                 network,
                 SpecterTransport::new(stream),
             )),
             false,
-        );
-        Self::probe(device).await
+        ))
     }
 
-    fn tcp_device(network: Network, path: &str, stream: TcpStream) -> Device {
-        Device::new(
-            "Specter-DIY Simulator",
+    async fn open_tcp(candidate: &DeviceCandidate, network: Network) -> NativeResult<Device> {
+        let address = tcp_address(&candidate.path).unwrap_or(&candidate.path);
+        let stream = connect_tcp(address).await?;
+        Ok(Device::new(
+            &candidate.name,
             DeviceType::Specter,
-            path,
-            "specter_diy_simulator",
+            &candidate.path,
+            &candidate.model,
             Box::new(SpecterTcpDevice::new(
                 network,
                 SpecterTransport::new(TcpSpecterStream::new(stream)),
             )),
             true,
-        )
-    }
-
-    /// The MicroPython VID is shared by every MicroPython board, so only a
-    /// fingerprint reply identifies a Specter-DIY.
-    async fn probe(mut device: Device) -> ScanEntry {
-        match device.fingerprint().await {
-            Ok(_) => ScanEntry::Found(device),
-            Err(err) => {
-                ScanEntry::skipped(DeviceType::Specter, device.model(), device.path(), &err)
-            }
-        }
+        ))
     }
 }
 
@@ -202,54 +197,65 @@ async fn connect_tcp(address: &str) -> io::Result<TcpStream> {
 
 #[async_trait(?Send)]
 impl DeviceEnumerator for SpecterDevice {
-    async fn enumerate(
-        selector: &DeviceSelector,
-        _pairing_code: Option<&PairingCodePrompt>,
-        _host_interaction: Option<&HostInteractionFactory>,
-    ) -> NativeResult<DeviceScan> {
-        let mut scan = DeviceScan::default();
-
-        // An explicit TCP selector only ever opens the named simulator.
+    async fn list(selector: &DeviceSelector) -> NativeResult<Vec<DeviceCandidate>> {
         if let Some(address) = selected_tcp_address(selector) {
-            let stream = connect_tcp(address).await?;
-            let path = format!("tcp:{address}");
-            let device = Self::tcp_device(selector.network, &path, stream);
-            scan.extend([Self::probe(device).await]);
-            return Ok(scan);
+            return Ok(vec![Self::simulator(format!("tcp:{address}"))]);
         }
 
         require_tty_sysfs()?;
-        for port in available_ports()? {
-            let SerialPortType::UsbPort(usb) = port.port_type else {
-                continue;
-            };
-            if !Self::valid_usb(&usb)
-                || is_macos_dialin(&port.port_name)
-                || !selector.matches(DeviceType::Specter, &port.port_name)
-            {
-                continue;
-            }
-            let selected = selector.device_path.as_deref() == Some(port.port_name.as_str());
-            match Self::serial_device(selector.network, &port.port_name, usb).await {
-                entry @ ScanEntry::Found(_) => scan.extend([entry]),
-                // Another MicroPython board on the same VID is not a Specter-DIY.
-                entry @ ScanEntry::Skipped(_) if selected => scan.extend([entry]),
-                ScanEntry::Skipped(_) => {}
-            }
-        }
+        let mut candidates: Vec<DeviceCandidate> = available_ports()?
+            .into_iter()
+            .filter_map(|port| match port.port_type {
+                SerialPortType::UsbPort(usb)
+                    if Self::valid_usb(&usb)
+                        && !is_macos_dialin(&port.port_name)
+                        && selector.matches(DeviceType::Specter, &port.port_name) =>
+                {
+                    Some(DeviceCandidate {
+                        device_type: DeviceType::Specter,
+                        name: usb.product.unwrap_or_else(|| "Specter-DIY".into()),
+                        model: "specter_diy".to_owned(),
+                        path: port.port_name,
+                        is_emulated: false,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
 
+        // Only a connection tells us the simulator is there; it is dropped again.
         if selector.include_emulators
             && selector.matches(DeviceType::Specter, DEFAULT_SPECTER_SIMULATOR_ADDRESS)
             && let Some(address) = tcp_address(DEFAULT_SPECTER_SIMULATOR_ADDRESS)
-            && let Ok(stream) = connect_tcp(address).await
+            && connect_tcp(address).await.is_ok()
         {
-            let device =
-                Self::tcp_device(selector.network, DEFAULT_SPECTER_SIMULATOR_ADDRESS, stream);
-            if let entry @ ScanEntry::Found(_) = Self::probe(device).await {
-                scan.extend([entry]);
-            }
+            candidates.push(Self::simulator(
+                DEFAULT_SPECTER_SIMULATOR_ADDRESS.to_owned(),
+            ));
         }
-        Ok(scan)
+        Ok(candidates)
+    }
+
+    async fn open(
+        candidate: &DeviceCandidate,
+        selector: &DeviceSelector,
+        _pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
+    ) -> NativeResult<Device> {
+        let mut device = if candidate.is_emulated {
+            Self::open_tcp(candidate, selector.network).await?
+        } else {
+            Self::open_serial(candidate, selector.network)?
+        };
+        // Every MicroPython board shares the VID; only a fingerprint reply proves a Specter-DIY.
+        device
+            .fingerprint()
+            .await
+            .map_err(|source| NativeError::Probe {
+                device_type: DeviceType::Specter,
+                source,
+            })?;
+        Ok(device)
     }
 }
 
@@ -279,6 +285,19 @@ mod tests {
             tcp_address(DEFAULT_SPECTER_SIMULATOR_ADDRESS),
             Some("127.0.0.1:8789")
         );
+    }
+
+    #[tokio::test]
+    async fn tcp_selectors_bypass_serial_port_enumeration() {
+        let selector = DeviceSelector {
+            device_type: Some(DeviceType::Specter),
+            device_path: Some("tcp:127.0.0.1:1".into()),
+            ..DeviceSelector::default()
+        };
+        let candidates = SpecterDevice::list(&selector).await.unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, "tcp:127.0.0.1:1");
+        assert!(candidates[0].is_emulated);
     }
 
     #[test]

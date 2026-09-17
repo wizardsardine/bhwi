@@ -20,8 +20,8 @@ use tokio_serial::{
 };
 
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
-    PairingCodePrompt, ScanEntry,
+    Device, DeviceCandidate, DeviceEnumerator, DeviceSelector, DeviceType, HostInteractionFactory,
+    NativeError, PairingCodePrompt,
 };
 
 pub type JadeSerialDevice = Jade<SerialTransport, PinServerClient>;
@@ -83,46 +83,39 @@ impl JadeDevice {
             .is_some()
     }
 
-    async fn serial_device(
-        network: Network,
-        port_name: &str,
-        info: UsbPortInfo,
-    ) -> NativeResult<ScanEntry> {
-        let transport = match SerialTransport::new(port_name) {
-            Ok(transport) => transport,
-            Err(err) => {
-                return Ok(ScanEntry::skipped(
-                    DeviceType::Jade,
-                    "jade",
-                    port_name,
-                    &err,
-                ));
-            }
-        };
-        Ok(ScanEntry::Found(Device::new(
-            &format!(
-                "{} {}",
-                info.product.unwrap_or_else(|| "Jade".into()),
-                info.manufacturer.unwrap_or_else(|| "Blockstream".into())
-            ),
+    fn usb_name(info: &UsbPortInfo) -> String {
+        format!(
+            "{} {}",
+            info.product.clone().unwrap_or_else(|| "Jade".into()),
+            info.manufacturer
+                .clone()
+                .unwrap_or_else(|| "Blockstream".into())
+        )
+    }
+
+    async fn open_serial(candidate: &DeviceCandidate, network: Network) -> NativeResult<Device> {
+        let transport = SerialTransport::new(&candidate.path)?;
+        Ok(Device::new(
+            &candidate.name,
             DeviceType::Jade,
-            port_name,
-            "jade",
+            &candidate.path,
+            &candidate.model,
             Box::new(JadeSerialDevice::new(
                 network,
                 transport,
                 PinServerClient::new(),
             )),
             false,
-        )))
+        ))
     }
 
-    async fn qemu_device(network: Network, stream: TcpStream) -> NativeResult<Device> {
+    async fn open_qemu(candidate: &DeviceCandidate, network: Network) -> NativeResult<Device> {
+        let stream = TcpStream::connect(jade_tcp_addr(&candidate.path)).await?;
         Ok(Device::new(
-            "Jade QEMU Emulator",
+            &candidate.name,
             DeviceType::Jade,
-            DEFAULT_JADE_QEMU_ADDRESS,
-            "jade_simulator",
+            &candidate.path,
+            &candidate.model,
             Box::new(JadeQemuDevice::new(
                 network,
                 TcpTransport::new(TcpClient::new(stream)),
@@ -135,38 +128,60 @@ impl JadeDevice {
 
 #[async_trait(?Send)]
 impl DeviceEnumerator for JadeDevice {
-    async fn enumerate(
-        selector: &DeviceSelector,
-        _pairing_code: Option<&PairingCodePrompt>,
-        _host_interaction: Option<&HostInteractionFactory>,
-    ) -> NativeResult<DeviceScan> {
+    async fn list(selector: &DeviceSelector) -> NativeResult<Vec<DeviceCandidate>> {
         require_tty_sysfs()?;
-        let mut scan: DeviceScan = iter(available_ports()?.into_iter().map(Ok))
-            .try_filter_map(|info| async move {
-                match info.port_type {
-                    SerialPortType::UsbPort(usb)
-                        if selector.matches(DeviceType::Jade, &info.port_name)
-                            && !is_macos_dialin(&info.port_name)
-                            && Self::valid_usb(&usb) =>
-                    {
-                        Self::serial_device(selector.network, &info.port_name, usb)
-                            .await
-                            .map(Some)
+        let mut candidates: Vec<DeviceCandidate> =
+            iter(available_ports()?.into_iter().map(Ok::<_, NativeError>))
+                .try_filter_map(|info| async move {
+                    match info.port_type {
+                        SerialPortType::UsbPort(usb)
+                            if selector.matches(DeviceType::Jade, &info.port_name)
+                                && !is_macos_dialin(&info.port_name)
+                                && Self::valid_usb(&usb) =>
+                        {
+                            Ok(Some(DeviceCandidate {
+                                device_type: DeviceType::Jade,
+                                name: Self::usb_name(&usb),
+                                model: "jade".to_owned(),
+                                path: info.port_name.clone(),
+                                is_emulated: false,
+                            }))
+                        }
+                        _ => Ok(None),
                     }
-                    _ => Ok(None),
-                }
-            })
-            .try_collect()
-            .await?;
+                })
+                .try_collect()
+                .await?;
+        // Only a connection tells us the emulator is there; it is dropped again.
         if selector.include_emulators
             && (selector.matches(DeviceType::Jade, DEFAULT_JADE_QEMU_ADDRESS)
                 || selector.matches(DeviceType::Jade, jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS)))
-            && let Ok(stream) = TcpStream::connect(jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS)).await
+            && TcpStream::connect(jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS))
+                .await
+                .is_ok()
         {
-            scan.devices
-                .push(Self::qemu_device(selector.network, stream).await?);
+            candidates.push(DeviceCandidate {
+                device_type: DeviceType::Jade,
+                name: "Jade QEMU Emulator".to_owned(),
+                model: "jade_simulator".to_owned(),
+                path: DEFAULT_JADE_QEMU_ADDRESS.to_owned(),
+                is_emulated: true,
+            });
         }
-        Ok(scan)
+        Ok(candidates)
+    }
+
+    async fn open(
+        candidate: &DeviceCandidate,
+        selector: &DeviceSelector,
+        _pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
+    ) -> NativeResult<Device> {
+        if candidate.is_emulated {
+            Self::open_qemu(candidate, selector.network).await
+        } else {
+            Self::open_serial(candidate, selector.network).await
+        }
     }
 }
 

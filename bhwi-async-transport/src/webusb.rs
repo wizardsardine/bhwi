@@ -72,3 +72,44 @@ impl Channel for WebUsbChannel {
         Ok(n)
     }
 }
+
+pub(crate) fn webusb_path(info: &nusb::DeviceInfo) -> String {
+    let mut path = format!("webusb:{}", bus_number(info.bus_id()));
+    for port in info.port_chain() {
+        path.push_str(&format!(":{port}"));
+    }
+    path
+}
+
+fn bus_number(bus_id: &str) -> String {
+    let parsed = if cfg!(target_os = "macos") {
+        u32::from_str_radix(bus_id, 16).ok()
+    } else {
+        bus_id.parse::<u32>().ok()
+    };
+    match parsed {
+        Some(bus) => format!("{bus:03}"),
+        None => bus_id.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bus_number_is_three_digit_decimal() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(bus_number("14"), "020");
+            assert_eq!(bus_number("01"), "001");
+        } else {
+            assert_eq!(bus_number("001"), "001");
+            assert_eq!(bus_number("20"), "020");
+        }
+    }
+
+    #[test]
+    fn bus_number_falls_back_to_the_raw_id() {
+        assert_eq!(bus_number("PCIROOT(0)#PCI(0201)"), "PCIROOT(0)#PCI(0201)");
+    }
+}

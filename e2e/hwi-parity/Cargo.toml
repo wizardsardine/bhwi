@@ -7,7 +7,7 @@ license-file.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-bhwi = { workspace = true, features = ["keepkey"] }
+bhwi-async.workspace = true
 bitcoin = { workspace = true, features = ["base64"] }
 serde_json.workspace = true
 

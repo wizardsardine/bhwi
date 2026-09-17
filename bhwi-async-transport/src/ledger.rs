@@ -22,8 +22,9 @@ use tokio::{
 };
 
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
-    PairingCodePrompt, ScanEntry, hid::HidChannel,
+    Device, DeviceCandidate, DeviceEnumerator, DeviceSelector, DeviceType, HostInteractionFactory,
+    PairingCodePrompt,
+    hid::{HidChannel, find_hid, hid_path},
 };
 
 pub type LedgerHidDevice = Ledger<LedgerTransportHID<HidChannel>>;
@@ -32,32 +33,45 @@ pub type LedgerSpeculosDevice = Ledger<LedgerTransportTcp<SpeculosTcpChannel>>;
 pub struct LedgerDevice;
 
 impl LedgerDevice {
-    async fn hid_device(dev: HidDevice) -> NativeResult<ScanEntry> {
-        let path = hid_path(&dev);
+    /// A Ledger also exposes a U2F interface at this vendor id.
+    fn is_ledger(dev: &HidDevice) -> NativeResult<bool> {
+        let DeviceId {
+            vid, usage_page, ..
+        } = LEDGER_DEVICE_ID;
+        Ok(dev.vendor_id == vid
+            && dev.usage_page
+                == usage_page.ok_or(NativeError::MissingDeviceId(
+                    "ledger usage page constant not set",
+                ))?)
+    }
+
+    async fn open_hid(candidate: &DeviceCandidate) -> NativeResult<Device> {
+        let dev = find_hid(|dev| {
+            hid_path(dev) == candidate.path && Self::is_ledger(dev).unwrap_or(false)
+        })
+        .await?
+        .ok_or_else(|| NativeError::Gone(candidate.path.clone()))?;
         let name = dev.name.clone();
-        let model = ledger_model(dev.product_id, false);
-        let opened = match dev.open().await {
-            Ok(opened) => opened,
-            Err(err) => return Ok(ScanEntry::skipped(DeviceType::Ledger, model, path, &err)),
-        };
-        Ok(ScanEntry::Found(Device::new(
+        let opened = dev.open().await?;
+        Ok(Device::new(
             &name,
             DeviceType::Ledger,
-            path,
-            model,
+            &candidate.path,
+            &candidate.model,
             Box::new(LedgerHidDevice::new(LedgerTransportHID::new(
                 HidChannel::new(opened),
             ))),
             false,
-        )))
+        ))
     }
 
-    async fn speculos_device(path: &str, stream: TcpStream) -> NativeResult<Device> {
+    async fn open_speculos(candidate: &DeviceCandidate) -> NativeResult<Device> {
+        let stream = TcpStream::connect(speculos_tcp_addr(&candidate.path)).await?;
         Ok(Device::new(
-            "Ledger Speculos Emulator",
+            &candidate.name,
             DeviceType::Ledger,
-            path,
-            ledger_model(0x1000, true),
+            &candidate.path,
+            &candidate.model,
             Box::new(LedgerSpeculosDevice::new(LedgerTransportTcp::new(
                 SpeculosTcpChannel {
                     stream: Arc::new(Mutex::new(stream)),
@@ -74,37 +88,29 @@ fn speculos_tcp_addr(path: &str) -> &str {
 
 #[async_trait(?Send)]
 impl DeviceEnumerator for LedgerDevice {
-    async fn enumerate(
-        selector: &DeviceSelector,
-        _pairing_code: Option<&PairingCodePrompt>,
-        _host_interaction: Option<&HostInteractionFactory>,
-    ) -> NativeResult<DeviceScan> {
-        let DeviceId {
-            vid,
-            usage_page,
-            emulator_path,
-            ..
-        } = LEDGER_DEVICE_ID;
-        let mut scan: DeviceScan = HidBackend::default()
+    async fn list(selector: &DeviceSelector) -> NativeResult<Vec<DeviceCandidate>> {
+        let DeviceId { emulator_path, .. } = LEDGER_DEVICE_ID;
+        let mut candidates: Vec<DeviceCandidate> = HidBackend::default()
             .enumerate()
             .await?
-            .map(Ok)
+            .map(Ok::<HidDevice, NativeError>)
             .try_filter_map(|dev| async move {
                 let path = hid_path(&dev);
-                if selector.matches(DeviceType::Ledger, &path)
-                    && dev.vendor_id == vid
-                    && dev.usage_page
-                        == usage_page.ok_or(NativeError::MissingDeviceId(
-                            "ledger usage page constant not set",
-                        ))?
-                {
-                    Self::hid_device(dev).await.map(Some)
+                if selector.matches(DeviceType::Ledger, &path) && Self::is_ledger(&dev)? {
+                    Ok(Some(DeviceCandidate {
+                        device_type: DeviceType::Ledger,
+                        name: dev.name.clone(),
+                        model: ledger_model(dev.product_id, false).to_owned(),
+                        path,
+                        is_emulated: false,
+                    }))
                 } else {
                     Ok(None)
                 }
             })
             .try_collect()
             .await?;
+        // Only a connection tells us speculos is there; it is dropped again.
         if selector.include_emulators
             && let Some(path) = emulator_path
             && {
@@ -112,18 +118,31 @@ impl DeviceEnumerator for LedgerDevice {
                 selector.matches(DeviceType::Ledger, path)
                     || selector.matches(DeviceType::Ledger, addr)
             }
-            && let Ok(stream) = TcpStream::connect(speculos_tcp_addr(path)).await
+            && TcpStream::connect(speculos_tcp_addr(path)).await.is_ok()
         {
-            scan.devices
-                .push(Self::speculos_device(path, stream).await?);
+            candidates.push(DeviceCandidate {
+                device_type: DeviceType::Ledger,
+                name: "Ledger Speculos Emulator".to_owned(),
+                model: ledger_model(0x1000, true).to_owned(),
+                path: path.to_owned(),
+                is_emulated: true,
+            });
         }
-        Ok(scan)
+        Ok(candidates)
     }
-}
 
-fn hid_path(dev: &HidDevice) -> String {
-    let suffix = dev.serial_number.as_deref().unwrap_or(&dev.name);
-    format!("hid:{:04x}:{:04x}:{suffix}", dev.vendor_id, dev.product_id)
+    async fn open(
+        candidate: &DeviceCandidate,
+        _selector: &DeviceSelector,
+        _pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
+    ) -> NativeResult<Device> {
+        if candidate.is_emulated {
+            Self::open_speculos(candidate).await
+        } else {
+            Self::open_hid(candidate).await
+        }
+    }
 }
 
 fn ledger_model(product_id: u16, is_emulated: bool) -> &'static str {
