@@ -14,8 +14,9 @@ use futures::TryStreamExt;
 use rand_core::OsRng;
 
 use crate::{
-    Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
-    PairingCodePrompt, ScanEntry, hid::HidChannel,
+    Device, DeviceCandidate, DeviceEnumerator, DeviceSelector, DeviceType, HostInteractionFactory,
+    PairingCodePrompt,
+    hid::{HidChannel, find_hid, hid_path},
 };
 
 pub type ColdcardHidDevice = Coldcard<ColdcardTransportHID<HidChannel>>;
@@ -23,91 +24,68 @@ pub type ColdcardHidDevice = Coldcard<ColdcardTransportHID<HidChannel>>;
 pub struct ColdcardDevice;
 
 impl ColdcardDevice {
-    async fn hid_device(hid_dev: HidDevice, rng: &mut OsRng) -> NativeResult<ScanEntry> {
-        let path = hid_path(&hid_dev);
-        let name = hid_dev.name.clone();
-        let opened = match hid_dev.open().await {
-            Ok(opened) => opened,
-            Err(err) => {
-                return Ok(ScanEntry::skipped(
-                    DeviceType::Coldcard,
-                    "coldcard",
-                    path,
-                    &err,
-                ));
-            }
-        };
-        Ok(ScanEntry::Found(Device::new(
+    fn is_coldcard(dev: &HidDevice) -> bool {
+        let DeviceId { vid, pid, .. } = COLDCARD_DEVICE_ID;
+        dev.vendor_id == vid && Some(dev.product_id) == pid
+    }
+
+    async fn open_hid(candidate: &DeviceCandidate) -> NativeResult<Device> {
+        let dev = find_hid(|dev| hid_path(dev) == candidate.path && Self::is_coldcard(dev))
+            .await?
+            .ok_or_else(|| NativeError::Gone(candidate.path.clone()))?;
+        let name = dev.name.clone();
+        let opened = dev.open().await?;
+        Ok(Device::new(
             &name,
             DeviceType::Coldcard,
-            path,
-            "coldcard",
+            &candidate.path,
+            &candidate.model,
             Box::new(Coldcard::new(
                 ColdcardTransportHID::new(HidChannel::new(opened)),
-                rng,
+                &mut OsRng,
             )),
             false,
-        )))
+        ))
     }
 
     #[cfg(unix)]
-    async fn emulator_device(path: &str, rng: &mut OsRng) -> NativeResult<Option<ScanEntry>> {
-        if !std::fs::exists(path)? {
-            return Ok(None);
-        }
-        let client = match emulator::EmulatorClient::new(path).await {
-            Ok(client) => client,
-            Err(err) => {
-                return Ok(Some(ScanEntry::skipped(
-                    DeviceType::Coldcard,
-                    "coldcard_simulator",
-                    path,
-                    &err,
-                )));
-            }
-        };
-        Ok(Some(ScanEntry::Found(Device::new(
-            "Coldcard Emulator",
+    async fn open_emulator(candidate: &DeviceCandidate) -> NativeResult<Device> {
+        let client = emulator::EmulatorClient::new(&candidate.path).await?;
+        Ok(Device::new(
+            &candidate.name,
             DeviceType::Coldcard,
-            path,
-            "coldcard_simulator",
-            Box::new(Coldcard::new(ColdcardTransportHID::new(client), rng)),
+            &candidate.path,
+            &candidate.model,
+            Box::new(Coldcard::new(ColdcardTransportHID::new(client), &mut OsRng)),
             true,
-        ))))
+        ))
     }
 
     #[cfg(not(unix))]
-    async fn emulator_device(_path: &str, _rng: &mut OsRng) -> NativeResult<Option<ScanEntry>> {
-        Ok(None)
+    async fn open_emulator(candidate: &DeviceCandidate) -> NativeResult<Device> {
+        Err(NativeError::Gone(candidate.path.clone()))
     }
 }
 
 #[async_trait(?Send)]
 impl DeviceEnumerator for ColdcardDevice {
-    async fn enumerate(
-        selector: &DeviceSelector,
-        _pairing_code: Option<&PairingCodePrompt>,
-        _host_interaction: Option<&HostInteractionFactory>,
-    ) -> NativeResult<DeviceScan> {
-        let DeviceId {
-            vid,
-            pid,
-            emulator_path,
-            ..
-        } = COLDCARD_DEVICE_ID;
-        let mut rng = OsRng;
-        let mut scan: DeviceScan = HidBackend::default()
+    async fn list(selector: &DeviceSelector) -> NativeResult<Vec<DeviceCandidate>> {
+        let DeviceId { emulator_path, .. } = COLDCARD_DEVICE_ID;
+        let mut candidates: Vec<DeviceCandidate> = HidBackend::default()
             .enumerate()
             .await?
-            .map(Ok)
+            .map(Ok::<HidDevice, NativeError>)
             .try_filter_map(|dev| async move {
-                let path = hid_path(&dev);
-                if selector.matches(DeviceType::Coldcard, &path)
-                    && dev.vendor_id == vid
-                    && dev.product_id
-                        == pid.ok_or(NativeError::MissingDeviceId("coldcard pid not set"))?
+                if selector.matches(DeviceType::Coldcard, &hid_path(&dev))
+                    && Self::is_coldcard(&dev)
                 {
-                    Self::hid_device(dev, &mut rng).await.map(Some)
+                    Ok(Some(DeviceCandidate {
+                        device_type: DeviceType::Coldcard,
+                        name: dev.name.clone(),
+                        model: "coldcard".to_owned(),
+                        path: hid_path(&dev),
+                        is_emulated: false,
+                    }))
                 } else {
                     Ok(None)
                 }
@@ -117,17 +95,31 @@ impl DeviceEnumerator for ColdcardDevice {
         if selector.include_emulators
             && let Some(path) = emulator_path
             && selector.matches(DeviceType::Coldcard, path)
-            && let Some(entry) = Self::emulator_device(path, &mut rng).await?
+            && std::fs::exists(path)?
         {
-            scan.extend([entry]);
+            candidates.push(DeviceCandidate {
+                device_type: DeviceType::Coldcard,
+                name: "Coldcard Emulator".to_owned(),
+                model: "coldcard_simulator".to_owned(),
+                path: path.to_owned(),
+                is_emulated: true,
+            });
         }
-        Ok(scan)
+        Ok(candidates)
     }
-}
 
-fn hid_path(dev: &HidDevice) -> String {
-    let suffix = dev.serial_number.as_deref().unwrap_or(&dev.name);
-    format!("hid:{:04x}:{:04x}:{suffix}", dev.vendor_id, dev.product_id)
+    async fn open(
+        candidate: &DeviceCandidate,
+        _selector: &DeviceSelector,
+        _pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
+    ) -> NativeResult<Device> {
+        if candidate.is_emulated {
+            Self::open_emulator(candidate).await
+        } else {
+            Self::open_hid(candidate).await
+        }
+    }
 }
 
 #[cfg(unix)]

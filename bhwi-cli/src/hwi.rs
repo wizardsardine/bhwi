@@ -1430,13 +1430,6 @@ async fn send_pin_device(_selector: HwiSelector, _pin: String) -> HwiResponse {
 
 #[cfg(any(feature = "trezor", feature = "keepkey"))]
 async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
-    let pin = match bhwi::trezor::HostPin::new(pin) {
-        Ok(pin) => pin,
-        Err(err) => {
-            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
-        }
-    };
-
     let mut device = match device_for_pin_command(
         selector,
         HwiUnsupportedDeviceAction::SendPin { pin: String::new() },
@@ -1450,9 +1443,9 @@ async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
 
     let context = match device.device_type() {
         #[cfg(feature = "keepkey")]
-        DeviceType::KeepKey => bhwi_async::management::keepkey_pin_context(pin),
+        DeviceType::KeepKey => bhwi_async::management::keepkey_pin_context_from_positions(pin),
         #[cfg(feature = "trezor")]
-        DeviceType::Trezor => bhwi_async::management::trezor_pin_context(pin),
+        DeviceType::Trezor => bhwi_async::management::trezor_pin_context_from_positions(pin),
         #[allow(unreachable_patterns)]
         device_type => {
             let _ = pin;
@@ -1460,6 +1453,12 @@ async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
                 HwiErrorCode::UnsupportedCommand,
                 format!("{device_type} support is not compiled into this build"),
             ));
+        }
+    };
+    let context = match context {
+        Ok(context) => context,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
         }
     };
     match device.device().send_pin(Some(context)).await {
@@ -1586,7 +1585,7 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
             Err(LedgerSigningError::Device(err)) => {
                 return HwiResponse::Error(classify_device_error_for(DeviceType::Ledger, &err));
             }
-            Err(err) => {
+            Err(err @ (LedgerSigningError::MissingHmac | LedgerSigningError::HmacLength(_))) => {
                 return HwiResponse::Error(HwiError::new(
                     HwiErrorCode::DeviceConnectionError,
                     err.to_string(),

@@ -103,6 +103,16 @@ impl DeviceSelector {
 
 pub type PairingCodePrompt = Rc<dyn Fn(&str)>;
 
+/// A device found on a bus but not yet opened.
+#[derive(Debug, Clone)]
+pub struct DeviceCandidate {
+    pub device_type: DeviceType,
+    pub name: String,
+    pub model: String,
+    pub path: String,
+    pub is_emulated: bool,
+}
+
 /// A KeepKey asks mid-command, so this attaches before the device is boxed.
 pub type HostInteractionFactory = Rc<dyn Fn() -> Box<dyn crate::HostInteraction>>;
 
@@ -110,12 +120,16 @@ pub type HostInteractionFactory = Rc<dyn Fn() -> Box<dyn crate::HostInteraction>
 pub trait DeviceSource {
     type Error: std::error::Error + 'static;
 
-    async fn enumerate(
+    /// Enumerates buses without opening a device; an emulator is probed instead.
+    async fn list(&self, selector: &DeviceSelector) -> Result<Vec<DeviceCandidate>, Self::Error>;
+
+    async fn open(
         &self,
+        candidate: &DeviceCandidate,
         selector: &DeviceSelector,
         pairing_code: Option<&PairingCodePrompt>,
         host_interaction: Option<&HostInteractionFactory>,
-    ) -> Result<DeviceScan, Self::Error>;
+    ) -> Result<Device, Self::Error>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -161,9 +175,14 @@ impl<S: DeviceSource> DeviceManager<S> {
         self
     }
 
-    pub async fn enumerate(&self) -> Result<DeviceScan, S::Error> {
+    pub async fn list(&self) -> Result<Vec<DeviceCandidate>, S::Error> {
+        self.source.list(&self.selector).await
+    }
+
+    pub async fn open(&self, candidate: &DeviceCandidate) -> Result<Device, S::Error> {
         self.source
-            .enumerate(
+            .open(
+                candidate,
                 &self.selector,
                 self.pairing_code.as_ref(),
                 self.host_interaction.as_ref(),
@@ -171,21 +190,37 @@ impl<S: DeviceSource> DeviceManager<S> {
             .await
     }
 
+    pub async fn enumerate(&self) -> Result<DeviceScan, S::Error> {
+        let mut scan = DeviceScan::default();
+        for candidate in self.list().await? {
+            match self.open(&candidate).await {
+                Ok(device) => scan.devices.push(device),
+                Err(err) => scan.skipped.push(skipped_candidate(&candidate, &err)),
+            }
+        }
+        Ok(scan)
+    }
+
     pub async fn select(
         &self,
     ) -> Result<(Option<Device>, Vec<SkippedDevice>), SelectError<S::Error>> {
-        let scan = self.enumerate().await.map_err(SelectError::Source)?;
-        let mut skipped = scan.skipped;
+        let candidates = self.list().await.map_err(SelectError::Source)?;
+        let mut skipped = Vec::new();
         let mut target_dev = None;
-        for mut d in scan.devices {
-            let (device_type, model, path) =
-                (d.device_type(), d.model().to_string(), d.path().to_string());
+        for candidate in candidates {
+            let mut d = match self.open(&candidate).await {
+                Ok(device) => device,
+                Err(err) => {
+                    skipped.push(skipped_candidate(&candidate, &err));
+                    continue;
+                }
+            };
 
             if let Err(err) = d.device().unlock(self.selector.network).await {
                 if is_user_cancelled(&err) {
                     return Err(err.into());
                 }
-                skipped.push(SkippedDevice::new(device_type, model, path, &err));
+                skipped.push(skipped_candidate(&candidate, &err));
                 continue;
             }
 
@@ -203,7 +238,7 @@ impl<S: DeviceSource> DeviceManager<S> {
                     if is_user_cancelled(&err) {
                         return Err(err.into());
                     }
-                    skipped.push(SkippedDevice::new(device_type, model, path, &err));
+                    skipped.push(skipped_candidate(&candidate, &err));
                 }
             }
         }
@@ -215,6 +250,28 @@ impl<S: DeviceSource> DeviceManager<S> {
             return Err(SelectError::HostPassphraseRejected);
         }
         Ok((Some(dev), skipped))
+    }
+
+    /// Every device that answers, info and fingerprint already read. A cancelled
+    /// device stops the scan rather than joining `skipped`.
+    pub async fn scan(&self) -> Result<DeviceScan, SelectError<S::Error>> {
+        let candidates = self.list().await.map_err(SelectError::Source)?;
+        let mut scan = DeviceScan::default();
+        for candidate in candidates {
+            let mut device = match self.open(&candidate).await {
+                Ok(device) => device,
+                Err(err) => {
+                    scan.skipped.push(skipped_candidate(&candidate, &err));
+                    continue;
+                }
+            };
+            match probe(&mut device, self.selector.network).await {
+                Ok(()) => scan.devices.push(device),
+                Err(err) if is_user_cancelled(&err) => return Err(err.into()),
+                Err(err) => scan.skipped.push(skipped_candidate(&candidate, &err)),
+            }
+        }
+        Ok(scan)
     }
 
     pub async fn get_device_with_fingerprint(
@@ -258,6 +315,28 @@ impl fmt::Display for NoUsableDevice {
 }
 
 impl std::error::Error for NoUsableDevice {}
+
+fn skipped_candidate(
+    candidate: &DeviceCandidate,
+    error: &(dyn std::error::Error + 'static),
+) -> SkippedDevice {
+    SkippedDevice::new(
+        candidate.device_type,
+        &candidate.model,
+        &candidate.path,
+        error,
+    )
+}
+
+async fn probe(device: &mut Device, network: Network) -> Result<(), HWIDeviceError> {
+    // XXX: Coldcard always needs unlocking
+    device.device().unlock(network).await?;
+    let info = device.info().await?;
+    if info.initialized != Some(false) {
+        device.fingerprint().await?;
+    }
+    Ok(())
+}
 
 pub fn no_device(skipped: Vec<SkippedDevice>) -> Result<Option<Device>, NoUsableDevice> {
     if skipped.is_empty() {
@@ -580,11 +659,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_trezor_family_reports_device_info() {
+    fn multisig_display_address_needs_a_descriptor_capable_device() {
         for device_type in DeviceType::ALL {
             assert_eq!(
-                reports_device_info(device_type),
-                matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor),
+                supports_multisig_display_address(device_type),
+                matches!(
+                    device_type,
+                    DeviceType::Coldcard
+                        | DeviceType::Jade
+                        | DeviceType::KeepKey
+                        | DeviceType::Trezor
+                ),
                 "{device_type}"
             );
         }

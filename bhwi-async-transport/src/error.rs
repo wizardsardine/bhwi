@@ -11,9 +11,14 @@ pub enum NativeError {
     #[error("{0}")]
     MissingDeviceId(&'static str),
 
+    /// Listed on the bus, but no longer there when it was opened.
+    #[error("{0} is no longer connected")]
+    Gone(String),
+
     #[cfg(any(
         feature = "bitbox",
         feature = "coldcard",
+        feature = "keepkey",
         feature = "ledger",
         feature = "trezor"
     ))]
@@ -23,7 +28,7 @@ pub enum NativeError {
     #[error("{0}")]
     Io(#[from] std::io::Error),
 
-    #[cfg(feature = "trezor")]
+    #[cfg(any(feature = "keepkey", feature = "trezor"))]
     #[error("usb enumeration failed: {0}")]
     Usb(#[from] nusb::Error),
 
