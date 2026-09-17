@@ -24,7 +24,7 @@ const CHUNK_SIZE: usize = REPORT_SIZE - 1;
 const REPORT_PREFIX: u8 = 0x3f;
 const HEADER_SIZE: usize = 8;
 const MAX_PAYLOAD_SIZE: usize = 64 * 1024;
-const DECISION_INTERVAL: Duration = Duration::from_millis(100);
+const DECISION_INTERVAL: Duration = Duration::from_millis(200);
 const DEBUGLINK_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(180);
 
