@@ -18,6 +18,9 @@ use crate::trezor::TrezorDevice;
 pub mod bitbox;
 #[cfg(feature = "coldcard")]
 pub mod coldcard;
+/// The Trezor V1 emulator framing, shared with every device that reuses it.
+#[cfg(any(feature = "keepkey", feature = "trezor"))]
+pub mod emulator;
 pub mod error;
 #[cfg(any(
     feature = "bitbox",

@@ -12,8 +12,9 @@ use crate::NativeResult;
 use crate::{
     Device, DeviceEnumerator, DeviceScan, DeviceSelector, DeviceType, HostInteractionFactory,
     PairingCodePrompt, ScanEntry, SkippedDevice,
+    emulator::{EMULATOR_PROBE_TIMEOUT, EmulatorClient, emulator_socket},
     hid::HidChannel,
-    trezor::{EMULATOR_PROBE_TIMEOUT, emulator::EmulatorClient, emulator_socket, webusb_path},
+    trezor::webusb_path,
     uses_backend,
     webusb::WebUsbChannel,
 };
