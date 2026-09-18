@@ -329,7 +329,8 @@
         jadeInitInputs =
           emulatorInputs
           ++ [
-            pkgs.python3Packages.virtualenv
+            pkgs.python311
+            pkgs.python311Packages.virtualenv
           ];
         jadePinserverInputs =
           emulatorInputs
@@ -498,6 +499,7 @@
             export JADE_FIRMWARE_SRC="${jade-firmware}"
             export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
             export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
+            export JADE_INIT_PYTHON="${pkgs.python311}/bin/python3"
           ''
           ./nix/scripts/init-jade.sh;
         jadePinserverRunner =
