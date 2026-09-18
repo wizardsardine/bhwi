@@ -1572,7 +1572,7 @@ mod tests {
 
     struct KeepKeyInteractiveOutput {
         output: HwiOutput,
-        pin_kinds: Vec<bhwi::common::PinMatrixRequestKind>,
+        pin_kinds: Vec<bhwi_async::PinMatrixRequestKind>,
         recovery_requests: usize,
     }
 
@@ -1599,8 +1599,8 @@ mod tests {
         .collect()
     }
 
-    fn keepkey_prompt_request(line: &str) -> Result<Option<bhwi::common::HostRequest>> {
-        use bhwi::common::{HostRequest, PinMatrixRequestKind};
+    fn keepkey_prompt_request(line: &str) -> Result<Option<bhwi_async::HostRequest>> {
+        use bhwi_async::{HostRequest, PinMatrixRequestKind};
 
         let request = match line {
             "Enter current PIN positions:" => Some(HostRequest::PinMatrix {
@@ -1687,8 +1687,8 @@ mod tests {
                         continue;
                     };
                     match &request {
-                        bhwi::common::HostRequest::PinMatrix { kind } => pin_kinds.push(*kind),
-                        bhwi::common::HostRequest::RecoveryCharacter { .. } => {
+                        bhwi_async::HostRequest::PinMatrix { kind } => pin_kinds.push(*kind),
+                        bhwi_async::HostRequest::RecoveryCharacter { .. } => {
                             recovery_requests += 1;
                         }
                     }
@@ -1835,7 +1835,7 @@ mod tests {
 
     #[test]
     fn keepkey_prompt_markers_are_exact() -> Result<()> {
-        use bhwi::common::{HostRequest, PinMatrixRequestKind};
+        use bhwi_async::{HostRequest, PinMatrixRequestKind};
         assert_eq!(
             keepkey_prompt_request("Enter new PIN positions:")?,
             Some(HostRequest::PinMatrix {
@@ -1860,7 +1860,7 @@ mod tests {
     #[test]
     #[ignore = "requires a fresh KeepKey emulator image"]
     fn candidate_keepkey_management_lifecycle() -> Result<()> {
-        use bhwi::common::PinMatrixRequestKind;
+        use bhwi_async::PinMatrixRequestKind;
 
         if env::var("HWI_BIN").is_err()
             || expected_device_type_from_env()?.as_deref() != Some("keepkey")

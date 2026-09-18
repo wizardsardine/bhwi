@@ -2,7 +2,7 @@ use anyhow::Result;
 use bhwi_async::Transport;
 use bhwi_async::coldcard::Coldcard;
 use bhwi_async::transport::coldcard::hid::ColdcardTransportHID;
-use bhwi_cli::coldcard::emulator::EmulatorClient;
+use bhwi_async_transport::coldcard::emulator::EmulatorClient;
 
 pub type ColdcardDevice = Coldcard<ColdcardTransportHID<EmulatorClient>>;
 
@@ -62,10 +62,9 @@ impl DeviceControl {
 #[cfg(test)]
 mod tests {
     use base64ct::{Base64, Encoding};
-    use bhwi::common::{MultisigAddressType, MultisigDisplayAddress};
     use bhwi_async::{
-        DeviceBackup, DisplayAddress, HWI, WalletRegistration,
-        transport::coldcard::DEFAULT_CKCC_SOCKET,
+        DeviceBackup, DisplayAddress, HWI, MultisigAddressType, MultisigDisplayAddress,
+        WalletRegistration, transport::coldcard::DEFAULT_CKCC_SOCKET,
     };
     use bitcoin::{
         Amount, Network, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut,

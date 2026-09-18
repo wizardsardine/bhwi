@@ -3,7 +3,7 @@ use bhwi_async::{
     Transport,
     transport::coldcard::{DEFAULT_CKCC_SOCKET, hid::ColdcardTransportHID},
 };
-use bhwi_cli::coldcard::emulator::EmulatorClient;
+use bhwi_async_transport::coldcard::emulator::EmulatorClient;
 use bitcoin::{
     Network,
     bip32::{DerivationPath, Xpriv, Xpub},

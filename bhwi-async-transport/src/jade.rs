@@ -1,6 +1,6 @@
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
-use anyhow::Result;
+use crate::NativeResult;
 use async_trait::async_trait;
 use bhwi_async::{
     HttpClient, Jade, Transport,
@@ -18,7 +18,10 @@ use tokio_serial::{
     SerialPort, SerialPortBuilderExt, SerialPortType, SerialStream, UsbPortInfo, available_ports,
 };
 
-use crate::{Device, DeviceEnumerator, DeviceType, config::DeviceSelector};
+use crate::{
+    Device, DeviceCandidate, DeviceEnumerator, DeviceSelector, DeviceType, HostInteractionFactory,
+    NativeError, PairingCodePrompt,
+};
 
 pub type JadeSerialDevice = Jade<SerialTransport, PinServerClient>;
 pub type JadeQemuDevice = Jade<TcpTransport<TcpClient>, PinServerClient>;
@@ -35,7 +38,7 @@ pub struct SerialTransport {
 }
 
 impl SerialTransport {
-    pub fn new(port_name: &str) -> Result<Self> {
+    pub fn new(port_name: &str) -> Result<Self, tokio_serial::Error> {
         let mut transport =
             tokio_serial::new(port_name, DEFAULT_JADE_BAUD_RATE).open_native_async()?;
         // Ensure RTS and DTR are not set (as this can cause the hw to reboot)
@@ -79,46 +82,46 @@ impl JadeDevice {
             .is_some()
     }
 
-    async fn serial_device(
-        network: Network,
-        port_name: &str,
-        info: UsbPortInfo,
-    ) -> Result<Option<Device>> {
-        Ok(Some(
-            Device::new(
-                &format!(
-                    "{} {}",
-                    info.product.unwrap_or_else(|| "Jade".into()),
-                    info.manufacturer.unwrap_or_else(|| "Blockstream".into())
-                ),
-                DeviceType::Jade,
-                port_name,
-                "jade",
-                Box::new(JadeSerialDevice::new(
-                    network,
-                    SerialTransport::new(port_name)?,
-                    PinServerClient::new(),
-                )),
-                false,
-            )
-            .await?,
+    fn usb_name(info: &UsbPortInfo) -> String {
+        format!(
+            "{} {}",
+            info.product.clone().unwrap_or_else(|| "Jade".into()),
+            info.manufacturer
+                .clone()
+                .unwrap_or_else(|| "Blockstream".into())
+        )
+    }
+
+    async fn open_serial(candidate: &DeviceCandidate, network: Network) -> NativeResult<Device> {
+        let transport = SerialTransport::new(&candidate.path)?;
+        Ok(Device::new(
+            &candidate.name,
+            DeviceType::Jade,
+            &candidate.path,
+            &candidate.model,
+            Box::new(JadeSerialDevice::new(
+                network,
+                transport,
+                PinServerClient::new(),
+            )),
+            false,
         ))
     }
 
-    async fn qemu_device(network: Network, stream: TcpStream) -> Result<Device> {
-        Device::new(
-            "Jade QEMU Emulator",
+    async fn open_qemu(candidate: &DeviceCandidate, network: Network) -> NativeResult<Device> {
+        let stream = TcpStream::connect(jade_tcp_addr(&candidate.path)).await?;
+        Ok(Device::new(
+            &candidate.name,
             DeviceType::Jade,
-            DEFAULT_JADE_QEMU_ADDRESS,
-            "jade_simulator",
+            &candidate.path,
+            &candidate.model,
             Box::new(JadeQemuDevice::new(
                 network,
                 TcpTransport::new(TcpClient::new(stream)),
                 PinServerClient::new(),
             )),
             true,
-        )
-        .await
+        ))
     }
 }
 
@@ -129,44 +132,61 @@ fn is_macos_dialin(port_name: &str) -> bool {
     port_name.starts_with("/dev/tty.")
 }
 
-fn require_linux_tty_sysfs(is_linux: bool, sysfs_exists: bool) -> Result<()> {
-    if is_linux && !sysfs_exists {
-        anyhow::bail!("serial port enumeration unavailable: /sys/class/tty is missing");
-    }
-    Ok(())
-}
-
 #[async_trait(?Send)]
 impl DeviceEnumerator for JadeDevice {
-    async fn enumerate(selector: &DeviceSelector) -> Result<Vec<Device>> {
-        require_linux_tty_sysfs(
-            cfg!(target_os = "linux"),
-            Path::new("/sys/class/tty").exists(),
-        )?;
-        let ports = available_ports()?;
-        let mut devices: Vec<Device> = iter(ports.into_iter().map(Ok))
-            .try_filter_map(|info| async move {
-                match info.port_type {
-                    SerialPortType::UsbPort(usb)
-                        if selector.matches(DeviceType::Jade, &info.port_name)
-                            && !is_macos_dialin(&info.port_name)
-                            && Self::valid_usb(&usb) =>
-                    {
-                        Self::serial_device(selector.network, &info.port_name, usb).await
+    async fn list(selector: &DeviceSelector) -> NativeResult<Vec<DeviceCandidate>> {
+        let mut candidates: Vec<DeviceCandidate> =
+            iter(available_ports()?.into_iter().map(Ok::<_, NativeError>))
+                .try_filter_map(|info| async move {
+                    match info.port_type {
+                        SerialPortType::UsbPort(usb)
+                            if selector.matches(DeviceType::Jade, &info.port_name)
+                                && !is_macos_dialin(&info.port_name)
+                                && Self::valid_usb(&usb) =>
+                        {
+                            Ok(Some(DeviceCandidate {
+                                device_type: DeviceType::Jade,
+                                name: Self::usb_name(&usb),
+                                model: "jade".to_owned(),
+                                path: info.port_name.clone(),
+                                is_emulated: false,
+                            }))
+                        }
+                        _ => Ok(None),
                     }
-                    _ => Ok(None),
-                }
-            })
-            .try_collect()
-            .await?;
+                })
+                .try_collect()
+                .await?;
+        // Only a connection tells us the emulator is there; it is dropped again.
         if selector.include_emulators
             && (selector.matches(DeviceType::Jade, DEFAULT_JADE_QEMU_ADDRESS)
                 || selector.matches(DeviceType::Jade, jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS)))
-            && let Ok(stream) = TcpStream::connect(jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS)).await
+            && TcpStream::connect(jade_tcp_addr(DEFAULT_JADE_QEMU_ADDRESS))
+                .await
+                .is_ok()
         {
-            devices.push(Self::qemu_device(selector.network, stream).await?);
+            candidates.push(DeviceCandidate {
+                device_type: DeviceType::Jade,
+                name: "Jade QEMU Emulator".to_owned(),
+                model: "jade_simulator".to_owned(),
+                path: DEFAULT_JADE_QEMU_ADDRESS.to_owned(),
+                is_emulated: true,
+            });
         }
-        Ok(devices)
+        Ok(candidates)
+    }
+
+    async fn open(
+        candidate: &DeviceCandidate,
+        selector: &DeviceSelector,
+        _pairing_code: Option<&PairingCodePrompt>,
+        _host_interaction: Option<&HostInteractionFactory>,
+    ) -> NativeResult<Device> {
+        if candidate.is_emulated {
+            Self::open_qemu(candidate, selector.network).await
+        } else {
+            Self::open_serial(candidate, selector.network).await
+        }
     }
 }
 
@@ -223,21 +243,5 @@ impl CborStream for TcpClient {
     }
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         Ok(self.stream.read(buf).await?)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::require_linux_tty_sysfs;
-
-    #[test]
-    fn absent_linux_tty_sysfs_errors_before_port_enumeration() {
-        let result: anyhow::Result<()> =
-            require_linux_tty_sysfs(true, false).map(|_| panic!("enumerator invoked"));
-
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "serial port enumeration unavailable: /sys/class/tty is missing"
-        );
     }
 }

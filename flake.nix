@@ -73,6 +73,13 @@
         emulatorSystem = system == "x86_64-linux" || system == "aarch64-darwin";
         keepkeySystem = system == "x86_64-linux" || system == "aarch64-darwin";
         isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
+        # `pkgs.gcc`'s wrapper hook sets CC=gcc, and gcc on aarch64-darwin
+        # predefines neither __ARM_NEON nor __ARM_FEATURE_CRYPTO, which
+        # aws-lc-sys requires.
+        darwinCcEnv = pkgs.lib.optionalString isDarwin ''
+          export CC=clang
+          export CXX=clang++
+        '';
         coldcardRuntimeLibraryPath = coldcardPkgs.lib.makeLibraryPath (
           [
             coldcardPkgs.SDL2
@@ -308,7 +315,8 @@
         jadeInitInputs =
           emulatorInputs
           ++ [
-            pkgs.python3Packages.virtualenv
+            pkgs.python311
+            pkgs.python311Packages.virtualenv
           ];
         jadePinserverInputs =
           emulatorInputs
@@ -333,11 +341,13 @@
           program = pkgs.lib.getExe program;
         };
         commonE2eEnv = ''
+          ${darwinCcEnv}
           export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
           export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
           export RUST_TEST_THREADS=1
         '';
         coldcardE2eEnv = ''
+          ${darwinCcEnv}
           export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
           export COLDCARD_RUNTIME_LIBRARY_PATH="${coldcardRuntimeLibraryPath}"
           export LD_LIBRARY_PATH=${pkgs.openssl}/lib:''${LD_LIBRARY_PATH:-}
@@ -374,6 +384,11 @@
               + ''
 
                 set -euo pipefail
+                # The harness asserts a spawned command writes nothing to
+                # stderr, and sh warns there when the inherited locale is not
+                # generated in the shell.
+                export LC_ALL=C
+                export LANG=C
                 export REFERENCE_HWI_BIN="${pkgs.lib.getExe hwiReferenceBhwi}"
                 export HWI_BIN="''${HWI_BIN:-''${CARGO_TARGET_DIR:-$PWD/target}/debug/hwi}"
                 export HWI_PARITY_DEVICE_TYPE="${device}"
@@ -454,6 +469,7 @@
             export JADE_FIRMWARE_SRC="${jade-firmware}"
             export JADE_FIRMWARE_REV="${jade-firmware.rev or "locked"}"
             export JADE_FIRMWARE_URL="https://github.com/Blockstream/Jade.git"
+            export JADE_INIT_PYTHON="${pkgs.python311}/bin/python3"
           ''
           ./nix/scripts/init-jade.sh;
         jadePinserverRunner =
@@ -921,6 +937,7 @@
             default = pkgs.mkShell {
               packages = inputs;
               shellHook = ''
+                ${darwinCcEnv}
                 export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
                 export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
                 export CC_wasm32_unknown_unknown=${pkgs.llvmPackages.clang-unwrapped}/bin/clang

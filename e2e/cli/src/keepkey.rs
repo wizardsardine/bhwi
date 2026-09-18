@@ -598,7 +598,7 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
             "p2tr",
             "--display",
         ],
-        "hwi device error: interpreter error: unsupported display address: KeepKey does not support Taproot address display",
+        "unsupported display address: KeepKey does not support Taproot address display",
         &[],
     )?;
 
@@ -615,13 +615,13 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
                 .to_str()
                 .context("temporary PSBT path is not UTF-8")?,
         ],
-        "hwi device error: interpreter error: missing command info: KeepKey does not support Taproot inputs",
+        "missing command info: KeepKey does not support Taproot inputs",
         &[taproot_secret.as_str()],
     )?;
     assert_failure(
         &cli,
         ["address", "get", "--from-descriptor", "not-registered"],
-        "hwi device error: interpreter error: unsupported display address: descriptor address display is not yet supported",
+        "unsupported display address: descriptor address display is not yet supported",
         &[],
     )?;
 
@@ -650,26 +650,26 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
                 "--descriptor",
                 &descriptor,
             ],
-            "hwi device error: interpreter error: missing command info: register_wallet is not supported",
+            "missing command info: register_wallet is not supported",
             &[],
         )?;
     }
     assert_failure(
         &cli,
         ["device", "backup"],
-        "hwi device error: interpreter error: missing command info: The Keepkey does not support creating a backup via software",
+        "missing command info: The Keepkey does not support creating a backup via software",
         &[],
     )
 }
 
 struct InteractiveOutput {
     stdout: String,
-    pin_kinds: Vec<bhwi::common::PinMatrixRequestKind>,
+    pin_kinds: Vec<bhwi_async::PinMatrixRequestKind>,
     recovery_requests: usize,
 }
 
-fn request_from_prompt(line: &str) -> Result<Option<bhwi::common::HostRequest>> {
-    use bhwi::common::{HostRequest, PinMatrixRequestKind};
+fn request_from_prompt(line: &str) -> Result<Option<bhwi_async::HostRequest>> {
+    use bhwi_async::{HostRequest, PinMatrixRequestKind};
 
     let request = match line {
         "Enter current PIN positions:" => Some(HostRequest::PinMatrix {
@@ -711,7 +711,7 @@ fn request_from_prompt(line: &str) -> Result<Option<bhwi::common::HostRequest>> 
 
 #[test]
 fn keepkey_prompt_markers_are_exact() -> Result<()> {
-    use bhwi::common::{HostRequest, PinMatrixRequestKind};
+    use bhwi_async::{HostRequest, PinMatrixRequestKind};
 
     assert_eq!(
         request_from_prompt("Enter new PIN positions:")?,
@@ -909,8 +909,8 @@ fn interactive_child(
                     continue;
                 };
                 match &request {
-                    bhwi::common::HostRequest::PinMatrix { kind } => pin_kinds.push(*kind),
-                    bhwi::common::HostRequest::RecoveryCharacter { .. } => {
+                    bhwi_async::HostRequest::PinMatrix { kind } => pin_kinds.push(*kind),
+                    bhwi_async::HostRequest::RecoveryCharacter { .. } => {
                         recovery_requests += 1;
                     }
                 }
@@ -982,7 +982,7 @@ fn finish_pending_toggle(cli: &Cli) -> Result<()> {
 #[test]
 #[ignore = "requires a fresh KeepKey emulator image"]
 fn keepkey_management_lifecycle() -> Result<()> {
-    use bhwi::common::PinMatrixRequestKind;
+    use bhwi_async::PinMatrixRequestKind;
 
     let cli = cli();
     let setup = run_interactive_approved(&cli, ["device", "setup", "--label", "BHWI KeepKey CLI"])?;
@@ -1060,7 +1060,7 @@ fn keepkey_management_lifecycle() -> Result<()> {
     assert_failure(
         &cli_with_passphrase(&long_passphrase),
         ["device", "list"],
-        "hwi device error: interpreter error: invalid input: Passphrase too long",
+        "invalid input: Passphrase too long",
         &[long_passphrase.as_str()],
     )?;
 

@@ -13,6 +13,7 @@ pub mod jade;
 pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
+pub mod passphrase;
 pub mod policy;
 #[cfg(feature = "trezor")]
 pub mod trezor;

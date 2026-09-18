@@ -553,7 +553,9 @@ fn assert_keypool(name: &str, stdout: &str, expected: KeypoolExpectation<'_>) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{command_output, redacted_args};
+    #[cfg(target_os = "linux")]
+    use super::command_output;
+    use super::redacted_args;
 
     #[test]
     fn diagnostics_redact_secrets_and_psbt_paths() {

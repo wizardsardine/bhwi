@@ -21,7 +21,7 @@ mod tests {
     use bhwi_async::{DeviceContext, DisplayAddress, HWI};
     use bhwi_async::{Ledger, transport::ledger::speculos::LedgerTransportTcp};
 
-    use bhwi_cli::ledger::SpeculosTcpChannel;
+    use bhwi_async_transport::ledger::SpeculosTcpChannel;
     use miniscript::descriptor::WalletPolicy;
     use reqwest::Client;
     use serde::Serialize;

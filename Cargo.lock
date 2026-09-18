@@ -286,11 +286,26 @@ dependencies = [
  "bhwi",
  "byteorder",
  "futures",
- "hex",
- "serde",
  "serde_cbor",
- "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "bhwi-async-transport"
+version = "0.0.1"
+dependencies = [
+ "async-hid",
+ "async-trait",
+ "bhwi",
+ "bhwi-async",
+ "bitcoin",
+ "futures",
+ "nusb",
+ "rand_core 0.6.4",
+ "reqwest",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-serial",
 ]
 
 [[package]]
@@ -298,25 +313,21 @@ name = "bhwi-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "async-hid",
  "async-trait",
  "bhwi",
  "bhwi-async",
+ "bhwi-async-transport",
  "bitcoin",
  "chrono",
  "clap",
  "futures",
  "hex",
  "miniscript",
- "nusb",
  "rand_core 0.6.4",
- "reqwest",
  "rpassword",
  "serde",
  "serde_json",
- "strum",
  "tokio",
- "tokio-serial",
 ]
 
 [[package]]
@@ -335,8 +346,8 @@ name = "bhwi-e2e-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bhwi",
  "bhwi-async",
+ "bhwi-async-transport",
  "bhwi-cli",
  "bhwi-e2e-keepkey",
  "bhwi-e2e-trezor",
@@ -354,9 +365,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64ct",
- "bhwi",
  "bhwi-async",
- "bhwi-cli",
+ "bhwi-async-transport",
  "bitcoin",
  "rand_core 0.6.4",
  "tokio",
@@ -367,7 +377,7 @@ name = "bhwi-e2e-hwi-parity"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bhwi",
+ "bhwi-async",
  "bhwi-e2e-keepkey",
  "bhwi-e2e-trezor",
  "bitcoin",
@@ -383,7 +393,7 @@ dependencies = [
  "async-trait",
  "base64ct",
  "bhwi-async",
- "bhwi-cli",
+ "bhwi-async-transport",
  "bitcoin",
  "miniscript",
  "reqwest",
@@ -398,7 +408,7 @@ dependencies = [
  "async-trait",
  "bhwi",
  "bhwi-async",
- "bhwi-cli",
+ "bhwi-async-transport",
  "prost",
  "tokio",
 ]
@@ -412,7 +422,7 @@ dependencies = [
  "base64ct",
  "bhwi",
  "bhwi-async",
- "bhwi-cli",
+ "bhwi-async-transport",
  "hex",
  "miniscript",
  "reqwest",
@@ -427,7 +437,7 @@ version = "0.1.0"
 dependencies = [
  "bhwi",
  "bhwi-async",
- "bhwi-cli",
+ "bhwi-async-transport",
  "tokio",
 ]
 
@@ -2569,27 +2579,6 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
-
-[[package]]
-name = "strum"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
-dependencies = [
- "strum_macros",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn",
-]
 
 [[package]]
 name = "subtle"

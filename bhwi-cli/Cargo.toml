@@ -16,25 +16,30 @@ path = "src/bin/bhwi.rs"
 name = "hwi"
 path = "src/bin/hwi.rs"
 
+[features]
+default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "trezor"]
+bitbox = ["bhwi-async-transport/bitbox"]
+coldcard = ["bhwi-async-transport/coldcard"]
+jade = ["bhwi-async-transport/jade"]
+keepkey = ["bhwi-async-transport/keepkey"]
+ledger = ["bhwi-async-transport/ledger"]
+trezor = ["bhwi-async-transport/trezor"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
 bitcoin = { workspace = true, features = ["base64", "serde"] }
-bhwi-async = { workspace = true, features = ["bitbox", "coldcard", "emulators", "jade", "keepkey", "ledger", "trezor"] }
-bhwi.workspace = true
+bhwi-async = { workspace = true, default-features = false }
+bhwi = { workspace = true, default-features = false }
+bhwi-async-transport = { workspace = true, default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures.workspace = true
 hex = { workspace = true, features = ["serde"] }
 miniscript = { workspace = true, features = ["serde"] }
-rand_core.workspace = true
-reqwest = { workspace = true, features = ["json"] }
+rand_core = { workspace = true, features = ["getrandom"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync", "time"] }
 
-async-hid = "0.5.0"
-nusb = { version = "0.2", features = ["tokio"] }
-clap = { version = "4.4.7", features = ["derive"] }
+clap = { workspace = true }
 rpassword = "=7.5.4"
-strum = { version = "0.28", features = ["derive"] }
-tokio-serial = "5.4.5"

@@ -2,12 +2,19 @@
 pub mod bitbox;
 #[cfg(feature = "coldcard")]
 pub mod coldcard;
+pub mod descriptors;
+pub mod device;
+pub mod display_address;
 #[cfg(feature = "jade")]
 pub mod jade;
 #[cfg(feature = "keepkey")]
 pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
+#[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
+pub mod management;
+pub mod psbt;
+pub mod signing;
 pub mod transport;
 #[cfg(feature = "trezor")]
 pub mod trezor;
@@ -22,7 +29,11 @@ pub use bhwi::common::Info;
 pub use bhwi::common::RestoreOptions;
 pub use bhwi::common::SetupOptions;
 pub use bhwi::common::WalletRegistration;
+/// Named by `HostInteraction`, so implementing it needs no `bhwi` dependency.
+pub use bhwi::common::{Error as HostError, HostRequest, HostResponse, PinMatrixRequestKind};
+pub use bhwi::common::{MultisigAddressType, MultisigDisplayAddress};
 use bhwi::miniscript::descriptor::WalletPolicy;
+pub use bhwi::passphrase::HostPassphrase;
 use bhwi::{
     Interpreter,
     bitcoin::{
@@ -168,8 +179,9 @@ pub trait HWIDevice {
     ) -> Result<Psbt, HWIDeviceError>;
 }
 
+/// Not `transparent`: that would forward `source()` past the cause.
 #[derive(Debug, thiserror::Error)]
-#[error("hwi device error: {0}")]
+#[error("{0}")]
 pub struct HWIDeviceError(#[from] Box<dyn StdError + Send + Sync + 'static>);
 
 impl HWIDeviceError {
@@ -186,7 +198,7 @@ pub enum Error<E, F> {
     #[error("http client error: {0}")]
     HttpClient(F),
 
-    #[error("interpreter error: {0}")]
+    #[error("{0}")]
     Interpreter(#[from] common::Error),
 }
 

@@ -1,3 +1,30 @@
+#[cfg(feature = "keepkey")]
+use bhwi::keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED};
+use bhwi::{bitcoin::psbt::Psbt, passphrase::HostPassphrase};
+use bhwi_async::display_address::{
+    DisplayAddressError, multisig_display_address_from_descriptor,
+    singlesig_display_address_from_descriptor,
+};
+#[cfg(feature = "ledger")]
+use bhwi_async::psbt::{merge_psbt_signatures, strip_legacy_witness_utxos};
+#[cfg(feature = "ledger")]
+use bhwi_async::signing::ledger::{
+    LedgerAddressType, LedgerSigningError, ledger_multisig_display_address, ledger_signing_contexts,
+};
+use bhwi_async::signing::message_signature;
+use bhwi_async::{DeviceBackup, DisplayAddress, RestoreOptions, SetupOptions};
+use bitcoin::{
+    Network, NetworkKind,
+    base64::prelude::{BASE64_STANDARD, Engine as _},
+    bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
+};
+use chrono::{Datelike, Local, Timelike};
+use clap::{ArgAction, ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use miniscript::{
+    Descriptor, DescriptorPublicKey,
+    descriptor::{DescriptorType, checksum},
+};
+use serde::{Serialize, Serializer};
 use std::{
     ffi::OsString,
     fs,
@@ -7,42 +34,18 @@ use std::{
     str::FromStr,
 };
 
-use bhwi::{
-    bitcoin::psbt::Psbt,
-    common::{MultisigAddressType, MultisigDisplayAddress},
-    keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED},
-    ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy},
-    trezor::HostPassphrase,
-};
-use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions};
-use bitcoin::{
-    Address, CompressedPublicKey, Network, NetworkKind, PublicKey, ScriptBuf, TxOut,
-    base64::prelude::{BASE64_STANDARD, Engine as _},
-    bip32::{ChildNumber, DerivationPath, Fingerprint, KeySource, Xpub},
-    blockdata::{
-        opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_1, OP_PUSHNUM_16},
-        script::{Instruction, PushBytes},
-    },
-    psbt::Input,
-    secp256k1::{PublicKey as SecpPublicKey, Secp256k1, XOnlyPublicKey},
-};
-use chrono::{Datelike, Local, Timelike};
-use clap::{ArgAction, ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
-use miniscript::{
-    Descriptor, DescriptorPublicKey,
-    descriptor::{DescriptorType, WalletPolicy, Wildcard, checksum},
-};
-use serde::{Serialize, Serializer};
-
+#[cfg(feature = "bitbox")]
+use crate::management::{bitbox_restore_context, bitbox_setup_context};
+#[cfg(feature = "keepkey")]
+use crate::management::{keepkey_restore_context, keepkey_setup_context};
+#[cfg(feature = "trezor")]
+use crate::management::{trezor_restore_context, trezor_setup_context};
+#[cfg(target_os = "linux")]
+use crate::udev::{UdevRuleSelection, install_udev_rules};
 use crate::{
-    Device, DeviceManager, DeviceType,
-    config::DeviceSelector,
-    get_descriptors::GetDescriptorOptions,
-    management::{
-        bitbox_restore_context, bitbox_setup_context, keepkey_restore_context,
-        keepkey_setup_context, trezor_restore_context, trezor_setup_context,
-    },
-    udev::{UdevRuleSelection, install_udev_rules},
+    Device, DeviceManager, DeviceSelector, DeviceType, can_sign_taproot, device_manager,
+    get_descriptors::{GetDescriptorOptions, get_descriptor},
+    reports_device_info,
 };
 
 type HwiResult<T> = std::result::Result<T, HwiError>;
@@ -236,7 +239,7 @@ fn hwi_device_manager(selector: &HwiSelector) -> Result<DeviceManager, HwiError>
             }
         },
     };
-    Ok(DeviceManager::new(selector.device_selector(device_type)))
+    Ok(device_manager(selector.device_selector(device_type)))
 }
 
 async fn find_hwi_device(selector: &HwiSelector) -> Result<(DeviceManager, Device), HwiError> {
@@ -256,7 +259,7 @@ async fn find_hwi_device(selector: &HwiSelector) -> Result<(DeviceManager, Devic
             HwiErrorCode::DeviceConnectionError,
             "Could not find device with specified fingerprint or type",
         )),
-        Err(err) => Err(classify_anyhow_device_error(&err)),
+        Err(err) => Err(classify_device_error(&err)),
     }
 }
 
@@ -313,6 +316,7 @@ pub enum HwiCommand {
         pin: String,
     },
     UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
+    #[cfg(target_os = "linux")]
     InstallUdevRules {
         location: PathBuf,
     },
@@ -590,6 +594,7 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
         HwiCommand::UnsupportedDeviceAction(action) => {
             unsupported_device_action(request.selector, action).await
         }
+        #[cfg(target_os = "linux")]
         HwiCommand::InstallUdevRules { location } => install_udev_rules_hwi(location),
         HwiCommand::Unsupported(command) => HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
@@ -825,15 +830,15 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
         .as_deref()
         .and_then(|raw| parse_device_type(raw).ok());
     let raw_device_type = device_type.and(selector.device_type.as_deref());
-    let manager = DeviceManager::new(selector.device_selector(device_type));
-    let devices = match manager.enumerate().await {
-        Ok(devices) => devices,
+    let manager = device_manager(selector.device_selector(device_type));
+    let scan = match manager.enumerate().await {
+        Ok(scan) => scan,
         Err(err) => {
             return HwiResponse::Error(device_error(err));
         }
     };
-    let mut response = Vec::with_capacity(devices.len());
-    for mut device in devices {
+    let mut response = Vec::with_capacity(scan.devices.len() + scan.skipped.len());
+    for mut device in scan.devices {
         if !hwi_selector_matches_device(
             raw_device_type,
             device.device_type(),
@@ -871,12 +876,14 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
                     .and_then(|info| info.needs_passphrase_sent)
                     .unwrap_or(false);
                 if needs_pin_sent {
-                    let locked = if device.device_type() == DeviceType::KeepKey {
-                        KEEPKEY_LOCKED
-                    } else {
-                        bhwi::trezor::TrezorError::LOCKED
-                    };
-                    error = Some(locked.to_owned());
+                    #[cfg(feature = "keepkey")]
+                    if device.device_type() == DeviceType::KeepKey {
+                        error = Some(KEEPKEY_LOCKED.to_owned());
+                    }
+                    #[cfg(feature = "trezor")]
+                    if device.device_type() == DeviceType::Trezor {
+                        error = Some(bhwi::trezor::TrezorError::LOCKED.to_owned());
+                    }
                     code = Some(HwiErrorCode::DeviceNotReady.code());
                 } else if error.is_none() {
                     if needs_passphrase_sent && manager.selector.passphrase.is_none() {
@@ -907,7 +914,7 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
                                 code = Some(HwiErrorCode::DeviceNotInitialized.code());
                             }
                             Err(err) => {
-                                let classified = classify_anyhow_device_error(&err);
+                                let classified = classify_device_error(&err);
                                 error = Some(classified.error);
                                 code = Some(classified.code);
                             }
@@ -945,9 +952,25 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
             code,
         });
     }
+    // Python HWI lists unopenable devices with an error rather than omitting them.
+    for skipped in scan.skipped {
+        response.push(HwiEnumeratedDevice {
+            device_type: skipped.device_type.to_string(),
+            model: skipped.model,
+            path: skipped.path,
+            label: None,
+            fingerprint: None,
+            needs_pin_sent: false,
+            needs_passphrase_sent: false,
+            warnings: Vec::new(),
+            error: Some(skipped.error),
+            code: Some(HwiErrorCode::DeviceConnectionError.code()),
+        });
+    }
     HwiResponse::Enumerate(response)
 }
 
+#[cfg(target_os = "linux")]
 fn install_udev_rules_hwi(location: PathBuf) -> HwiResponse {
     match install_udev_rules(&location, UdevRuleSelection::All) {
         Ok(()) => HwiResponse::Success(HwiSuccessResponse { success: true }),
@@ -1041,8 +1064,11 @@ async fn setup_device(
     }
 
     let context = match device.device_type() {
+        #[cfg(feature = "keepkey")]
         DeviceType::KeepKey => keepkey_setup_context(),
+        #[cfg(feature = "trezor")]
         DeviceType::Trezor => trezor_setup_context(),
+        #[cfg(feature = "bitbox")]
         DeviceType::BitBox02 => match bitbox_setup_context(device.is_emulated()) {
             Ok(context) => context,
             Err(err) => {
@@ -1052,7 +1078,13 @@ async fn setup_device(
                 ));
             }
         },
-        _ => unreachable!("setup support checked above"),
+        #[allow(unreachable_patterns)]
+        device_type => {
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::UnsupportedCommand,
+                format!("{device_type} support is not compiled into this build"),
+            ));
+        }
     };
     match device
         .device()
@@ -1143,36 +1175,51 @@ async fn restore_device(
             ),
         ));
     }
-    let context = if device.device_type() == DeviceType::BitBox02 {
-        if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+    let context = match device.device_type() {
+        #[cfg(feature = "bitbox")]
+        DeviceType::BitBox02 => {
+            if device.info().await.ok().and_then(|info| info.initialized) == Some(true) {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::UnsupportedCommand,
+                    "The BitBox02 must be wiped before setup.",
+                ));
+            }
+            match bitbox_restore_context() {
+                Ok(context) => Some(context),
+                Err(err) => {
+                    return HwiResponse::Error(HwiError::new(
+                        HwiErrorCode::DeviceFailure,
+                        err.to_string(),
+                    ));
+                }
+            }
+        }
+        #[cfg(feature = "keepkey")]
+        DeviceType::KeepKey => match keepkey_restore_context() {
+            Ok(context) => Some(context),
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
+        },
+        #[cfg(feature = "trezor")]
+        DeviceType::Trezor => match trezor_restore_context() {
+            Ok(context) => Some(context),
+            Err(err) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceFailure,
+                    err.to_string(),
+                ));
+            }
+        },
+        #[allow(unreachable_patterns)]
+        device_type => {
             return HwiResponse::Error(HwiError::new(
                 HwiErrorCode::UnsupportedCommand,
-                "The BitBox02 must be wiped before setup.",
+                format!("{device_type} support is not compiled into this build"),
             ));
-        }
-        match bitbox_restore_context() {
-            Ok(context) => Some(context),
-            Err(err) => {
-                return HwiResponse::Error(HwiError::new(
-                    HwiErrorCode::DeviceFailure,
-                    err.to_string(),
-                ));
-            }
-        }
-    } else {
-        let context = if device.device_type() == DeviceType::KeepKey {
-            keepkey_restore_context()
-        } else {
-            trezor_restore_context()
-        };
-        match context {
-            Ok(context) => Some(context),
-            Err(err) => {
-                return HwiResponse::Error(HwiError::new(
-                    HwiErrorCode::DeviceFailure,
-                    err.to_string(),
-                ));
-            }
         }
     };
     match device
@@ -1273,7 +1320,7 @@ async fn device_for_pin_command(
             ));
         }
         Err(err) => {
-            return Err(classify_anyhow_device_error(&err));
+            return Err(classify_device_error(&err));
         }
     };
 
@@ -1290,10 +1337,19 @@ async fn device_for_pin_command(
 }
 
 fn locked_device_error(message: &str) -> Option<HwiError> {
-    [bhwi::trezor::TrezorError::LOCKED, KEEPKEY_LOCKED]
-        .into_iter()
-        .find(|locked| message.contains(*locked))
-        .map(|locked| HwiError::new(HwiErrorCode::DeviceNotReady, locked))
+    #[cfg(feature = "trezor")]
+    if message.contains(bhwi::trezor::TrezorError::LOCKED) {
+        return Some(HwiError::new(
+            HwiErrorCode::DeviceNotReady,
+            bhwi::trezor::TrezorError::LOCKED,
+        ));
+    }
+    #[cfg(feature = "keepkey")]
+    if message.contains(KEEPKEY_LOCKED) {
+        return Some(HwiError::new(HwiErrorCode::DeviceNotReady, KEEPKEY_LOCKED));
+    }
+    let _ = message;
+    None
 }
 
 /// A device waiting for its PIN reports being locked rather than failing to connect.
@@ -1306,6 +1362,7 @@ fn device_error(err: impl std::fmt::Display) -> HwiError {
 /// Reports the bare device message rather than the wrapped transport error.
 fn pin_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
     let message = err.to_string();
+    #[cfg(feature = "trezor")]
     for known in [
         bhwi::trezor::TrezorError::NO_PIN_NEEDED,
         bhwi::trezor::TrezorError::PIN_ALREADY_SENT,
@@ -1326,10 +1383,13 @@ fn pin_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
 fn send_pin_error_response(err: &(dyn std::error::Error + 'static)) -> HwiResponse {
     let mut source = Some(err);
     while let Some(current) = source {
+        #[cfg(feature = "trezor")]
         let action_cancelled = matches!(
             current.downcast_ref::<bhwi::trezor::TrezorError>(),
             Some(bhwi::trezor::TrezorError::ActionCancelled)
         );
+        #[cfg(not(feature = "trezor"))]
+        let action_cancelled = false;
         // The common KeepKey adapter converts the same protocol error before
         // the async HWI boundary sees it.
         let converted_action_cancelled = matches!(
@@ -1360,14 +1420,16 @@ async fn prompt_pin_device(selector: HwiSelector) -> HwiResponse {
     }
 }
 
-async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
-    let pin = match bhwi::trezor::HostPin::new(pin) {
-        Ok(pin) => pin,
-        Err(err) => {
-            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
-        }
-    };
+#[cfg(not(any(feature = "trezor", feature = "keepkey")))]
+async fn send_pin_device(_selector: HwiSelector, _pin: String) -> HwiResponse {
+    HwiResponse::Error(HwiError::new(
+        HwiErrorCode::UnsupportedCommand,
+        "no host-PIN device support is compiled into this build",
+    ))
+}
 
+#[cfg(any(feature = "trezor", feature = "keepkey"))]
+async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
     let mut device = match device_for_pin_command(
         selector,
         HwiUnsupportedDeviceAction::SendPin { pin: String::new() },
@@ -1380,13 +1442,24 @@ async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
     };
 
     let context = match device.device_type() {
-        DeviceType::KeepKey => bhwi::common::DeviceContext::KeepKeyManagement(
-            bhwi::keepkey::ManagementContext::Pin(pin),
-        ),
-        DeviceType::Trezor => {
-            bhwi::common::DeviceContext::TrezorManagement(bhwi::trezor::ManagementContext::Pin(pin))
+        #[cfg(feature = "keepkey")]
+        DeviceType::KeepKey => bhwi_async::management::keepkey_pin_context_from_positions(pin),
+        #[cfg(feature = "trezor")]
+        DeviceType::Trezor => bhwi_async::management::trezor_pin_context_from_positions(pin),
+        #[allow(unreachable_patterns)]
+        device_type => {
+            let _ = pin;
+            return HwiResponse::Error(HwiError::new(
+                HwiErrorCode::UnsupportedCommand,
+                format!("{device_type} support is not compiled into this build"),
+            ));
         }
-        _ => unreachable!("PIN support checked above"),
+    };
+    let context = match context {
+        Ok(context) => context,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
+        }
     };
     match device.device().send_pin(Some(context)).await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
@@ -1496,6 +1569,7 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
     };
 
     let original = parsed.to_string();
+    #[cfg(feature = "ledger")]
     if device.device_type() == DeviceType::Ledger {
         let contexts = match ledger_signing_contexts(&mut device, &parsed, network).await {
             Ok(contexts) if contexts.is_empty() => {
@@ -1509,7 +1583,13 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
                 return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err));
             }
             Err(LedgerSigningError::Device(err)) => {
-                return HwiResponse::Error(err);
+                return HwiResponse::Error(classify_device_error_for(DeviceType::Ledger, &err));
+            }
+            Err(err @ (LedgerSigningError::MissingHmac | LedgerSigningError::HmacLength(_))) => {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::DeviceConnectionError,
+                    err.to_string(),
+                ));
             }
         };
 
@@ -1579,10 +1659,7 @@ async fn sign_message(selector: HwiSelector, message: String, path: String) -> H
     }
     match signature {
         Ok((header, signature)) => HwiResponse::SignMessage(HwiSignMessageResponse {
-            signature: message_signature_base64(
-                python_hwi_message_header(device_type, header),
-                &signature,
-            ),
+            signature: BASE64_STANDARD.encode(message_signature(device_type, header, &signature)),
         }),
         Err(err) => HwiResponse::Error(classify_device_error_for(device_type, &err)),
     }
@@ -1639,16 +1716,42 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
             ))
         }
         HwiDisplayAddressRequest::Descriptor { descriptor } => {
-            match singlesig_display_address_from_descriptor(&mut device, &descriptor).await {
+            match singlesig_display_address_from_descriptor(&mut device, &descriptor)
+                .await
+                .map_err(display_address_error)
+            {
                 Ok(address) => Ok((address, None)),
                 Err(single_sig_error) => {
                     if device.device_type() == DeviceType::Ledger {
+                        #[cfg(not(feature = "ledger"))]
+                        {
+                            return HwiResponse::Error(single_sig_error);
+                        }
+                        #[cfg(feature = "ledger")]
                         if multisig_display_address_from_descriptor(&descriptor).is_err() {
                             return HwiResponse::Error(single_sig_error);
                         }
+                        #[cfg(feature = "ledger")]
                         match ledger_multisig_display_address(&mut device, &descriptor).await {
                             Ok((address, context)) => Ok((address, Some(context))),
-                            Err(error) => return HwiResponse::Error(error),
+                            Err(LedgerSigningError::BadArgument(err)) => {
+                                return HwiResponse::Error(HwiError::new(
+                                    HwiErrorCode::BadArgument,
+                                    err,
+                                ));
+                            }
+                            Err(LedgerSigningError::Device(err)) => {
+                                return HwiResponse::Error(classify_device_error_for(
+                                    DeviceType::Ledger,
+                                    &err,
+                                ));
+                            }
+                            Err(err) => {
+                                return HwiResponse::Error(HwiError::new(
+                                    HwiErrorCode::DeviceConnectionError,
+                                    err.to_string(),
+                                ));
+                            }
                         }
                     } else if matches!(
                         device.device_type(),
@@ -1780,26 +1883,6 @@ fn generate_hwi_socket_id() -> usize {
     SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-fn python_hwi_message_header(device_type: DeviceType, header: u8) -> u8 {
-    if device_type == DeviceType::Coldcard && header >= 8 {
-        // Python HWI normalizes Coldcard's compact-signature header by
-        // clearing the device-specific compressed/pubkey offset.
-        header - 8
-    } else {
-        header
-    }
-}
-
-fn message_signature_base64(
-    header: u8,
-    signature: &bitcoin::secp256k1::ecdsa::Signature,
-) -> String {
-    let mut payload = [0u8; 65];
-    payload[0] = header;
-    payload[1..].copy_from_slice(&signature.serialize_compact());
-    BASE64_STANDARD.encode(payload)
-}
-
 async fn get_xpub(selector: HwiSelector, path: String, expert: bool) -> HwiResponse {
     let (_manager, mut device) = match find_hwi_device(&selector).await {
         Ok(found) => found,
@@ -1836,7 +1919,7 @@ async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(classify_anyhow_device_error(&err));
+            return HwiResponse::Error(classify_device_error(&err));
         }
     };
     let device_type = device.device_type();
@@ -1857,10 +1940,10 @@ async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
                 descriptor_type,
                 network,
             );
-            let descriptor = match manager.get_descriptor(device.device(), options).await {
+            let descriptor = match get_descriptor(device.device().as_mut(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(classify_anyhow_device_error(&err));
+                    return HwiResponse::Error(classify_device_error(&err));
                 }
             };
             let descriptor = match hwi_descriptor_string(&descriptor) {
@@ -1927,7 +2010,7 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
     let fingerprint = match device.fingerprint().await {
         Ok(fingerprint) => fingerprint,
         Err(err) => {
-            return HwiResponse::Error(classify_anyhow_device_error(&err));
+            return HwiResponse::Error(classify_device_error(&err));
         }
     };
     let device_type = device.device_type();
@@ -1935,8 +2018,7 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
     let network = manager.selector.network;
     let addr_types = if request.all {
         hwi_descriptor_addr_types(device_type, &model)
-    } else if request.addr_type == HwiAddressType::Tap && !hwi_can_sign_taproot(device_type, &model)
-    {
+    } else if request.addr_type == HwiAddressType::Tap && !can_sign_taproot(device_type, &model) {
         return HwiResponse::Error(HwiError::new(
             HwiErrorCode::UnsupportedCommand,
             "Device does not support Taproot",
@@ -1974,10 +2056,10 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
                     network,
                 ),
             };
-            let descriptor = match manager.get_descriptor(device.device(), options).await {
+            let descriptor = match get_descriptor(device.device().as_mut(), options).await {
                 Ok(descriptor) => descriptor,
                 Err(err) => {
-                    return HwiResponse::Error(classify_anyhow_device_error(&err));
+                    return HwiResponse::Error(classify_device_error(&err));
                 }
             };
             let desc = match hwi_descriptor_string(&descriptor) {
@@ -2002,852 +2084,6 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
     }
 
     HwiResponse::GetKeypool(entries)
-}
-
-#[derive(Debug)]
-enum LedgerSigningError {
-    BadArgument(String),
-    Device(HwiError),
-}
-
-struct LedgerSigningContext {
-    address_type: LedgerAddressType,
-    context: DeviceContext,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum LedgerAddressType {
-    Tap,
-    Wit,
-    ShWit,
-    Legacy,
-}
-
-impl LedgerAddressType {
-    fn priority(self) -> u8 {
-        match self {
-            Self::Tap => 0,
-            Self::Wit => 1,
-            Self::ShWit => 2,
-            Self::Legacy => 3,
-        }
-    }
-
-    fn purpose(self) -> u32 {
-        match self {
-            Self::Legacy => 44,
-            Self::ShWit => 49,
-            Self::Wit => 84,
-            Self::Tap => 86,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-enum LedgerSigningPlan {
-    Default {
-        address_type: LedgerAddressType,
-        account_path: DerivationPath,
-    },
-    Registered {
-        address_type: LedgerAddressType,
-        name: String,
-        policy: String,
-    },
-}
-
-impl LedgerSigningPlan {
-    fn priority(&self) -> u8 {
-        match self {
-            Self::Default { address_type, .. } | Self::Registered { address_type, .. } => {
-                address_type.priority()
-            }
-        }
-    }
-}
-
-async fn ledger_signing_contexts(
-    device: &mut Device,
-    psbt: &Psbt,
-    network: Network,
-) -> Result<Vec<LedgerSigningContext>, LedgerSigningError> {
-    let fingerprint = device
-        .fingerprint()
-        .await
-        .map_err(|err| LedgerSigningError::Device(classify_anyhow_device_error(&err)))?;
-    let plans = ledger_signing_plans(psbt, fingerprint, network)
-        .map_err(LedgerSigningError::BadArgument)?;
-    let mut contexts = Vec::with_capacity(plans.len());
-
-    for plan in plans {
-        match plan {
-            LedgerSigningPlan::Default {
-                address_type,
-                account_path,
-            } => {
-                let xpub = device
-                    .device()
-                    .get_extended_pubkey(account_path.clone(), false)
-                    .await
-                    .map_err(|err| {
-                        LedgerSigningError::Device(classify_device_error_for(
-                            DeviceType::Ledger,
-                            &err,
-                        ))
-                    })?;
-                let policy = singlesig_wallet_policy(
-                    &extend_account_path_for_policy(&account_path),
-                    fingerprint,
-                    xpub,
-                )
-                .map_err(|err| LedgerSigningError::BadArgument(err.to_string()))?;
-                contexts.push(LedgerSigningContext {
-                    address_type,
-                    context: DeviceContext::Ledger {
-                        wallet_policy: LedgerWalletPolicy::new(String::new(), Version::V2, policy),
-                        wallet_hmac: None,
-                    },
-                });
-            }
-            LedgerSigningPlan::Registered {
-                address_type,
-                name,
-                policy,
-            } => {
-                let registration = device
-                    .device()
-                    .register_wallet(&name, &policy)
-                    .await
-                    .map_err(|err| {
-                        LedgerSigningError::Device(classify_device_error_for(
-                            DeviceType::Ledger,
-                            &err,
-                        ))
-                    })?;
-                let hmac = registration.hmac().ok_or_else(|| {
-                    LedgerSigningError::Device(HwiError::new(
-                        HwiErrorCode::DeviceConnectionError,
-                        "Ledger wallet registration returned no HMAC",
-                    ))
-                })?;
-                if hmac.len() != 32 {
-                    return Err(LedgerSigningError::Device(HwiError::new(
-                        HwiErrorCode::DeviceConnectionError,
-                        format!(
-                            "Ledger wallet registration returned a {}-byte HMAC instead of 32 bytes",
-                            hmac.len()
-                        ),
-                    )));
-                }
-                let wallet_policy = WalletPolicy::from_str(&policy)
-                    .map_err(|err| LedgerSigningError::BadArgument(err.to_string()))?;
-                contexts.push(LedgerSigningContext {
-                    address_type,
-                    context: DeviceContext::Ledger {
-                        wallet_policy: LedgerWalletPolicy::new(name, Version::V2, wallet_policy),
-                        wallet_hmac: Some(hmac),
-                    },
-                });
-            }
-        }
-    }
-
-    Ok(contexts)
-}
-
-fn strip_legacy_witness_utxos(psbt: &mut Psbt) {
-    for (index, input) in psbt.inputs.iter_mut().enumerate() {
-        let Some(utxo) = input.non_witness_utxo.as_ref().and_then(|tx| {
-            tx.output
-                .get(psbt.unsigned_tx.input[index].previous_output.vout as usize)
-        }) else {
-            continue;
-        };
-        if !utxo.script_pubkey.is_witness_program() {
-            input.witness_utxo = None;
-        }
-    }
-}
-
-fn merge_psbt_signatures(target: &mut Psbt, signed: Psbt) {
-    for (target, signed) in target.inputs.iter_mut().zip(signed.inputs) {
-        target.partial_sigs.extend(signed.partial_sigs);
-        target.tap_script_sigs.extend(signed.tap_script_sigs);
-        if signed.tap_key_sig.is_some() {
-            target.tap_key_sig = signed.tap_key_sig;
-        }
-    }
-}
-
-fn ledger_signing_plans(
-    psbt: &Psbt,
-    fingerprint: Fingerprint,
-    network: Network,
-) -> Result<Vec<LedgerSigningPlan>, String> {
-    let mut plans = Vec::new();
-
-    for (input_index, input) in psbt.inputs.iter().enumerate() {
-        let Some(utxo) = input_utxo(psbt, input_index)? else {
-            continue;
-        };
-        let owns_input = input_has_fingerprint(input, fingerprint);
-        let envelope = match multisig_script(input, &utxo, input_index) {
-            Ok(envelope) => envelope,
-            Err(err) if owns_input => return Err(err),
-            Err(_) => None,
-        };
-
-        if let Some((address_type, script)) = envelope.as_ref()
-            && let Some((threshold, pubkeys)) = parse_multisig_script(script)?
-        {
-            let owns_multisig = pubkeys.iter().any(|pubkey| {
-                input
-                    .bip32_derivation
-                    .get(&pubkey.inner)
-                    .is_some_and(|(key_fingerprint, _)| *key_fingerprint == fingerprint)
-            });
-            if owns_multisig {
-                let plan = ledger_multisig_plan(
-                    psbt,
-                    input,
-                    input_index,
-                    *address_type,
-                    threshold,
-                    &pubkeys,
-                )?;
-                if !plans.contains(&plan) {
-                    plans.push(plan);
-                }
-                continue;
-            }
-        }
-
-        if let Some(plan) = ledger_singlesig_plan(input, &utxo, input_index, fingerprint, network)?
-        {
-            if !plans.contains(&plan) {
-                plans.push(plan);
-            }
-            continue;
-        }
-
-        if owns_input {
-            let policy = if utxo.script_pubkey.is_p2tr() {
-                "taproot script-path"
-            } else if envelope.is_some() {
-                "non-sorted-multisig or miniscript"
-            } else {
-                "non-default"
-            };
-            return Err(format!(
-                "input {input_index}: Ledger HWI signtx cannot infer {policy} wallet policy; use explicit descriptor and HMAC signing"
-            ));
-        }
-    }
-
-    plans.sort_by_key(LedgerSigningPlan::priority);
-    Ok(plans)
-}
-
-fn ledger_singlesig_plan(
-    input: &Input,
-    utxo: &TxOut,
-    input_index: usize,
-    fingerprint: Fingerprint,
-    network: Network,
-) -> Result<Option<LedgerSigningPlan>, String> {
-    let Some(address_type) = singlesig_address_type(input, utxo) else {
-        return Ok(None);
-    };
-
-    if address_type == LedgerAddressType::Tap {
-        let owned: Vec<_> = input
-            .tap_key_origins
-            .iter()
-            .filter(|(_, (_, (key_fingerprint, _)))| *key_fingerprint == fingerprint)
-            .collect();
-        if owned.is_empty() {
-            return Ok(None);
-        }
-        let Some(internal_key) = input.tap_internal_key else {
-            return Err(format!(
-                "input {input_index}: Ledger BIP86 input is missing tap_internal_key; use explicit descriptor and HMAC signing for non-default taproot policies"
-            ));
-        };
-        let candidates: Vec<_> = owned
-            .into_iter()
-            .filter(|(key, (leaf_hashes, _))| **key == internal_key && leaf_hashes.is_empty())
-            .collect();
-        if candidates.len() != 1 || input.tap_merkle_root.is_some() {
-            return Err(format!(
-                "input {input_index}: Ledger HWI signtx supports only unambiguous BIP86 key-path inputs; use explicit descriptor and HMAC signing for taproot script paths"
-            ));
-        }
-        let (_, (_, (_, path))) = candidates[0];
-        let account_path =
-            validate_standard_singlesig_path(path, address_type, network, input_index)?;
-        let secp = Secp256k1::verification_only();
-        let expected = Address::p2tr(&secp, internal_key, None, network).script_pubkey();
-        if expected != utxo.script_pubkey {
-            return Err(format!(
-                "input {input_index}: BIP86 internal key does not match the prevout script; use explicit descriptor and HMAC signing for non-default taproot policies"
-            ));
-        }
-        return Ok(Some(LedgerSigningPlan::Default {
-            address_type,
-            account_path,
-        }));
-    }
-
-    let owned: Vec<_> = input
-        .bip32_derivation
-        .iter()
-        .filter(|(_, (key_fingerprint, _))| *key_fingerprint == fingerprint)
-        .collect();
-    if owned.is_empty() {
-        return Ok(None);
-    }
-    let candidates: Vec<_> = owned
-        .into_iter()
-        .filter(|(key, _)| singlesig_key_matches(**key, address_type, input, utxo, network))
-        .collect();
-    if candidates.len() != 1 {
-        return Err(format!(
-            "input {input_index}: Ledger single-sig key metadata is missing or ambiguous"
-        ));
-    }
-    let (_, (_, path)) = candidates[0];
-    let account_path = validate_standard_singlesig_path(path, address_type, network, input_index)?;
-    Ok(Some(LedgerSigningPlan::Default {
-        address_type,
-        account_path,
-    }))
-}
-
-fn singlesig_address_type(input: &Input, utxo: &TxOut) -> Option<LedgerAddressType> {
-    if utxo.script_pubkey.is_p2pkh() {
-        Some(LedgerAddressType::Legacy)
-    } else if utxo.script_pubkey.is_p2wpkh() {
-        Some(LedgerAddressType::Wit)
-    } else if utxo.script_pubkey.is_p2tr() {
-        Some(LedgerAddressType::Tap)
-    } else if utxo.script_pubkey.is_p2sh()
-        && input
-            .redeem_script
-            .as_ref()
-            .is_some_and(|script| script.is_p2wpkh() && script.to_p2sh() == utxo.script_pubkey)
-    {
-        Some(LedgerAddressType::ShWit)
-    } else {
-        None
-    }
-}
-
-fn singlesig_key_matches(
-    key: bitcoin::secp256k1::PublicKey,
-    address_type: LedgerAddressType,
-    input: &Input,
-    utxo: &TxOut,
-    network: Network,
-) -> bool {
-    let key = PublicKey::new(key);
-    match address_type {
-        LedgerAddressType::Legacy => {
-            Address::p2pkh(key, network).script_pubkey() == utxo.script_pubkey
-        }
-        LedgerAddressType::Wit => CompressedPublicKey::try_from(key)
-            .is_ok_and(|key| Address::p2wpkh(&key, network).script_pubkey() == utxo.script_pubkey),
-        LedgerAddressType::ShWit => CompressedPublicKey::try_from(key).is_ok_and(|key| {
-            input.redeem_script.as_ref().is_some_and(|script| {
-                Address::p2wpkh(&key, network).script_pubkey() == *script
-                    && script.to_p2sh() == utxo.script_pubkey
-            })
-        }),
-        LedgerAddressType::Tap => false,
-    }
-}
-
-fn validate_standard_singlesig_path(
-    path: &DerivationPath,
-    address_type: LedgerAddressType,
-    network: Network,
-    input_index: usize,
-) -> Result<DerivationPath, String> {
-    let children = path.as_ref();
-    if children.len() != 5 {
-        return Err(format!(
-            "input {input_index}: Ledger default wallet requires an exact five-level derivation path"
-        ));
-    }
-    let purpose = hardened_index(children[0]);
-    let coin_type = hardened_index(children[1]);
-    let account = hardened_index(children[2]);
-    let branch = normal_index(children[3]);
-    let index = normal_index(children[4]);
-    let expected_coin_type = if network == Network::Bitcoin { 0 } else { 1 };
-    if purpose != Some(address_type.purpose())
-        || coin_type != Some(expected_coin_type)
-        || account.is_none()
-        || !matches!(branch, Some(0 | 1))
-        || index.is_none()
-    {
-        return Err(format!(
-            "input {input_index}: derivation path {path} is not a standard Ledger {:?} wallet path",
-            address_type
-        ));
-    }
-    Ok(DerivationPath::from(children[..3].to_vec()))
-}
-
-fn hardened_index(child: ChildNumber) -> Option<u32> {
-    match child {
-        ChildNumber::Hardened { index } => Some(index),
-        ChildNumber::Normal { .. } => None,
-    }
-}
-
-fn normal_index(child: ChildNumber) -> Option<u32> {
-    match child {
-        ChildNumber::Normal { index } => Some(index),
-        ChildNumber::Hardened { .. } => None,
-    }
-}
-
-fn ledger_multisig_plan(
-    psbt: &Psbt,
-    input: &Input,
-    input_index: usize,
-    address_type: LedgerAddressType,
-    threshold: usize,
-    pubkeys: &[PublicKey],
-) -> Result<LedgerSigningPlan, String> {
-    if !pubkeys
-        .windows(2)
-        .all(|keys| keys[0].inner.serialize() < keys[1].inner.serialize())
-    {
-        return Err(format!(
-            "input {input_index}: Ledger HWI signtx supports only sorted multisig scripts"
-        ));
-    }
-
-    let mut keys = Vec::with_capacity(pubkeys.len());
-    let mut expected_suffix = None;
-    for pubkey in pubkeys {
-        let key_source = input.bip32_derivation.get(&pubkey.inner).ok_or_else(|| {
-            format!("input {input_index}: multisig public key is missing BIP32 derivation metadata")
-        })?;
-        let resolved = global_xpub_key_expression(psbt, key_source, pubkey, input_index)?;
-        match expected_suffix {
-            Some(suffix) if suffix != resolved.suffix => {
-                return Err(format!(
-                    "input {input_index}: multisig keys do not share one receive/change derivation"
-                ));
-            }
-            None => expected_suffix = Some(resolved.suffix),
-            Some(_) => {}
-        }
-        keys.push(format!("{}/<0;1>/*", resolved.expression));
-    }
-    // sortedmulti semantics do not depend on the key-info order. Canonicalize it so
-    // inputs at different indexes reconstruct one stable registered wallet.
-    keys.sort();
-    let policy = multisig_policy_descriptor(address_type, threshold, &keys, true);
-    Ok(LedgerSigningPlan::Registered {
-        address_type,
-        name: format!("{threshold} of {} Multisig", pubkeys.len()),
-        policy,
-    })
-}
-
-struct ResolvedMultisigKey {
-    expression: String,
-    suffix: (u32, u32),
-}
-
-fn global_xpub_key_expression(
-    psbt: &Psbt,
-    key_source: &KeySource,
-    pubkey: &PublicKey,
-    input_index: usize,
-) -> Result<ResolvedMultisigKey, String> {
-    let (fingerprint, key_path) = key_source;
-    let children = key_path.as_ref();
-    if children.len() < 2 {
-        return Err(format!(
-            "input {input_index}: multisig derivation path is too short"
-        ));
-    }
-    let branch = normal_index(children[children.len() - 2]);
-    let index = normal_index(children[children.len() - 1]);
-    if !matches!(branch, Some(0 | 1)) || index.is_none() {
-        return Err(format!(
-            "input {input_index}: Ledger multisig derivation must end in /0/index or /1/index"
-        ));
-    }
-    let suffix = (
-        branch.expect("branch checked"),
-        index.expect("index checked"),
-    );
-    let xpub_path = DerivationPath::from(children[..children.len() - 2].to_vec());
-    let matches: Vec<_> = psbt
-        .xpub
-        .iter()
-        .filter(|(_, (xpub_fingerprint, path))| {
-            *xpub_fingerprint == *fingerprint && *path == xpub_path
-        })
-        .collect();
-    if matches.len() != 1 {
-        return Err(format!(
-            "input {input_index}: expected one account-level global xpub for {fingerprint}, found {}",
-            matches.len()
-        ));
-    }
-    let (xpub, (_, origin_path)) = matches[0];
-    let secp = Secp256k1::verification_only();
-    let derived = xpub
-        .derive_pub(
-            &secp,
-            &[
-                ChildNumber::from_normal_idx(suffix.0).expect("branch checked"),
-                ChildNumber::from_normal_idx(suffix.1).expect("index checked"),
-            ],
-        )
-        .map_err(|err| format!("input {input_index}: failed to derive global xpub: {err}"))?;
-    if derived.public_key != pubkey.inner {
-        return Err(format!(
-            "input {input_index}: global xpub derivation does not match multisig public key"
-        ));
-    }
-    let origin = origin_path.to_string();
-    let origin = origin.trim_start_matches('m').trim_start_matches('/');
-    let expression = if origin.is_empty() {
-        format!("[{fingerprint}]{xpub}")
-    } else {
-        format!("[{fingerprint}/{origin}]{xpub}")
-    };
-    Ok(ResolvedMultisigKey { expression, suffix })
-}
-
-fn input_has_fingerprint(input: &Input, fingerprint: Fingerprint) -> bool {
-    input
-        .bip32_derivation
-        .values()
-        .any(|(key_fingerprint, _)| *key_fingerprint == fingerprint)
-        || input
-            .tap_key_origins
-            .values()
-            .any(|(_, (key_fingerprint, _))| *key_fingerprint == fingerprint)
-}
-
-fn input_utxo(psbt: &Psbt, input_index: usize) -> Result<Option<TxOut>, String> {
-    let input = &psbt.inputs[input_index];
-    let txin = &psbt.unsigned_tx.input[input_index];
-    let non_witness = if let Some(tx) = &input.non_witness_utxo {
-        if tx.compute_txid() != txin.previous_output.txid {
-            return Err(format!(
-                "input {input_index}: non_witness_utxo transaction id does not match prevout"
-            ));
-        }
-        Some(
-            tx.output
-                .get(txin.previous_output.vout as usize)
-                .cloned()
-                .ok_or_else(|| format!("input {input_index}: prevout index is out of range"))?,
-        )
-    } else {
-        None
-    };
-    if let (Some(witness), Some(non_witness)) = (&input.witness_utxo, &non_witness)
-        && witness != non_witness
-    {
-        return Err(format!(
-            "input {input_index}: witness_utxo and non_witness_utxo disagree"
-        ));
-    }
-    Ok(input.witness_utxo.clone().or(non_witness))
-}
-
-fn extend_account_path_for_policy(path: &DerivationPath) -> DerivationPath {
-    let mut children = path.as_ref().to_vec();
-    children.push(ChildNumber::from_normal_idx(0).expect("valid receive branch"));
-    children.push(ChildNumber::from_normal_idx(0).expect("valid address index"));
-    DerivationPath::from(children)
-}
-
-fn multisig_script(
-    input: &Input,
-    utxo: &TxOut,
-    input_index: usize,
-) -> Result<Option<(LedgerAddressType, ScriptBuf)>, String> {
-    if utxo.script_pubkey.is_p2wsh() {
-        let witness_script = input
-            .witness_script
-            .as_ref()
-            .ok_or_else(|| format!("input {input_index}: P2WSH input is missing witness_script"))?;
-        if witness_script.to_p2wsh() != utxo.script_pubkey {
-            return Err(format!(
-                "input {input_index}: witness_script does not match P2WSH prevout"
-            ));
-        }
-        return Ok(Some((LedgerAddressType::Wit, witness_script.clone())));
-    }
-    if !utxo.script_pubkey.is_p2sh() {
-        return Ok(None);
-    }
-    let redeem_script = input
-        .redeem_script
-        .as_ref()
-        .ok_or_else(|| format!("input {input_index}: P2SH input is missing redeem_script"))?;
-    if redeem_script.to_p2sh() != utxo.script_pubkey {
-        return Err(format!(
-            "input {input_index}: redeem_script does not match P2SH prevout"
-        ));
-    }
-    if redeem_script.is_p2wsh() {
-        let witness_script = input.witness_script.as_ref().ok_or_else(|| {
-            format!("input {input_index}: nested P2WSH input is missing witness_script")
-        })?;
-        if witness_script.to_p2wsh() != *redeem_script {
-            return Err(format!(
-                "input {input_index}: witness_script does not match nested P2WSH redeem_script"
-            ));
-        }
-        Ok(Some((LedgerAddressType::ShWit, witness_script.clone())))
-    } else {
-        Ok(Some((LedgerAddressType::Legacy, redeem_script.clone())))
-    }
-}
-
-fn parse_multisig_script(script: &ScriptBuf) -> Result<Option<(usize, Vec<PublicKey>)>, String> {
-    let mut instructions = script.instructions();
-    let Some(first) = instructions.next() else {
-        return Ok(None);
-    };
-    let threshold = match first.map_err(|err| err.to_string())? {
-        Instruction::Op(op) => pushnum(op).filter(|n| *n <= 16),
-        Instruction::PushBytes(_) => None,
-    };
-    let Some(threshold) = threshold else {
-        return Ok(None);
-    };
-
-    let mut pubkeys = Vec::new();
-    let signer_count = loop {
-        let Some(instruction) = instructions.next() else {
-            return Ok(None);
-        };
-        match instruction.map_err(|err| err.to_string())? {
-            Instruction::PushBytes(bytes) if bytes.len() == 33 => {
-                let public_key = PublicKey::from_slice(push_bytes_as_bytes(bytes))
-                    .map_err(|err| err.to_string())?;
-                pubkeys.push(public_key);
-            }
-            Instruction::Op(op) => {
-                break pushnum(op);
-            }
-            Instruction::PushBytes(_) => return Ok(None),
-        }
-    };
-
-    let Some(signer_count) = signer_count else {
-        return Ok(None);
-    };
-    let Some(last) = instructions.next() else {
-        return Ok(None);
-    };
-    if last.map_err(|err| err.to_string())? != Instruction::Op(OP_CHECKMULTISIG)
-        || instructions.next().is_some()
-        || signer_count != pubkeys.len()
-        || threshold == 0
-        || threshold > signer_count
-    {
-        return Ok(None);
-    }
-    Ok(Some((threshold, pubkeys)))
-}
-
-fn multisig_policy_descriptor(
-    address_type: LedgerAddressType,
-    threshold: usize,
-    keys: &[String],
-    sorted: bool,
-) -> String {
-    let operator = if sorted { "sortedmulti" } else { "multi" };
-    let body = format!("{operator}({threshold},{})", keys.join(","));
-    match address_type {
-        LedgerAddressType::Legacy => format!("sh({body})"),
-        LedgerAddressType::ShWit => format!("sh(wsh({body}))"),
-        LedgerAddressType::Wit => format!("wsh({body})"),
-        LedgerAddressType::Tap => unreachable!("taproot is not classic multisig"),
-    }
-}
-
-#[derive(Debug)]
-struct LedgerMultisigDisplayPlan {
-    name: String,
-    policy_text: String,
-    policy: WalletPolicy,
-    change: bool,
-    address_index: u32,
-}
-
-fn ledger_multisig_display_plan(
-    multisig: MultisigDisplayAddress,
-) -> Result<LedgerMultisigDisplayPlan, HwiError> {
-    let key_count = multisig.keys.len();
-    if multisig.threshold == 0
-        || key_count == 0
-        || key_count > 16
-        || usize::from(multisig.threshold) > key_count
-    {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "Invalid threshold or number of keys",
-        ));
-    }
-
-    let mut suffixes = Vec::with_capacity(key_count);
-    let mut keys = Vec::with_capacity(key_count);
-    let mut origin_too_long = false;
-    for key in &multisig.keys {
-        let xpub = match key {
-            DescriptorPublicKey::XPub(xpub) => xpub,
-            DescriptorPublicKey::Single(_) => {
-                return Err(HwiError::new(
-                    HwiErrorCode::BadArgument,
-                    "Ledger multisig display requires extended public keys with origin information",
-                ));
-            }
-            DescriptorPublicKey::MultiXPub(_) => {
-                return Err(HwiError::new(
-                    HwiErrorCode::BadArgument,
-                    "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-                ));
-            }
-        };
-        let Some((_, origin_path)) = &xpub.origin else {
-            return Err(HwiError::new(
-                HwiErrorCode::BadArgument,
-                "Ledger multisig display requires extended public keys with origin information",
-            ));
-        };
-        let suffix = xpub.derivation_path.as_ref();
-        if xpub.wildcard != Wildcard::None || suffix.len() != 2 {
-            return Err(HwiError::new(
-                HwiErrorCode::BadArgument,
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ));
-        }
-        let Some(branch) = normal_index(suffix[0]) else {
-            return Err(HwiError::new(
-                HwiErrorCode::BadArgument,
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ));
-        };
-        let Some(index) = normal_index(suffix[1]) else {
-            return Err(HwiError::new(
-                HwiErrorCode::BadArgument,
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ));
-        };
-        if branch > 1 || index > 0x7fff_ffff {
-            return Err(HwiError::new(
-                HwiErrorCode::BadArgument,
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ));
-        }
-        suffixes.push((branch, index));
-        origin_too_long |= origin_path.as_ref().len() > 4;
-        keys.push(format!("{}/<0;1>/*", bhwi::policy::format_key_info(key)));
-    }
-    let Some((branch, address_index)) = suffixes.first().copied() else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "Invalid threshold or number of keys",
-        ));
-    };
-    if suffixes
-        .iter()
-        .any(|suffix| *suffix != (branch, address_index))
-    {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "Ledger Bitcoin app requires all derivation paths to end with /0/*, or all with /1/* for multisig",
-        ));
-    }
-    if origin_too_long {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "Ledger Bitcoin app requires extended keys with derivation length at most 4",
-        ));
-    }
-
-    let address_type = match multisig.address_type {
-        MultisigAddressType::Legacy => LedgerAddressType::Legacy,
-        MultisigAddressType::ShWit => LedgerAddressType::ShWit,
-        MultisigAddressType::Wit => LedgerAddressType::Wit,
-    };
-
-    let policy_text = multisig_policy_descriptor(
-        address_type,
-        usize::from(multisig.threshold),
-        &keys,
-        multisig.sorted,
-    );
-    let policy = WalletPolicy::from_str(&policy_text)
-        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
-
-    Ok(LedgerMultisigDisplayPlan {
-        name: format!("{} of {key_count} Multisig", multisig.threshold),
-        policy_text,
-        policy,
-        change: branch == 1,
-        address_index,
-    })
-}
-
-async fn ledger_multisig_display_address(
-    device: &mut Device,
-    descriptor: &str,
-) -> Result<(DisplayAddress, DeviceContext), HwiError> {
-    let plan = ledger_multisig_display_plan(multisig_display_address_from_descriptor(descriptor)?)?;
-    let registration = device
-        .device()
-        .register_wallet(&plan.name, &plan.policy_text)
-        .await
-        .map_err(|err| classify_device_error_for(DeviceType::Ledger, &err))?;
-    let hmac = registration.hmac().ok_or_else(|| {
-        HwiError::new(
-            HwiErrorCode::DeviceConnectionError,
-            "Ledger wallet registration returned no HMAC",
-        )
-    })?;
-
-    Ok((
-        DisplayAddress::ByDescriptor {
-            index: plan.address_index,
-            change: plan.change,
-            display: true,
-            descriptor_name: String::new(),
-        },
-        DeviceContext::Ledger {
-            wallet_policy: LedgerWalletPolicy::new(plan.name, Version::V2, plan.policy),
-            wallet_hmac: Some(hmac),
-        },
-    ))
-}
-
-fn pushnum(op: bitcoin::blockdata::opcodes::Opcode) -> Option<usize> {
-    if op == OP_PUSHNUM_1 {
-        return Some(1);
-    }
-    if op.to_u8() >= OP_PUSHNUM_1.to_u8() && op.to_u8() <= OP_PUSHNUM_16.to_u8() {
-        return Some((op.to_u8() - OP_PUSHNUM_1.to_u8() + 1) as usize);
-    }
-    None
-}
-
-fn push_bytes_as_bytes(bytes: &PushBytes) -> &[u8] {
-    bytes.as_bytes()
 }
 
 fn master_xpub_path(
@@ -2895,244 +2131,11 @@ fn address_type_for(addr_type: HwiAddressType) -> bitcoin::address::AddressType 
     }
 }
 
-async fn singlesig_display_address_from_descriptor(
-    device: &mut Device,
-    descriptor: &str,
-) -> Result<DisplayAddress, HwiError> {
-    let descriptor = strip_descriptor_checksum(descriptor);
-    let parsed = parse_singlesig_display_descriptor(descriptor)?;
-    let fingerprint = device
-        .fingerprint()
-        .await
-        .map_err(|err| classify_anyhow_device_error(&err))?;
-    if parsed.fingerprint != fingerprint {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Descriptor fingerprint does not match device: {descriptor}"),
-        ));
+fn display_address_error(err: DisplayAddressError) -> HwiError {
+    match err {
+        DisplayAddressError::Device(err) => classify_device_error(&err),
+        err => HwiError::new(HwiErrorCode::BadArgument, err.to_string()),
     }
-
-    let xpub = device
-        .device()
-        .get_extended_pubkey(parsed.origin_path.clone(), false)
-        .await
-        .map_err(|err| classify_anyhow_device_error(&anyhow::Error::new(err)))?;
-
-    if !descriptor_key_matches_xpub(&parsed.key, xpub) {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Key in descriptor does not match device: {descriptor}"),
-        ));
-    }
-
-    Ok(DisplayAddress::ByPath {
-        path: parsed.full_path,
-        display: true,
-        address_format: Some(address_type_for(parsed.addr_type)),
-    })
-}
-
-#[derive(Debug)]
-struct ParsedSingleSigDisplayDescriptor {
-    addr_type: HwiAddressType,
-    fingerprint: Fingerprint,
-    origin_path: DerivationPath,
-    full_path: DerivationPath,
-    key: String,
-}
-
-fn parse_singlesig_display_descriptor(
-    descriptor: &str,
-) -> Result<ParsedSingleSigDisplayDescriptor, HwiError> {
-    let (addr_type, key_expr) = if let Some(inner) = descriptor
-        .strip_prefix("sh(wpkh(")
-        .and_then(|value| value.strip_suffix("))"))
-    {
-        (HwiAddressType::ShWit, inner)
-    } else if let Some(inner) = descriptor
-        .strip_prefix("wpkh(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        (HwiAddressType::Wit, inner)
-    } else if let Some(inner) = descriptor
-        .strip_prefix("pkh(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        (HwiAddressType::Legacy, inner)
-    } else if let Some(inner) = descriptor
-        .strip_prefix("tr(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        (HwiAddressType::Tap, inner)
-    } else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Unsupported displayaddress descriptor: {descriptor}"),
-        ));
-    };
-
-    let Some(rest) = key_expr.strip_prefix('[') else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Descriptor missing origin info: {descriptor}"),
-        ));
-    };
-    let Some((origin, key_and_suffix)) = rest.split_once(']') else {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            format!("Descriptor missing origin info: {descriptor}"),
-        ));
-    };
-    let (fingerprint, origin_path) = parse_key_origin(origin)?;
-    let (key, suffix_path) = split_key_suffix(key_and_suffix)?;
-    validate_singlesig_display_key(key)?;
-    let full_path = join_derivation_path(&origin_path, &suffix_path);
-
-    Ok(ParsedSingleSigDisplayDescriptor {
-        addr_type,
-        fingerprint,
-        origin_path,
-        full_path,
-        key: key.to_owned(),
-    })
-}
-
-fn validate_singlesig_display_key(key: &str) -> Result<(), HwiError> {
-    if SecpPublicKey::from_str(key).is_ok() || XOnlyPublicKey::from_str(key).is_ok() {
-        return Ok(());
-    }
-
-    Xpub::from_str(key).map(|_| ()).map_err(|err| {
-        let error = invalid_base58_character(key).map_or_else(
-            || err.to_string(),
-            |ch| format!("Character '{ch}' is not a valid base58 character"),
-        );
-        HwiError::new(HwiErrorCode::BadArgument, error)
-    })
-}
-
-fn invalid_base58_character(value: &str) -> Option<char> {
-    const BASE58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
-    value.chars().find(|ch| !BASE58_ALPHABET.contains(*ch))
-}
-
-fn multisig_display_address_from_descriptor(
-    descriptor: &str,
-) -> Result<MultisigDisplayAddress, HwiError> {
-    let descriptor = strip_descriptor_checksum(descriptor);
-    let (address_type, sorted, inner) =
-        parse_multisig_descriptor_envelope(descriptor).ok_or_else(|| {
-            HwiError::new(
-                HwiErrorCode::BadArgument,
-                format!("Unsupported displayaddress descriptor: {descriptor}"),
-            )
-        })?;
-
-    let mut parts = inner.split(',');
-    let threshold = parts
-        .next()
-        .ok_or_else(|| {
-            HwiError::new(
-                HwiErrorCode::BadArgument,
-                format!("Invalid multisig descriptor: {descriptor}"),
-            )
-        })?
-        .parse::<u8>()
-        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
-    let keys = parts
-        .map(|key| {
-            DescriptorPublicKey::from_str(key)
-                .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if keys.is_empty() || threshold == 0 || usize::from(threshold) > keys.len() {
-        return Err(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "Either the redeem script provided is invalid or the keypaths provided are insufficient",
-        ));
-    }
-    Ok(MultisigDisplayAddress {
-        threshold,
-        address_type,
-        sorted,
-        keys,
-    })
-}
-
-fn parse_multisig_descriptor_envelope(
-    descriptor: &str,
-) -> Option<(MultisigAddressType, bool, &str)> {
-    let wrappers = [
-        ("sh(wsh(", "))", MultisigAddressType::ShWit),
-        ("wsh(", ")", MultisigAddressType::Wit),
-        ("sh(", ")", MultisigAddressType::Legacy),
-    ];
-    for (prefix, suffix, address_type) in wrappers {
-        let Some(inner) = descriptor
-            .strip_prefix(prefix)
-            .and_then(|value| value.strip_suffix(suffix))
-        else {
-            continue;
-        };
-        if let Some(inner) = inner
-            .strip_prefix("sortedmulti(")
-            .and_then(|value| value.strip_suffix(')'))
-        {
-            return Some((address_type, true, inner));
-        }
-        if let Some(inner) = inner
-            .strip_prefix("multi(")
-            .and_then(|value| value.strip_suffix(')'))
-        {
-            return Some((address_type, false, inner));
-        }
-    }
-    None
-}
-
-fn strip_descriptor_checksum(descriptor: &str) -> &str {
-    descriptor
-        .split_once('#')
-        .map_or(descriptor, |(desc, _)| desc)
-}
-
-fn parse_key_origin(origin: &str) -> Result<(Fingerprint, DerivationPath), HwiError> {
-    let (fingerprint, path) = origin
-        .split_once('/')
-        .map_or((origin, ""), |(fp, path)| (fp, path));
-    let fingerprint = Fingerprint::from_str(fingerprint)
-        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
-    let path = if path.is_empty() {
-        DerivationPath::master()
-    } else {
-        DerivationPath::from_str(&format!("m/{path}"))
-            .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?
-    };
-    Ok((fingerprint, path))
-}
-
-fn split_key_suffix(key_and_suffix: &str) -> Result<(&str, DerivationPath), HwiError> {
-    let Some((key, suffix)) = key_and_suffix.split_once('/') else {
-        return Ok((key_and_suffix, DerivationPath::master()));
-    };
-    let suffix = DerivationPath::from_str(&format!("m/{suffix}"))
-        .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
-    Ok((key, suffix))
-}
-
-fn join_derivation_path(base: &DerivationPath, suffix: &DerivationPath) -> DerivationPath {
-    let mut children = base.as_ref().to_vec();
-    children.extend_from_slice(suffix.as_ref());
-    DerivationPath::from(children)
-}
-
-fn descriptor_key_matches_xpub(key: &str, xpub: Xpub) -> bool {
-    key == xpub.to_string()
-        || key.eq_ignore_ascii_case(&hex::encode(xpub.public_key.serialize()))
-        || key.eq_ignore_ascii_case(&hex::encode(
-            xpub.public_key.x_only_public_key().0.serialize(),
-        ))
 }
 
 /// Maps typed device errors from the async stack onto Python HWI's error
@@ -3150,6 +2153,11 @@ fn common_device_error<'a>(
         source = current.source();
     }
     None
+}
+
+fn classify_anyhow_device_error(err: &anyhow::Error) -> HwiError {
+    let source: &(dyn std::error::Error + 'static) = err.as_ref();
+    classify_device_error(source)
 }
 
 fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
@@ -3185,11 +2193,6 @@ fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
     device_error(err)
 }
 
-fn classify_anyhow_device_error(err: &anyhow::Error) -> HwiError {
-    let source: &(dyn std::error::Error + 'static) = err.as_ref();
-    classify_device_error(source)
-}
-
 /// Device-aware classification. Upstream's Ledger backend uses the new
 /// `ledger_bitcoin` client whose `DenyError` bypasses the `ledger_exception`
 /// cancel mapping, so Ledger cancellations surface as `-13` there instead of
@@ -3211,21 +2214,10 @@ fn hwi_descriptor_addr_types(device_type: DeviceType, model: &str) -> Vec<HwiAdd
         HwiAddressType::Wit,
         HwiAddressType::ShWit,
     ];
-    if hwi_can_sign_taproot(device_type, model) {
+    if can_sign_taproot(device_type, model) {
         types.push(HwiAddressType::Tap);
     }
     types
-}
-
-fn hwi_can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
-    match device_type {
-        DeviceType::BitBox02 => false,
-        DeviceType::Ledger => true,
-        DeviceType::Jade => false,
-        DeviceType::KeepKey => false,
-        DeviceType::Coldcard => model.contains("edge"),
-        DeviceType::Trezor => model != "trezor_one",
-    }
 }
 
 fn hwi_descriptor_string(
@@ -3291,10 +2283,6 @@ fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
         chaincode: Some(hex::encode(xpub.chain_code)),
         pubkey: Some(hex::encode(xpub.public_key.serialize())),
     }
-}
-
-fn reports_device_info(device_type: DeviceType) -> bool {
-    matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor)
 }
 
 fn is_uninitialized_bitbox_error(device_type: DeviceType, error: &impl std::fmt::Display) -> bool {
@@ -3558,6 +2546,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
     // rejects an unknown type once `get_client` is reached.
     let device_type = args.device_type;
     let mut device_path = args.device_path;
+    #[cfg(feature = "keepkey")]
     if matches!(&args.command, HwiCliCommand::Enumerate)
         && device_path.is_none()
         && device_type
@@ -3696,15 +2685,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::{
-        Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness,
-        absolute::LockTime,
-        bip32::Xpriv,
-        blockdata::{opcodes::all::OP_CHECKMULTISIG, script::Builder},
-        secp256k1::Secp256k1,
-        transaction::Version as TxVersion,
-    };
     use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn display_address_errors_keep_python_hwi_codes() {
+        let parse = display_address_error(DisplayAddressError::UnsupportedDescriptor(
+            "wsh(x)".to_owned(),
+        ));
+        assert_eq!(parse.code, HwiErrorCode::BadArgument.code());
+        assert_eq!(parse.error, "Unsupported displayaddress descriptor: wsh(x)");
+
+        let device = display_address_error(DisplayAddressError::Device(
+            bhwi_async::HWIDeviceError::new(std::io::Error::other("boom")),
+        ));
+        assert_eq!(device.code, HwiErrorCode::DeviceConnectionError.code());
+        assert_eq!(device.error, "boom");
+    }
 
     #[test]
     fn device_type_accepts_model_qualified_names() {
@@ -3806,6 +2802,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "keepkey")]
     fn keepkey_selector_pathless_simulator_matches_only_emulated_model() {
         let request =
             parse_args(["hwi", "--device-type", "keepkey_simulator", "enumerate"]).unwrap();
@@ -4893,6 +3890,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "trezor")]
     fn send_pin_action_cancelled_matches_hwi_false_contract() {
         for error in [
             bhwi_async::HWIDeviceError::new(bhwi::trezor::TrezorError::ActionCancelled),
@@ -4955,6 +3953,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "keepkey", feature = "trezor"))]
     fn keepkey_locked_and_bad_pin_errors_use_python_hwi_codes() {
         let locked = device_error(format!("transport failed: {KEEPKEY_LOCKED}"));
         assert_eq!(locked.code, HwiErrorCode::DeviceNotReady.code());
@@ -5021,6 +4020,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "keepkey")]
     fn classify_anyhow_device_error_preserves_locked_descriptor_lookup() {
         let err = anyhow::Error::new(std::io::Error::other(KEEPKEY_LOCKED))
             .context("getting descriptor fingerprint");
@@ -5073,13 +4073,6 @@ mod tests {
                 }
             ])
         );
-    }
-
-    #[test]
-    fn signmessage_normalizes_coldcard_header_for_python_hwi() {
-        assert_eq!(python_hwi_message_header(DeviceType::Coldcard, 40), 32);
-        assert_eq!(python_hwi_message_header(DeviceType::Ledger, 32), 32);
-        assert_eq!(python_hwi_message_header(DeviceType::Jade, 31), 31);
     }
 
     #[test]
@@ -5147,262 +4140,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_singlesig_display_descriptor() {
-        let descriptor = "sh(wpkh([f5acc2fd/49h/1h/0h]tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/0/7))#checksum";
-
-        let parsed = parse_singlesig_display_descriptor(strip_descriptor_checksum(descriptor))
-            .expect("display descriptor");
-
-        assert_eq!(parsed.addr_type, HwiAddressType::ShWit);
-        assert_eq!(
-            parsed.fingerprint,
-            Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd])
-        );
-        assert_eq!(
-            parsed.origin_path,
-            DerivationPath::from_str("m/49h/1h/0h").unwrap()
-        );
-        assert_eq!(
-            parsed.full_path,
-            DerivationPath::from_str("m/49h/1h/0h/0/7").unwrap()
-        );
-        assert_eq!(
-            parsed.key,
-            "tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT"
-        );
-    }
-
-    #[test]
-    fn display_descriptor_requires_origin() {
-        let err = parse_singlesig_display_descriptor("wpkh(tpubDD8d3xExampleKeyMaterial/0/7)")
-            .expect_err("missing origin");
-
-        assert_eq!(err.code, HwiErrorCode::BadArgument.code());
-        assert!(err.error.contains("Descriptor missing origin info"));
-    }
-
-    #[test]
-    fn display_descriptor_rejects_invalid_base58_key_like_python_hwi() {
-        let err = parse_singlesig_display_descriptor("wpkh([0f056943/84h/1h/0h]not_an_xpub/0/0)")
-            .expect_err("invalid key");
-
-        assert_eq!(err.code, HwiErrorCode::BadArgument.code());
-        assert_eq!(err.error, "Character '_' is not a valid base58 character");
-    }
-
-    #[test]
-    fn parses_coldcard_sortedmulti_display_descriptor() {
-        let descriptor = "sh(wsh(sortedmulti(2,[f5acc2fd/48h/1h/0h/0h/0]0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,[aaaaaaaa/48h/1h/1h/0h/0]03f028892bad7ed57d2fb57bf33081d5cfcf6f9ed3d3d7f159c2e2fff579dc341a)))";
-
-        let parsed = multisig_display_address_from_descriptor(descriptor)
-            .expect("multisig display descriptor");
-
-        assert_eq!(parsed.threshold, 2);
-        assert!(matches!(parsed.address_type, MultisigAddressType::ShWit));
-        assert!(parsed.sorted);
-        assert_eq!(parsed.keys.len(), 2);
-        let origins = parsed
-            .keys
-            .iter()
-            .map(|key| match key {
-                DescriptorPublicKey::Single(key) => key.origin.clone().unwrap().1,
-                _ => panic!("expected concrete public key"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            origins,
-            vec![
-                DerivationPath::from_str("m/48h/1h/0h/0h/0").unwrap(),
-                DerivationPath::from_str("m/48h/1h/1h/0h/0").unwrap(),
-            ]
-        );
-    }
-    fn ledger_display_test_key_info(seed: u8, origin: &str) -> String {
-        let secp = Secp256k1::new();
-        let master = Xpriv::new_master(NetworkKind::Test, &[seed; 32]).unwrap();
-        let path = DerivationPath::from_str(&format!("m/{origin}")).unwrap();
-        let xpub = Xpub::from_priv(&secp, &master.derive_priv(&secp, &path).unwrap());
-        format!("[{}/{origin}]{xpub}", master.fingerprint(&secp))
-    }
-
-    fn wrap_multisig_descriptor(address_type: MultisigAddressType, body: &str) -> String {
-        match address_type {
-            MultisigAddressType::Legacy => format!("sh({body})"),
-            MultisigAddressType::ShWit => format!("sh(wsh({body}))"),
-            MultisigAddressType::Wit => format!("wsh({body})"),
-        }
-    }
-
-    fn ledger_display_plan_from_descriptor(
-        descriptor: &str,
-    ) -> Result<LedgerMultisigDisplayPlan, HwiError> {
-        ledger_multisig_display_plan(multisig_display_address_from_descriptor(descriptor)?)
-    }
-
-    #[test]
-    fn ledger_multisig_display_plans_cover_wrappers_operators_and_suffixes() {
-        let key_infos = [
-            ledger_display_test_key_info(1, "48'/1'/0'/2'"),
-            ledger_display_test_key_info(2, "48'/1'/0'/2'"),
-        ];
-        let cases = [
-            (MultisigAddressType::Legacy, true, 0, 0),
-            (MultisigAddressType::Legacy, false, 1, 1),
-            (MultisigAddressType::ShWit, true, 0, 7),
-            (MultisigAddressType::ShWit, false, 1, 8),
-            (MultisigAddressType::Wit, true, 0, 2_147_483_647),
-            (MultisigAddressType::Wit, false, 1, 42),
-        ];
-
-        for (address_type, sorted, branch, index) in cases {
-            let operator = if sorted { "sortedmulti" } else { "multi" };
-            let ordered_key_infos = if !sorted && matches!(address_type, MultisigAddressType::Wit) {
-                key_infos.iter().rev().collect::<Vec<_>>()
-            } else {
-                key_infos.iter().collect::<Vec<_>>()
-            };
-            let descriptor_keys = ordered_key_infos
-                .iter()
-                .map(|key| format!("{key}/{branch}/{index}"))
-                .collect::<Vec<_>>();
-            let descriptor = wrap_multisig_descriptor(
-                address_type,
-                &format!("{operator}(2,{})", descriptor_keys.join(",")),
-            );
-            let policy_keys = ordered_key_infos
-                .iter()
-                .map(|key| format!("{key}/<0;1>/*"))
-                .collect::<Vec<_>>();
-            let expected_policy = wrap_multisig_descriptor(
-                address_type,
-                &format!("{operator}(2,{})", policy_keys.join(",")),
-            );
-
-            let plan =
-                ledger_display_plan_from_descriptor(&descriptor).expect("Ledger display plan");
-
-            assert_eq!(plan.name, "2 of 2 Multisig");
-            assert_eq!(plan.policy_text, expected_policy);
-            assert_eq!(plan.change, branch == 1);
-            assert_eq!(plan.address_index, index);
-        }
-    }
-
-    #[test]
-    fn ledger_multisig_display_rejects_invalid_thresholds_and_key_count() {
-        let key = ledger_display_test_key_info(1, "48'/1'/0'/2'");
-        let descriptor = wrap_multisig_descriptor(
-            MultisigAddressType::Wit,
-            &format!("sortedmulti(1,{key}/0/0)"),
-        );
-        let valid = multisig_display_address_from_descriptor(&descriptor).unwrap();
-
-        for threshold in [0, 2] {
-            let mut multisig = valid.clone();
-            multisig.threshold = threshold;
-            let error =
-                ledger_multisig_display_plan(multisig).expect_err("invalid multisig threshold");
-            assert_eq!(error.code, HwiErrorCode::BadArgument.code());
-            assert_eq!(error.error, "Invalid threshold or number of keys");
-        }
-
-        let mut empty = valid.clone();
-        empty.keys.clear();
-        let error = ledger_multisig_display_plan(empty).expect_err("empty multisig key set");
-        assert_eq!(error.code, HwiErrorCode::BadArgument.code());
-        assert_eq!(error.error, "Invalid threshold or number of keys");
-
-        let mut too_many = valid;
-        too_many.keys = vec![too_many.keys[0].clone(); 17];
-        let error = ledger_multisig_display_plan(too_many).expect_err("too many multisig keys");
-        assert_eq!(error.code, HwiErrorCode::BadArgument.code());
-        assert_eq!(error.error, "Invalid threshold or number of keys");
-    }
-
-    #[test]
-    fn ledger_multisig_display_rejects_unsupported_key_shapes() {
-        let key_a = ledger_display_test_key_info(1, "48'/1'/0'/2'");
-        let key_b = ledger_display_test_key_info(2, "48'/1'/0'/2'");
-        let long_origin = ledger_display_test_key_info(3, "48'/1'/0'/2'/3'");
-        let originless_xpub = sample_xpub();
-        let cases = [
-            (
-                "raw key",
-                "wsh(sortedmulti(1,[f5acc2fd/48h/1h/0h/2h]0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798))".to_owned(),
-                "Ledger multisig display requires extended public keys with origin information",
-            ),
-            (
-                "originless xpub",
-                format!("wsh(sortedmulti(1,{originless_xpub}/0/0))"),
-                "Ledger multisig display requires extended public keys with origin information",
-            ),
-            (
-                "wildcard",
-                format!("wsh(sortedmulti(1,{key_a}/0/0/*))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "multipath",
-                format!("wsh(sortedmulti(1,{key_a}/<0;1>/0))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "hardened suffix",
-                format!("wsh(sortedmulti(1,{key_a}/0/1'))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "short suffix",
-                format!("wsh(sortedmulti(1,{key_a}/0))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "long suffix",
-                format!("wsh(sortedmulti(1,{key_a}/0/0/1))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "invalid branch",
-                format!("wsh(sortedmulti(1,{key_a}/2/0))"),
-                "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig",
-            ),
-            (
-                "mismatched suffixes",
-                format!("wsh(sortedmulti(2,{key_a}/0/0,{key_b}/1/0))"),
-                "Ledger Bitcoin app requires all derivation paths to end with /0/*, or all with /1/* for multisig",
-            ),
-            (
-                "overlong origin",
-                format!("wsh(sortedmulti(1,{long_origin}/0/0))"),
-                "Ledger Bitcoin app requires extended keys with derivation length at most 4",
-            ),
-        ];
-
-        for (case, descriptor, expected) in cases {
-            let error = ledger_display_plan_from_descriptor(&descriptor)
-                .expect_err("unsupported Ledger multisig key");
-            assert_eq!(error.code, HwiErrorCode::BadArgument.code(), "{case}");
-            assert_eq!(error.error, expected, "{case}");
-        }
-
-        let valid_descriptor = format!("wsh(sortedmulti(1,{key_a}/0/0))");
-        let mut multisig = multisig_display_address_from_descriptor(&valid_descriptor).unwrap();
-        let DescriptorPublicKey::XPub(xpub) = &mut multisig.keys[0] else {
-            panic!("xpub descriptor key");
-        };
-        xpub.derivation_path = DerivationPath::from(vec![
-            ChildNumber::Normal { index: 0 },
-            ChildNumber::Normal { index: 0x8000_0000 },
-        ]);
-        let error = ledger_multisig_display_plan(multisig).expect_err("out-of-range address index");
-        assert_eq!(error.code, HwiErrorCode::BadArgument.code());
-        assert_eq!(
-            error.error,
-            "Ledger Bitcoin app requires derivation paths ending with /0/* or /1/* for multisig"
-        );
-    }
-
-    #[test]
     fn descriptor_addr_types_match_python_hwi_taproot_capabilities() {
         assert_eq!(
             hwi_descriptor_addr_types(DeviceType::Ledger, "ledger_nano_s_simulator"),
@@ -5437,7 +4174,7 @@ mod tests {
                 HwiAddressType::ShWit,
             ]
         );
-        assert!(hwi_can_sign_taproot(
+        assert!(can_sign_taproot(
             DeviceType::Coldcard,
             "coldcard_simulator_edge"
         ));
@@ -5503,347 +4240,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ledger_signing_plans_cover_all_default_wallets() {
-        let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
-        let pubkey = sample_child_pubkey(0);
-        for (address_type, path, input) in [
-            (
-                LedgerAddressType::Legacy,
-                "m/44'/1'/0'/0/0",
-                Input {
-                    witness_utxo: Some(TxOut {
-                        value: Amount::from_sat(50_000),
-                        script_pubkey: Address::p2pkh(pubkey, Network::Testnet).script_pubkey(),
-                    }),
-                    ..Default::default()
-                },
-            ),
-            (LedgerAddressType::ShWit, "m/49'/1'/0'/0/0", {
-                let redeem_script = Address::p2wpkh(
-                    &CompressedPublicKey::try_from(pubkey).unwrap(),
-                    Network::Testnet,
-                )
-                .script_pubkey();
-                Input {
-                    witness_utxo: Some(TxOut {
-                        value: Amount::from_sat(50_000),
-                        script_pubkey: redeem_script.to_p2sh(),
-                    }),
-                    redeem_script: Some(redeem_script),
-                    ..Default::default()
-                }
-            }),
-            (
-                LedgerAddressType::Wit,
-                "m/84'/1'/0'/0/0",
-                Input {
-                    witness_utxo: Some(TxOut {
-                        value: Amount::from_sat(50_000),
-                        script_pubkey: Address::p2wpkh(
-                            &CompressedPublicKey::try_from(pubkey).unwrap(),
-                            Network::Testnet,
-                        )
-                        .script_pubkey(),
-                    }),
-                    ..Default::default()
-                },
-            ),
-        ] {
-            let path = DerivationPath::from_str(path).unwrap();
-            let mut input = input;
-            input
-                .bip32_derivation
-                .insert(pubkey.inner, (fingerprint, path));
-            assert_eq!(
-                ledger_signing_plans(&psbt_with_input(input), fingerprint, Network::Testnet)
-                    .unwrap(),
-                vec![LedgerSigningPlan::Default {
-                    address_type,
-                    account_path: DerivationPath::from_str(&format!(
-                        "m/{}'/1'/0'",
-                        address_type.purpose()
-                    ))
-                    .unwrap(),
-                }]
-            );
-        }
-
-        let internal_key = pubkey.inner.x_only_public_key().0;
-        let path = DerivationPath::from_str("m/86'/1'/0'/0/0").unwrap();
-        let psbt = psbt_with_input(Input {
-            witness_utxo: Some(TxOut {
-                value: Amount::from_sat(50_000),
-                script_pubkey: Address::p2tr(
-                    &Secp256k1::verification_only(),
-                    internal_key,
-                    None,
-                    Network::Testnet,
-                )
-                .script_pubkey(),
-            }),
-            tap_internal_key: Some(internal_key),
-            tap_key_origins: [(internal_key, (Vec::new(), (fingerprint, path)))].into(),
-            ..Default::default()
-        });
-        assert_eq!(
-            ledger_signing_plans(&psbt, fingerprint, Network::Testnet).unwrap(),
-            vec![LedgerSigningPlan::Default {
-                address_type: LedgerAddressType::Tap,
-                account_path: DerivationPath::from_str("m/86'/1'/0'").unwrap(),
-            }]
-        );
-    }
-
-    #[test]
-    fn ledger_signing_plans_support_multiple_singlesig_accounts() {
-        let fingerprint = Fingerprint::from([0xf5, 0xac, 0xc2, 0xfd]);
-        let pubkey_a = sample_child_pubkey(0);
-        let pubkey_b = sample_child_pubkey(1);
-        let psbt = psbt_with_inputs(vec![
-            Input {
-                witness_utxo: Some(TxOut {
-                    value: Amount::from_sat(50_000),
-                    script_pubkey: Address::p2wpkh(
-                        &CompressedPublicKey::try_from(pubkey_a).unwrap(),
-                        Network::Testnet,
-                    )
-                    .script_pubkey(),
-                }),
-                bip32_derivation: [(
-                    pubkey_a.inner,
-                    (
-                        fingerprint,
-                        DerivationPath::from_str("m/84'/1'/0'/0/0").unwrap(),
-                    ),
-                )]
-                .into(),
-                ..Default::default()
-            },
-            Input {
-                witness_utxo: Some(TxOut {
-                    value: Amount::from_sat(50_000),
-                    script_pubkey: Address::p2wpkh(
-                        &CompressedPublicKey::try_from(pubkey_b).unwrap(),
-                        Network::Testnet,
-                    )
-                    .script_pubkey(),
-                }),
-                bip32_derivation: [(
-                    pubkey_b.inner,
-                    (
-                        fingerprint,
-                        DerivationPath::from_str("m/84'/1'/1'/0/0").unwrap(),
-                    ),
-                )]
-                .into(),
-                ..Default::default()
-            },
-        ]);
-
-        let plans = ledger_signing_plans(&psbt, fingerprint, Network::Testnet).unwrap();
-        assert_eq!(plans.len(), 2);
-        assert!(plans.iter().all(|plan| matches!(
-            plan,
-            LedgerSigningPlan::Default {
-                address_type: LedgerAddressType::Wit,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn ledger_signing_plans_support_mixed_default_and_registered_policies() {
-        let (multisig, fingerprint) = sample_multisig_psbt(LedgerAddressType::Wit, true);
-        let pubkey = sample_child_pubkey(0);
-        let singlesig = Input {
-            witness_utxo: Some(TxOut {
-                value: Amount::from_sat(50_000),
-                script_pubkey: Address::p2wpkh(
-                    &CompressedPublicKey::try_from(pubkey).unwrap(),
-                    Network::Testnet,
-                )
-                .script_pubkey(),
-            }),
-            bip32_derivation: [(
-                pubkey.inner,
-                (
-                    fingerprint,
-                    DerivationPath::from_str("m/84'/1'/0'/0/0").unwrap(),
-                ),
-            )]
-            .into(),
-            ..Default::default()
-        };
-        let mut psbt = psbt_with_inputs(vec![singlesig, multisig.inputs[0].clone()]);
-        psbt.xpub = multisig.xpub;
-
-        let plans = ledger_signing_plans(&psbt, fingerprint, Network::Testnet).unwrap();
-        assert_eq!(plans.len(), 2);
-        assert!(matches!(plans[0], LedgerSigningPlan::Default { .. }));
-        assert!(matches!(plans[1], LedgerSigningPlan::Registered { .. }));
-    }
-
-    #[test]
-    fn ledger_multisig_plans_cover_all_hwi_wrappers() {
-        for address_type in [
-            LedgerAddressType::Legacy,
-            LedgerAddressType::ShWit,
-            LedgerAddressType::Wit,
-        ] {
-            let (psbt, fingerprint) = sample_multisig_psbt(address_type, true);
-            let plans = ledger_signing_plans(&psbt, fingerprint, Network::Testnet).unwrap();
-            let LedgerSigningPlan::Registered { policy, name, .. } = &plans[0] else {
-                panic!("registered policy");
-            };
-            assert_eq!(name, "2 of 2 Multisig");
-            assert_eq!(policy.matches("/<0;1>/*").count(), 2);
-            match address_type {
-                LedgerAddressType::Legacy => assert!(policy.starts_with("sh(sortedmulti(2,")),
-                LedgerAddressType::ShWit => {
-                    assert!(policy.starts_with("sh(wsh(sortedmulti(2,"))
-                }
-                LedgerAddressType::Wit => assert!(policy.starts_with("wsh(sortedmulti(2,")),
-                LedgerAddressType::Tap => unreachable!(),
-            }
-        }
-    }
-
-    #[test]
-    fn ledger_multisig_plan_rejects_missing_global_xpub() {
-        let (mut psbt, fingerprint) = sample_multisig_psbt(LedgerAddressType::Wit, true);
-        psbt.xpub.clear();
-
-        let err =
-            ledger_signing_plans(&psbt, fingerprint, Network::Testnet).expect_err("missing xpub");
-        assert!(err.contains("expected one account-level global xpub"));
-    }
-
-    #[test]
-    fn ledger_multisig_plan_rejects_unsorted_script() {
-        let (psbt, fingerprint) = sample_multisig_psbt(LedgerAddressType::Wit, false);
-
-        let err = ledger_signing_plans(&psbt, fingerprint, Network::Testnet)
-            .expect_err("unsorted multisig");
-        assert!(err.contains("supports only sorted multisig"));
-    }
-
     fn sample_xpub() -> Xpub {
         Xpub::from_str("tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT")
             .expect("sample xpub")
-    }
-
-    fn sample_child_pubkey(index: u32) -> PublicKey {
-        let secp = Secp256k1::verification_only();
-        let xpub = sample_xpub()
-            .derive_pub(
-                &secp,
-                &[
-                    ChildNumber::from_normal_idx(0).unwrap(),
-                    ChildNumber::from_normal_idx(index).unwrap(),
-                ],
-            )
-            .expect("derive pubkey");
-        PublicKey::new(xpub.public_key)
-    }
-
-    fn multisig_script_buf(threshold: i64, pubkeys: &[PublicKey]) -> ScriptBuf {
-        let mut builder = Builder::new().push_int(threshold);
-        for pubkey in pubkeys {
-            builder = builder.push_slice(pubkey.inner.serialize());
-        }
-        builder
-            .push_int(pubkeys.len() as i64)
-            .push_opcode(OP_CHECKMULTISIG)
-            .into_script()
-    }
-
-    fn sample_multisig_psbt(address_type: LedgerAddressType, sorted: bool) -> (Psbt, Fingerprint) {
-        let secp = Secp256k1::new();
-        let account_path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();
-        let suffix = [
-            ChildNumber::from_normal_idx(0).unwrap(),
-            ChildNumber::from_normal_idx(0).unwrap(),
-        ];
-        let mut sources = Vec::new();
-        for seed in [1_u8, 2] {
-            let master = Xpriv::new_master(NetworkKind::Test, &[seed; 32]).unwrap();
-            let fingerprint = master.fingerprint(&secp);
-            let account = master.derive_priv(&secp, &account_path).unwrap();
-            let xpub = Xpub::from_priv(&secp, &account);
-            let child = xpub.derive_pub(&secp, &suffix).unwrap();
-            sources.push((fingerprint, xpub, PublicKey::new(child.public_key)));
-        }
-        sources.sort_by_key(|(_, _, pubkey)| pubkey.inner.serialize());
-        if !sorted {
-            sources.reverse();
-        }
-        let pubkeys: Vec<_> = sources.iter().map(|(_, _, pubkey)| *pubkey).collect();
-        let script = multisig_script_buf(2, &pubkeys);
-        let mut input = Input {
-            bip32_derivation: sources
-                .iter()
-                .map(|(fingerprint, _, pubkey)| {
-                    let mut path = account_path.as_ref().to_vec();
-                    path.extend_from_slice(&suffix);
-                    (pubkey.inner, (*fingerprint, DerivationPath::from(path)))
-                })
-                .collect(),
-            ..Default::default()
-        };
-        let script_pubkey = match address_type {
-            LedgerAddressType::Legacy => {
-                input.redeem_script = Some(script.clone());
-                script.to_p2sh()
-            }
-            LedgerAddressType::ShWit => {
-                let redeem_script = script.to_p2wsh();
-                input.redeem_script = Some(redeem_script.clone());
-                input.witness_script = Some(script);
-                redeem_script.to_p2sh()
-            }
-            LedgerAddressType::Wit => {
-                input.witness_script = Some(script.clone());
-                script.to_p2wsh()
-            }
-            LedgerAddressType::Tap => unreachable!(),
-        };
-        input.witness_utxo = Some(TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey,
-        });
-        let mut psbt = psbt_with_input(input);
-        for (fingerprint, xpub, _) in &sources {
-            psbt.xpub
-                .insert(*xpub, (*fingerprint, account_path.clone()));
-        }
-        (psbt, sources[0].0)
-    }
-
-    fn psbt_with_input(input: Input) -> Psbt {
-        psbt_with_inputs(vec![input])
-    }
-
-    fn psbt_with_inputs(inputs: Vec<Input>) -> Psbt {
-        let unsigned_tx = Transaction {
-            version: TxVersion::TWO,
-            lock_time: LockTime::ZERO,
-            input: inputs
-                .iter()
-                .map(|_| TxIn {
-                    previous_output: OutPoint::null(),
-                    script_sig: ScriptBuf::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
-                })
-                .collect(),
-            output: vec![TxOut {
-                value: Amount::from_sat(0),
-                script_pubkey: ScriptBuf::new(),
-            }],
-        };
-        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).expect("psbt");
-        psbt.inputs = inputs;
-        psbt
     }
 }

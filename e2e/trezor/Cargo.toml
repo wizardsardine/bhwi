@@ -10,4 +10,4 @@ bhwi = { workspace = true, features = ["trezor"] }
 bhwi-async = { workspace = true, features = ["trezor"] }
 tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
 
-bhwi-cli = { path = "../../bhwi-cli" }
+bhwi-async-transport = { workspace = true, default-features = false, features = ["trezor"] }
