@@ -598,7 +598,7 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
             "p2tr",
             "--display",
         ],
-        "hwi device error: interpreter error: unsupported display address: KeepKey does not support Taproot address display",
+        "unsupported display address: KeepKey does not support Taproot address display",
         &[],
     )?;
 
@@ -615,13 +615,13 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
                 .to_str()
                 .context("temporary PSBT path is not UTF-8")?,
         ],
-        "hwi device error: interpreter error: missing command info: KeepKey does not support Taproot inputs",
+        "missing command info: KeepKey does not support Taproot inputs",
         &[taproot_secret.as_str()],
     )?;
     assert_failure(
         &cli,
         ["address", "get", "--from-descriptor", "not-registered"],
-        "hwi device error: interpreter error: unsupported display address: descriptor address display is not yet supported",
+        "unsupported display address: descriptor address display is not yet supported",
         &[],
     )?;
 
@@ -650,14 +650,14 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
                 "--descriptor",
                 &descriptor,
             ],
-            "hwi device error: interpreter error: missing command info: register_wallet is not supported",
+            "missing command info: register_wallet is not supported",
             &[],
         )?;
     }
     assert_failure(
         &cli,
         ["device", "backup"],
-        "hwi device error: interpreter error: missing command info: The Keepkey does not support creating a backup via software",
+        "missing command info: The Keepkey does not support creating a backup via software",
         &[],
     )
 }
@@ -1060,7 +1060,7 @@ fn keepkey_management_lifecycle() -> Result<()> {
     assert_failure(
         &cli_with_passphrase(&long_passphrase),
         ["device", "list"],
-        "hwi device error: interpreter error: invalid input: Passphrase too long",
+        "invalid input: Passphrase too long",
         &[long_passphrase.as_str()],
     )?;
 

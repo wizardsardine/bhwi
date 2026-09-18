@@ -398,7 +398,7 @@ pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ClassifiedDevi
             };
         }
         // KeepKey re-exports this type, so both devices land here.
-        #[cfg(feature = "trezor")]
+        #[cfg(any(feature = "keepkey", feature = "trezor"))]
         if let Some(error) = current.downcast_ref::<bhwi::trezor::TrezorError>() {
             use bhwi::trezor::TrezorError;
             if matches!(
@@ -434,7 +434,7 @@ pub fn classify_message(message: String) -> ClassifiedDeviceError {
             message: KEEPKEY_LOCKED_MESSAGE.to_owned(),
         };
     }
-    #[cfg(feature = "trezor")]
+    #[cfg(any(feature = "keepkey", feature = "trezor"))]
     for unlocked in [
         bhwi::trezor::TrezorError::NO_PIN_NEEDED,
         bhwi::trezor::TrezorError::PIN_ALREADY_SENT,
@@ -479,12 +479,12 @@ impl SkippedDevice {
         path: impl Into<String>,
         error: &(dyn std::error::Error + 'static),
     ) -> Self {
-        let ClassifiedDeviceError { kind, .. } = classify_error(error);
+        let ClassifiedDeviceError { kind, message } = classify_error(error);
         Self {
             device_type,
             model: model.into(),
             path: path.into(),
-            error: error.to_string(),
+            error: message,
             kind,
         }
     }
@@ -656,6 +656,43 @@ mod tests {
         ));
         assert!(can_sign_taproot(DeviceType::Trezor, "trezor_t"));
         assert!(!can_sign_taproot(DeviceType::Trezor, "trezor_one"));
+    }
+
+    #[test]
+    fn an_interpreter_error_reads_as_its_cause() {
+        let wrapped: crate::Error<std::io::Error, std::io::Error> = crate::Error::Interpreter(
+            bhwi::common::Error::InvalidInput("Passphrase too long".into()),
+        );
+        assert_eq!(wrapped.to_string(), "invalid input: Passphrase too long");
+        assert_eq!(
+            std::error::Error::source(&wrapped)
+                .expect("the cause is kept")
+                .to_string(),
+            "invalid input: Passphrase too long"
+        );
+
+        let skipped = SkippedDevice::new(DeviceType::KeepKey, "keepkey", "udp:11044", &wrapped);
+        assert_eq!(skipped.error, "invalid input: Passphrase too long");
+        assert!(matches!(skipped.kind, DeviceErrorKind::InvalidInput));
+    }
+
+    #[cfg(any(feature = "keepkey", feature = "trezor"))]
+    #[test]
+    fn a_raw_pin_error_is_classified_without_the_trezor_feature() {
+        let error = bhwi::trezor::TrezorError::NonNumericPin;
+        let classified = classify_error(&error);
+        assert_eq!(classified.message, error.to_string());
+        assert!(matches!(classified.kind, DeviceErrorKind::InvalidInput));
+    }
+
+    #[test]
+    fn a_transport_error_keeps_the_layer_that_carries_its_meaning() {
+        let wrapped: crate::Error<std::io::Error, std::io::Error> =
+            crate::Error::Transport(std::io::Error::other("Broken pipe"));
+
+        let skipped = SkippedDevice::new(DeviceType::KeepKey, "keepkey", "udp:11044", &wrapped);
+        assert_eq!(skipped.error, "transport error: Broken pipe");
+        assert!(matches!(skipped.kind, DeviceErrorKind::Unclassified));
     }
 
     #[test]
