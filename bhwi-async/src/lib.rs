@@ -184,8 +184,9 @@ pub trait HWIDevice {
     ) -> Result<Psbt, HWIDeviceError>;
 }
 
+/// Not `transparent`: that would forward `source()` past the cause.
 #[derive(Debug, thiserror::Error)]
-#[error("hwi device error: {0}")]
+#[error("{0}")]
 pub struct HWIDeviceError(#[from] Box<dyn StdError + Send + Sync + 'static>);
 
 impl HWIDeviceError {
@@ -202,7 +203,7 @@ pub enum Error<E, F> {
     #[error("http client error: {0}")]
     HttpClient(F),
 
-    #[error("interpreter error: {0}")]
+    #[error("{0}")]
     Interpreter(#[from] common::Error),
 }
 

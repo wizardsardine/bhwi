@@ -287,10 +287,7 @@ mod tests {
 
         let inner = HWIDeviceError::new(std::io::Error::other("boom"));
 
-        assert_eq!(
-            DescriptorError::Device(inner).to_string(),
-            "hwi device error: boom"
-        );
+        assert_eq!(DescriptorError::Device(inner).to_string(), "boom");
     }
 
     #[test]

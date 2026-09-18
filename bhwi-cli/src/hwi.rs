@@ -2735,7 +2735,7 @@ mod tests {
             bhwi_async::HWIDeviceError::new(std::io::Error::other("boom")),
         ));
         assert_eq!(device.code, HwiErrorCode::DeviceConnectionError.code());
-        assert_eq!(device.error, "hwi device error: boom");
+        assert_eq!(device.error, "boom");
     }
 
     #[test]
