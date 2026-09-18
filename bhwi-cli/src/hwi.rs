@@ -11,6 +11,7 @@ use bhwi_async::psbt::{merge_psbt_signatures, strip_legacy_witness_utxos};
 use bhwi_async::signing::ledger::{
     LedgerAddressType, LedgerSigningError, ledger_multisig_display_address, ledger_signing_contexts,
 };
+use bhwi_async::signing::message_signature;
 use bhwi_async::{DeviceBackup, DisplayAddress, RestoreOptions, SetupOptions};
 use bitcoin::{
     Network, NetworkKind,
@@ -1659,10 +1660,7 @@ async fn sign_message(selector: HwiSelector, message: String, path: String) -> H
     }
     match signature {
         Ok((header, signature)) => HwiResponse::SignMessage(HwiSignMessageResponse {
-            signature: message_signature_base64(
-                python_hwi_message_header(device_type, header),
-                &signature,
-            ),
+            signature: BASE64_STANDARD.encode(message_signature(device_type, header, &signature)),
         }),
         Err(err) => HwiResponse::Error(classify_device_error_for(device_type, &err)),
     }
@@ -1884,26 +1882,6 @@ fn generate_hwi_socket_id() -> usize {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
     SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-fn python_hwi_message_header(device_type: DeviceType, header: u8) -> u8 {
-    if device_type == DeviceType::Coldcard && header >= 8 {
-        // Python HWI normalizes Coldcard's compact-signature header by
-        // clearing the device-specific compressed/pubkey offset.
-        header - 8
-    } else {
-        header
-    }
-}
-
-fn message_signature_base64(
-    header: u8,
-    signature: &bitcoin::secp256k1::ecdsa::Signature,
-) -> String {
-    let mut payload = [0u8; 65];
-    payload[0] = header;
-    payload[1..].copy_from_slice(&signature.serialize_compact());
-    BASE64_STANDARD.encode(payload)
 }
 
 async fn get_xpub(selector: HwiSelector, path: String, expert: bool) -> HwiResponse {
@@ -4096,13 +4074,6 @@ mod tests {
                 }
             ])
         );
-    }
-
-    #[test]
-    fn signmessage_normalizes_coldcard_header_for_python_hwi() {
-        assert_eq!(python_hwi_message_header(DeviceType::Coldcard, 40), 32);
-        assert_eq!(python_hwi_message_header(DeviceType::Ledger, 32), 32);
-        assert_eq!(python_hwi_message_header(DeviceType::Jade, 31), 31);
     }
 
     #[test]
