@@ -25,17 +25,15 @@ if [[ ! -d "$work" ]]; then
 fi
 
 cd "$work"
-if [[ -d venv ]] && ! venv/bin/python -c '' 2>/dev/null; then
-  echo "Recreating Jade venv: cached interpreter no longer runs" >&2
+if [[ -d venv ]] && ! venv/bin/python -c 'import cbor2, click, serial' 2>/dev/null; then
+  echo "Recreating Jade venv: cached interpreter or dependencies unusable" >&2
   rm -rf venv
 fi
 if [[ ! -d venv ]]; then
-  python3 -m venv venv
+  "${JADE_INIT_PYTHON:-python3}" -m venv venv
   venv/bin/pip install --upgrade pip setuptools
-  if [[ -f requirements.txt ]]; then
-    venv/bin/pip install -r requirements.txt
-  fi
-  venv/bin/pip install click
+  # requirements.txt is hash-pinned and misses bleak's macOS dependency.
+  venv/bin/pip install cbor2==5.7.1 pyserial==3.5 click
   venv/bin/pip install -e .
 fi
 
