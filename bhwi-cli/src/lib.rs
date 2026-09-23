@@ -394,9 +394,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Info, SerializedInfo, collect_enumeration_results, default_device_types,
-    };
+    use super::{Info, SerializedInfo, collect_enumeration_results, default_device_types};
     use crate::DeviceType;
 
     #[test]
