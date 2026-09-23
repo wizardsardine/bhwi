@@ -9,6 +9,8 @@ use crate::keepkey;
 #[cfg(feature = "ledger")]
 use crate::ledger;
 use crate::miniscript::descriptor::{DescriptorPublicKey, WalletPolicy};
+#[cfg(feature = "specter")]
+use crate::specter;
 #[cfg(feature = "trezor")]
 use crate::trezor;
 use bitcoin::Network;
@@ -143,6 +145,9 @@ pub enum DeviceContext {
     /// Required context for KeepKey management commands.
     #[cfg(feature = "keepkey")]
     KeepKeyManagement(keepkey::ManagementContext),
+    /// Required context for Specter-DIY descriptor address display.
+    #[cfg(feature = "specter")]
+    Specter { policy: WalletPolicy },
 }
 
 pub enum Response {
@@ -377,6 +382,8 @@ pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Respon
 pub type TrezorInterpreter = trezor::TrezorInterpreter<Command, Transmit, Response, Error>;
 #[cfg(feature = "keepkey")]
 pub type KeepKeyInterpreter = keepkey::KeepKeyInterpreter<Command, Transmit, Response, Error>;
+#[cfg(feature = "specter")]
+pub type SpecterInterpreter = specter::SpecterInterpreter<Command, Transmit, Response, Error>;
 
 impl From<Vec<u8>> for Transmit {
     fn from(payload: Vec<u8>) -> Transmit {
@@ -424,6 +431,8 @@ mod tests {
         assert_interpreter::<JadeInterpreter>();
         #[cfg(feature = "keepkey")]
         assert_interpreter::<KeepKeyInterpreter>();
+        #[cfg(feature = "specter")]
+        assert_interpreter::<SpecterInterpreter>();
         #[cfg(feature = "ledger")]
         assert_interpreter::<LedgerInterpreter>();
         #[cfg(feature = "trezor")]

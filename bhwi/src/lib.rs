@@ -14,6 +14,8 @@ pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
 pub mod policy;
+#[cfg(feature = "specter")]
+pub mod specter;
 #[cfg(feature = "trezor")]
 pub mod trezor;
 

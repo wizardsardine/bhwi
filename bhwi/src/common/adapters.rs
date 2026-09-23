@@ -8,5 +8,7 @@ mod jade;
 mod keepkey;
 #[cfg(feature = "ledger")]
 mod ledger;
+#[cfg(feature = "specter")]
+mod specter;
 #[cfg(feature = "trezor")]
 mod trezor;
