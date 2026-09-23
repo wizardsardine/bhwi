@@ -40,6 +40,9 @@ mod tests {
 
     const USB_ADDRESS: &str = "127.0.0.1:8789";
     const FINGERPRINT: &str = "73c5da0a";
+    const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+    const MENU_TIMEOUT: Duration = Duration::from_secs(3);
+    const MAX_SCREEN_LINE: usize = 128;
 
     struct TcpSpecterStream(TcpStream);
 
@@ -75,57 +78,130 @@ mod tests {
         let stream = TcpStream::connect(USB_ADDRESS)
             .await
             .expect("Specter USB TCP");
-        // TCPHost retains one accepted USB client and polls it every 30ms.
-        // Let it observe the previous test's closed socket before sending the
-        // first request on this test's newly connected socket.
-        tokio::time::sleep(Duration::from_millis(100)).await;
         Device::new(
             Network::Bitcoin,
-            SpecterTransport::new(TcpSpecterStream(stream)),
+            SpecterTransport::new(TcpSpecterStream(stream))
+                .with_confirmation_timeout(OPERATION_TIMEOUT),
         )
     }
 
-    /// The pinned simulator controller accepts JSON values line-delimited over
-    /// TCP. It keeps one GUI socket, so open it before starting the USB request
-    /// and wait for its screen notification before responding.
-    async fn gui() -> TcpStream {
-        let port = env::var("SPECTER_GUI_PORT").unwrap_or_else(|_| "8787".into());
-        TcpStream::connect(format!("127.0.0.1:{port}"))
-            .await
-            .expect("Specter GUI TCP")
+    #[derive(Default)]
+    struct ScreenCodec(Vec<u8>);
+
+    impl ScreenCodec {
+        fn push(&mut self, data: &[u8]) {
+            self.0.extend_from_slice(data);
+            assert!(
+                self.0.len() <= MAX_SCREEN_LINE,
+                "Specter GUI screen line exceeded the bounded controller buffer"
+            );
+        }
+
+        fn next(&mut self) -> Option<String> {
+            let end = self.0.iter().position(|byte| *byte == b'\n')?;
+            let mut line = self.0.drain(..=end).collect::<Vec<_>>();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            assert!(!line.is_empty(), "Specter GUI sent an empty screen line");
+            assert!(
+                line.iter().all(u8::is_ascii_alphanumeric),
+                "Specter GUI sent a non-screen controller line"
+            );
+            Some(String::from_utf8(line).expect("Specter GUI screen name is UTF-8"))
+        }
     }
 
-    async fn respond_with<T>(operation: impl std::future::Future<Output = T>, value: bool) -> T {
-        let mut gui = gui().await;
-        // TCPHost polls its accepted socket every 30ms. Wait for more than
-        // three polls so the controller has adopted this connection before
-        // the device can request a screen; prompt readiness itself is still
-        // observed from the screen notification below.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let deadline = TokioInstant::now() + Duration::from_secs(20);
-        tokio::pin!(operation);
-        loop {
-            let mut screen = [0; 128];
-            tokio::select! {
-                result = &mut operation => return result,
-                received = timeout_at(deadline, gui.read(&mut screen)) => {
-                    let received = received
-                        .expect("Specter confirmation operation timed out")
-                        .expect("read Specter GUI screen");
-                    assert!(
-                        received > 0,
-                        "Specter GUI controller disconnected before confirmation"
-                    );
-                    gui.write_all(if value { b"true\r\n" } else { b"false\r\n" })
-                        .await
-                        .expect("send Specter GUI response");
+    struct GuiController {
+        stream: TcpStream,
+        codec: ScreenCodec,
+    }
+
+    impl GuiController {
+        /// TCPGUI writes CRLF-delimited screen class names to one persistent
+        /// controller connection. A response applies to exactly one screen.
+        async fn connect() -> Self {
+            let port = env::var("SPECTER_GUI_PORT").unwrap_or_else(|_| "8787".into());
+            let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .expect("Specter GUI TCP");
+            // TCPHost polls the accepted controller every 30ms. This only
+            // waits for socket adoption; prompt readiness is line-driven.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Self {
+                stream,
+                codec: ScreenCodec::default(),
+            }
+        }
+
+        async fn next_screen(&mut self, scenario: &str, deadline: TokioInstant) -> String {
+            loop {
+                if let Some(screen) = self.codec.next() {
+                    return screen;
+                }
+                let mut bytes = [0; 64];
+                let received = timeout_at(deadline, self.stream.read(&mut bytes))
+                    .await
+                    .unwrap_or_else(|_| panic!("{scenario}: Specter GUI screen deadline elapsed"))
+                    .unwrap_or_else(|_| panic!("{scenario}: Specter GUI controller read failed"));
+                assert!(
+                    received > 0,
+                    "{scenario}: Specter GUI controller closed before a screen line"
+                );
+                self.codec.push(&bytes[..received]);
+            }
+        }
+
+        async fn reply(&mut self, scenario: &str, value: bool) {
+            self.stream
+                .write_all(if value { b"true\r\n" } else { b"false\r\n" })
+                .await
+                .unwrap_or_else(|_| panic!("{scenario}: write Specter GUI response"));
+        }
+
+        async fn expect_menu(&mut self, scenario: &str) {
+            let screen = self
+                .next_screen(scenario, TokioInstant::now() + MENU_TIMEOUT)
+                .await;
+            assert_eq!(screen, "Menu", "{scenario}: expected trailing GUI Menu");
+        }
+
+        async fn respond_with<T>(
+            &mut self,
+            scenario: &str,
+            operation: impl std::future::Future<Output = T>,
+            value: bool,
+        ) -> T {
+            let deadline = TokioInstant::now() + OPERATION_TIMEOUT;
+            tokio::pin!(operation);
+            let mut saw_menu = false;
+            loop {
+                tokio::select! {
+                    result = &mut operation => {
+                        if !saw_menu {
+                            self.expect_menu(scenario).await;
+                        }
+                        return result;
+                    }
+                    screen = self.next_screen(scenario, deadline) => {
+                        if screen == "Menu" {
+                            saw_menu = true;
+                        } else {
+                            self.reply(scenario, value).await;
+                        }
+                    }
                 }
             }
         }
     }
 
-    async fn confirm_with<T>(operation: impl std::future::Future<Output = T>) -> T {
-        respond_with(operation, true).await
+    async fn confirm_with<T>(
+        gui: &mut GuiController,
+        scenario: &str,
+        operation: impl std::future::Future<Output = T>,
+    ) -> T {
+        gui.respond_with(scenario, operation, true).await
     }
 
     fn child_path(branch: u32, index: u32) -> DerivationPath {
@@ -174,23 +250,21 @@ mod tests {
         .expect("unsigned PSBT")
     }
 
-    async fn account() -> (
-        Device,
+    async fn account(
+        device: &mut Device,
+    ) -> (
         bhwi::bitcoin::bip32::Fingerprint,
         bhwi::bitcoin::bip32::Xpub,
     ) {
-        let mut device = device().await;
         let fingerprint = device.get_master_fingerprint().await.expect("fingerprint");
         let xpub = device
             .get_extended_pubkey("m/84'/0'/0'".parse().expect("account path"), false)
             .await
             .expect("account xpub");
-        (device, fingerprint, xpub)
+        (fingerprint, xpub)
     }
 
-    #[tokio::test]
-    async fn reads_fingerprint_and_xpub() {
-        let mut device = device().await;
+    async fn reads_fingerprint_and_xpub(device: &mut Device) {
         assert_eq!(
             device.get_master_fingerprint().await.unwrap().to_string(),
             FINGERPRINT
@@ -208,9 +282,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn imports_wallet_and_verifies_displayed_descriptor_address() {
-        let (mut device, fingerprint, _) = account().await;
+    async fn imports_wallet_and_verifies_displayed_descriptor_address(
+        device: &mut Device,
+        gui: &mut GuiController,
+    ) {
+        let (fingerprint, _) = account(device).await;
         let account = std::process::id() % 10_000;
         let account_path = format!("m/44'/0'/{account}'");
         let xpub = device
@@ -222,20 +298,25 @@ mod tests {
             account_path.trim_start_matches("m/")
         );
         let name = format!("specter-e2e-{}", std::process::id());
-        let registered = confirm_with(device.register_wallet(&name, &policy)).await;
+        let registered =
+            confirm_with(gui, "wallet import", device.register_wallet(&name, &policy)).await;
         assert!(registered.is_ok(), "wallet registration failed");
 
-        let displayed = confirm_with(device.display_address(
-            DisplayAddress::ByDescriptor {
-                index: 0,
-                change: false,
-                display: true,
-                descriptor_name: name,
-            },
-            Some(DeviceContext::Specter {
-                policy: WalletPolicy::from_str(&policy).expect("wallet policy"),
-            }),
-        ))
+        let displayed = confirm_with(
+            gui,
+            "descriptor address",
+            device.display_address(
+                DisplayAddress::ByDescriptor {
+                    index: 0,
+                    change: false,
+                    display: true,
+                    descriptor_name: name,
+                },
+                Some(DeviceContext::Specter {
+                    policy: WalletPolicy::from_str(&policy).expect("wallet policy"),
+                }),
+            ),
+        )
         .await
         .expect("display descriptor address");
         let expected = Address::p2wpkh(
@@ -249,9 +330,10 @@ mod tests {
         assert_eq!(displayed, expected);
     }
 
-    #[tokio::test]
-    async fn signs_a_legacy_message_and_reports_refusal() {
-        let mut device = device().await;
+    async fn signs_a_legacy_message_and_reports_refusal(
+        device: &mut Device,
+        gui: &mut GuiController,
+    ) {
         let secp = Secp256k1::verification_only();
         let message = "BHWI Specter-DIY synthetic message fixture";
         let xpub = device
@@ -264,6 +346,8 @@ mod tests {
                 .public_key,
         );
         let signed = confirm_with(
+            gui,
+            "message approval",
             device.sign_message(message.as_bytes(), "m/84'/0'/0'/0/0".parse().unwrap()),
         )
         .await
@@ -277,17 +361,21 @@ mod tests {
             .expect("recover message signing pubkey");
         assert_eq!(recovered, expected);
 
-        let refused = respond_with(
-            device.sign_message(b"BHWI refusal fixture", "m/84'/0'/0'/0/0".parse().unwrap()),
-            false,
-        )
-        .await;
+        let refused = gui
+            .respond_with(
+                "message refusal",
+                device.sign_message(b"BHWI refusal fixture", "m/84'/0'/0'/0/0".parse().unwrap()),
+                false,
+            )
+            .await;
         assert!(refused.is_err(), "unconfirmed message was accepted");
     }
 
-    #[tokio::test]
-    async fn signs_native_segwit_psbt_without_losing_metadata() {
-        let (mut device, fingerprint, xpub) = account().await;
+    async fn signs_native_segwit_psbt_without_losing_metadata(
+        device: &mut Device,
+        gui: &mut GuiController,
+    ) {
+        let (fingerprint, xpub) = account(device).await;
         let secp = Secp256k1::verification_only();
         let input_path: DerivationPath = "m/84'/0'/0'/0/0".parse().unwrap();
         let change_path: DerivationPath = "m/84'/0'/0'/1/0".parse().unwrap();
@@ -315,7 +403,7 @@ mod tests {
         };
 
         let original = psbt.clone();
-        let signed = confirm_with(device.sign_tx(psbt, None))
+        let signed = confirm_with(gui, "native SegWit signing", device.sign_tx(psbt, None))
             .await
             .expect("sign native SegWit PSBT");
         let signature = signed.inputs[0]
@@ -352,9 +440,7 @@ mod tests {
         assert!(signed.inputs[0].non_witness_utxo.is_some());
     }
 
-    #[tokio::test]
-    async fn signs_legacy_ecdsa_psbt() {
-        let mut device = device().await;
+    async fn signs_legacy_ecdsa_psbt(device: &mut Device, gui: &mut GuiController) {
         let fingerprint = device.get_master_fingerprint().await.unwrap();
         let account_path: DerivationPath = "m/44'/0'/0'".parse().unwrap();
         let xpub = device
@@ -385,7 +471,7 @@ mod tests {
         let original = psbt.clone();
         let signed = tokio::time::timeout(
             Duration::from_secs(30),
-            confirm_with(device.sign_tx(psbt, None)),
+            confirm_with(gui, "legacy ECDSA signing", device.sign_tx(psbt, None)),
         )
         .await
         .expect("legacy ECDSA PSBT signing timed out")
@@ -417,9 +503,10 @@ mod tests {
         assert!(signed.inputs[0].non_witness_utxo.is_some());
     }
 
-    #[tokio::test]
-    async fn signs_taproot_key_path_into_final_witness() {
-        let mut device = device().await;
+    async fn signs_taproot_key_path_into_final_witness(
+        device: &mut Device,
+        gui: &mut GuiController,
+    ) {
         let fingerprint = device.get_master_fingerprint().await.unwrap();
         let account = std::process::id() % 10_000;
         let account_path: DerivationPath = format!("m/86'/0'/{account}'").parse().unwrap();
@@ -432,9 +519,13 @@ mod tests {
             account_path.to_string().trim_start_matches("m/")
         );
         let name = format!("specter-taproot-{}", std::process::id());
-        confirm_with(device.register_wallet(&name, &policy))
-            .await
-            .expect("register Taproot wallet");
+        confirm_with(
+            gui,
+            "Taproot wallet import",
+            device.register_wallet(&name, &policy),
+        )
+        .await
+        .expect("register Taproot wallet");
         let secp = Secp256k1::verification_only();
         let input_path = account_path.extend(child_path(0, 0));
         let change_path = account_path.extend(child_path(1, 0));
@@ -469,7 +560,7 @@ mod tests {
         let original = psbt.clone();
         let signed = tokio::time::timeout(
             Duration::from_secs(30),
-            confirm_with(device.sign_tx(psbt, None)),
+            confirm_with(gui, "Taproot key-path signing", device.sign_tx(psbt, None)),
         )
         .await
         .expect("Taproot key-path signing timed out")
@@ -501,9 +592,7 @@ mod tests {
         assert!(signed.inputs[0].tap_key_sig.is_none());
     }
 
-    #[tokio::test]
-    async fn rejects_undisplayed_and_taproot_address_requests() {
-        let mut device = device().await;
+    async fn rejects_undisplayed_and_taproot_address_requests(device: &mut Device) {
         assert!(
             device
                 .display_address(
@@ -530,5 +619,30 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn screen_codec_retains_fragmented_and_coalesced_lines() {
+        let mut codec = ScreenCodec::default();
+        codec.push(b"Prom");
+        assert!(codec.next().is_none());
+        codec.push(b"pt\r\nMenu\r\n");
+        assert_eq!(codec.next().as_deref(), Some("Prompt"));
+        assert_eq!(codec.next().as_deref(), Some("Menu"));
+        assert!(codec.next().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn specter_device_scenarios() {
+        let mut gui = GuiController::connect().await;
+        let mut device = device().await;
+
+        reads_fingerprint_and_xpub(&mut device).await;
+        imports_wallet_and_verifies_displayed_descriptor_address(&mut device, &mut gui).await;
+        signs_a_legacy_message_and_reports_refusal(&mut device, &mut gui).await;
+        signs_native_segwit_psbt_without_losing_metadata(&mut device, &mut gui).await;
+        signs_legacy_ecdsa_psbt(&mut device, &mut gui).await;
+        signs_taproot_key_path_into_final_witness(&mut device, &mut gui).await;
+        rejects_undisplayed_and_taproot_address_requests(&mut device).await;
     }
 }
