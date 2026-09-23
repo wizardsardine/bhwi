@@ -235,6 +235,7 @@
         "nixpkgs-esp-dev": "nixpkgs-esp-dev",
         "python-hwi": "python-hwi",
         "rust-overlay": "rust-overlay",
+        "specter-diy": "specter-diy",
         "trezor-firmware": "trezor-firmware"
       }
     },
@@ -256,6 +257,25 @@
         "owner": "oxalica",
         "repo": "rust-overlay",
         "type": "github"
+      }
+    },
+    "specter-diy": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1788893405,
+        "narHash": "sha256-dUbGtmNCPZvwreGEMyYA3gImuPnjTXhuQTaZIpUEHjk=",
+        "ref": "refs/heads/master",
+        "rev": "b9c85b9651d3e4cea2fbc954a8c5558844367c81",
+        "revCount": 607,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/cryptoadvance/specter-diy"
+      },
+      "original": {
+        "rev": "b9c85b9651d3e4cea2fbc954a8c5558844367c81",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/cryptoadvance/specter-diy"
       }
     },
     "systems": {
