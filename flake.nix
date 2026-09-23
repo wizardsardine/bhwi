@@ -31,6 +31,10 @@
       url = "github:bitcoin-core/HWI/3.2.0";
       flake = false;
     };
+    specter-diy = {
+      url = "git+https://github.com/cryptoadvance/specter-diy?rev=b9c85b9651d3e4cea2fbc954a8c5558844367c81&submodules=1";
+      flake = false;
+    };
     trezor-firmware = {
       url = "github:trezor/trezor-firmware/b2098ff03fef439a1a5b49bd0ef48d1f73d11a39";
       flake = false;
@@ -53,6 +57,7 @@
     keepkey-firmware,
     keepkey-nanopb,
     python-hwi,
+    specter-diy,
     trezor-firmware,
     nixpkgs,
     nixpkgs-coldcard,
@@ -60,7 +65,7 @@
     flake-utils,
     rust-overlay,
   }:
-    flake-utils.lib.eachDefaultSystem (
+    flake-utils.lib.eachSystem ["x86_64-linux" "aarch64-linux" "aarch64-darwin"] (
       system: let
         overlays = [rust-overlay.overlays.default];
         pkgs = import nixpkgs {
@@ -293,6 +298,15 @@
             pkgs.podman
             speculos
           ];
+        specterInputs =
+          emulatorInputs
+          ++ [
+            pkgs.gcc13
+            pkgs.SDL2.dev
+            pkgs.SDL2.out
+            pkgs.libffi
+            pkgs.gmp
+          ];
         jadeQemuInputs =
           emulatorInputs
           ++ [
@@ -428,6 +442,22 @@
             export APP_BITCOIN_NEW_URL="https://github.com/LedgerHQ/app-bitcoin-new.git"
           ''
           ./nix/scripts/build-ledger-app.sh;
+        specterRunner =
+          mkRunner "bhwi-start-specter" specterInputs ''
+            export SPECTER_DIY_SRC="${specter-diy}"
+            export SPECTER_DIY_REV="${specter-diy.rev or "b9c85b9651d3e4cea2fbc954a8c5558844367c81"}"
+            export SPECTER_CC="${pkgs.gcc13}/bin/gcc"
+            export SPECTER_CXX="${pkgs.gcc13}/bin/g++"
+            export SPECTER_PYTHON="${pkgs.python3}/bin/python3"
+            export SPECTER_MPY_CFLAGS="-I${pkgs.SDL2.dev}/include -Wno-dangling-pointer -Wno-enum-int-mismatch"
+            export SPECTER_LDFLAGS_EXTRA="-L${pkgs.SDL2.out}/lib -Wl,-rpath,${pkgs.SDL2.out}/lib"
+          ''
+          ./nix/scripts/start-specter.sh;
+        specterInitRunner =
+          mkRunner "bhwi-init-specter" emulatorInputs ''
+            export SPECTER_PYTHON="${pkgs.python3}/bin/python3"
+          ''
+          ./nix/scripts/init-specter.sh;
         jadeRunner =
           mkRunner "bhwi-start-jade" jadeQemuInputs ''
             export JADE_FIRMWARE_SRC="${jade-firmware}"
@@ -807,6 +837,8 @@
             coldcard = mkApp coldcardRunner;
             ledger = mkApp ledgerRunner;
             ledger-build-app = mkApp ledgerAppBuilder;
+            specter = mkApp specterRunner;
+            specter-init = mkApp specterInitRunner;
             jade = mkApp jadeRunner;
             jade-init = mkApp jadeInitRunner;
             jade-pinserver = mkApp jadePinserverRunner;
@@ -850,6 +882,10 @@
             packages = inputs ++ ledgerInputs;
             shellHook = commonE2eEnv;
           };
+          specter = pkgs.mkShell {
+            packages = inputs ++ specterInputs;
+            shellHook = commonE2eEnv;
+          };
           jade = pkgs.mkShell {
             packages = inputs ++ jadeInputs;
             shellHook = commonE2eEnv;
@@ -870,6 +906,8 @@
             test -f ${./nix/scripts/start-bitbox.sh}
             test -f ${./nix/scripts/start-coldcard.sh}
             test -f ${./nix/scripts/start-ledger.sh}
+            test -f ${./nix/scripts/start-specter.sh}
+            test -f ${./nix/scripts/init-specter.sh}
             test -f ${./nix/scripts/start-jade.sh}
             test -f ${./nix/scripts/start-jade-pinserver.sh}
             test -f ${./nix/scripts/init-jade.sh}

@@ -149,8 +149,8 @@ enum AddressCommands {
         /// Ledger descriptor-based addresses.
         #[arg(long)]
         hmac: Option<String>,
-        /// Miniscript wallet policy matching the registered wallet,
-        /// required for Ledger descriptor-based addresses.
+        /// Miniscript wallet policy matching the selected wallet, required for
+        /// Ledger and Specter-DIY descriptor-based addresses.
         #[arg(long, value_parser = clap::value_parser!(WalletPolicy))]
         wallet_descriptor: Option<WalletPolicy>,
     },
@@ -598,20 +598,8 @@ async fn main() -> Result<()> {
             let psbt_text = std::fs::read_to_string(psbt)?;
             let psbt = Psbt::from_str(psbt_text.trim())?;
             let hmac = hmac.as_deref().map(parse_hmac).transpose()?;
-            let context = match (name, descriptor, hmac) {
-                (Some(name), Some(policy), hmac) => Some(DeviceContext::Ledger {
-                    wallet_policy: LedgerWalletPolicy::new(name, Version::V2, policy),
-                    wallet_hmac: hmac,
-                }),
-                (None, None, None) => None,
-                (None, None, Some(_)) => {
-                    anyhow::bail!("--hmac requires --name and --descriptor for Ledger signing")
-                }
-                _ => anyhow::bail!(
-                    "--name and --descriptor must be provided together for Ledger signing"
-                ),
-            };
             if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
+                let context = signing_context(d.device_type(), name, descriptor, hmac)?;
                 let signed = d.device().sign_tx(psbt, context).await?;
                 let signed = signed.to_string();
                 if let Some(output) = output {
@@ -645,6 +633,35 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn signing_context(
+    device_type: DeviceType,
+    name: Option<String>,
+    descriptor: Option<WalletPolicy>,
+    hmac: Option<[u8; 32]>,
+) -> Result<Option<DeviceContext>> {
+    match device_type {
+        DeviceType::Ledger => match (name, descriptor, hmac) {
+            (Some(name), Some(policy), hmac) => Ok(Some(DeviceContext::Ledger {
+                wallet_policy: LedgerWalletPolicy::new(name, Version::V2, policy),
+                wallet_hmac: hmac,
+            })),
+            (None, None, None) => Ok(None),
+            (None, None, Some(_)) => anyhow::bail!("--hmac requires --name and --descriptor"),
+            _ => anyhow::bail!("--name and --descriptor must be provided together"),
+        },
+        DeviceType::Specter => match (name, descriptor, hmac) {
+            (_, Some(policy), None) => Ok(Some(DeviceContext::Specter { policy })),
+            (None, None, None) => Ok(None),
+            (_, _, Some(_)) => anyhow::bail!("Specter-DIY signing does not use --hmac"),
+            (Some(_), None, None) => {
+                anyhow::bail!("Specter-DIY signing does not use --name without --descriptor")
+            }
+        },
+        _ if name.is_none() && descriptor.is_none() && hmac.is_none() => Ok(None),
+        _ => anyhow::bail!("wallet policy options are only supported by Ledger and Specter-DIY"),
+    }
 }
 
 fn message_signature_base64(
@@ -921,6 +938,18 @@ mod tests {
             assert_eq!(args.device_type, Some(DeviceType::KeepKey));
             assert_eq!(args.device_path.as_deref(), Some("127.0.0.1:11044"));
         }
+    }
+
+    #[test]
+    fn specter_signing_accepts_a_descriptor_without_a_wallet_name() {
+        let policy = WalletPolicy::from_str(
+            "wpkh([f5acc2fd/84'/1'/0']tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/<0;1>/*)",
+        )
+        .expect("valid wallet policy");
+        let context = signing_context(DeviceType::Specter, None, Some(policy), None)
+            .expect("Specter context");
+        assert!(matches!(context, Some(DeviceContext::Specter { .. })));
+        assert!(signing_context(DeviceType::Specter, Some("unused".into()), None, None).is_err());
     }
 
     #[test]

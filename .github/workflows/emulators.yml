@@ -631,6 +631,94 @@ jobs:
         if: always()
         run: bash nix/scripts/stop-emulator.sh trezor.pid
 
+  specter-e2e:
+    needs: nix-flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Start Specter-DIY simulator
+        run: |
+          setsid bash -c 'echo "$$" > specter.pid; exec nix run .#specter' > specter.log 2>&1 &
+          for _ in {1..100}; do
+            [[ -s specter.pid ]] && break
+            sleep 0.1
+          done
+          test -s specter.pid
+          bash nix/scripts/wait-for-port.sh 127.0.0.1 8787 600 "$(cat specter.pid)" || {
+            echo "Specter-DIY simulator did not open its GUI controller; raw firmware logs are withheld."
+            exit 1
+          }
+      - name: Initialize synthetic Specter-DIY fixture
+        run: |
+          nix run .#specter-init > specter-init.log 2>&1 || {
+            echo "Specter-DIY initialization failed; controller output is withheld."
+            exit 1
+          }
+      - name: Wait for Specter-DIY USB protocol
+        run: |
+          bash nix/scripts/wait-for-port.sh 127.0.0.1 8789 120 "$(cat specter.pid)" || {
+            echo "Specter-DIY did not enable its USB protocol after initialization; raw firmware logs are withheld."
+            exit 1
+          }
+      - name: Run Specter-DIY e2e
+        run: |
+          nix develop .#specter -c cargo test -p bhwi-e2e-specter -- --test-threads=1 > specter-e2e.log 2>&1 || {
+            failed_tests="$(sed -nE 's/^test ([^ ]+) \.\.\. FAILED$/\1/p' specter-e2e.log | sort -u)"
+            if [[ -n "$failed_tests" ]]; then
+              echo "Specter-DIY e2e failed in these Rust tests:"
+              printf '%s\n' "$failed_tests"
+            else
+              echo "Specter-DIY e2e failed; no Rust test failure marker was found and output is withheld."
+            fi
+            exit 1
+          }
+      - name: Build bhwi CLI
+        run: nix develop .#specter -c cargo build -p bhwi-cli
+      - name: Restart Specter-DIY simulator for CLI e2e
+        run: |
+          bash nix/scripts/stop-emulator.sh specter.pid tcp 127.0.0.1 8789 60
+          rm -f specter.pid
+          setsid bash -c 'echo "$$" > specter.pid; exec nix run .#specter' > specter-cli.log 2>&1 &
+          for _ in {1..100}; do
+            [[ -s specter.pid ]] && break
+            sleep 0.1
+          done
+          test -s specter.pid
+          bash nix/scripts/wait-for-port.sh 127.0.0.1 8787 600 "$(cat specter.pid)" || {
+            echo "Specter-DIY CLI simulator did not open its GUI controller; raw firmware logs are withheld."
+            exit 1
+          }
+      - name: Initialize synthetic Specter-DIY CLI fixture
+        run: |
+          nix run .#specter-init > specter-cli-init.log 2>&1 || {
+            echo "Specter-DIY CLI initialization failed; controller output is withheld."
+            exit 1
+          }
+      - name: Wait for Specter-DIY CLI USB protocol
+        run: |
+          bash nix/scripts/wait-for-port.sh 127.0.0.1 8789 120 "$(cat specter.pid)" || {
+            echo "Specter-DIY CLI simulator did not enable its USB protocol; raw firmware logs are withheld."
+            exit 1
+          }
+      - name: Run Specter-DIY CLI e2e
+        run: |
+          BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#specter \
+            -c cargo test -p bhwi-e2e-cli specter -- --test-threads=1 > specter-cli-e2e.log 2>&1 || {
+              failed_tests="$(sed -nE 's/^test ([^ ]+) \.\.\. FAILED$/\1/p' specter-cli-e2e.log | sort -u)"
+              if [[ -n "$failed_tests" ]]; then
+                echo "Specter-DIY CLI e2e failed in these Rust tests:"
+                printf '%s\n' "$failed_tests"
+              else
+                echo "Specter-DIY CLI e2e failed; no Rust test failure marker was found and output is withheld."
+              fi
+              exit 1
+            }
+      - name: Stop Specter-DIY simulator
+        if: always()
+        run: bash nix/scripts/stop-emulator.sh specter.pid tcp 127.0.0.1 8789 60
+
   keepkey-e2e:
     needs: nix-flake
     runs-on: ubuntu-latest

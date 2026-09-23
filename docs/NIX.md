@@ -43,6 +43,8 @@ on-demand workflow.
 - `cargo test -p bhwi-e2e-bitbox -- --test-threads=1`
 - `cargo test -p bhwi-e2e-coldcard -- --test-threads=1`
 - `cargo test -p bhwi-e2e-ledger -- --test-threads=1`
+- `cargo test -p bhwi-e2e-specter -- --test-threads=1` and its native CLI
+  suite
 - `cargo test -p bhwi-e2e-jade -- --test-threads=1`
 - `cargo test -p bhwi-e2e-trezor -- --test-threads=1`, the native CLI and
   differential `hwi-parity-trezor` suites, once per model. The Model T leg
@@ -76,6 +78,8 @@ Apps:
 - `nix run .#coldcard`
 - `nix run .#ledger`
 - `nix run .#ledger-build-app`
+- `nix run .#specter`
+- `nix run .#specter-init`
 - `nix run .#hwi-upstream-suite`
 - `nix run .#hwi-upstream-bitbox`
 - `nix run .#hwi-upstream-coldcard`
@@ -100,6 +104,7 @@ Development shells:
 - `nix develop .#bitbox`
 - `nix develop .#coldcard`
 - `nix develop .#ledger`
+- `nix develop .#specter`
 - `nix develop .#jade`
 - `nix develop .#trezor`
 - `nix develop .#keepkey`
@@ -152,6 +157,29 @@ nix run .#ledger
 
 # Terminal 2
 nix develop .#ledger -c cargo test -p bhwi-e2e-ledger -- --test-threads=1
+```
+
+Specter-DIY. The simulator's GUI controller listens on `127.0.0.1:8787`; its
+USB protocol is exposed as TCP on `127.0.0.1:8789`. `specter-init` loads the
+synthetic test wallet and enables USB. Set `SPECTER_GUI_PORT` before both
+commands when `8787` is unavailable.
+
+```sh
+# Terminal 1
+nix run .#specter
+
+# Terminal 2, after the GUI controller is listening
+nix run .#specter-init
+nix develop .#specter -c cargo test -p bhwi-e2e-specter -- --test-threads=1
+
+# In Terminal 1, press Ctrl-C and run nix run .#specter again
+# Then, in Terminal 2, reinitialize the wallet
+nix run .#specter-init
+
+# Native CLI e2e against the fresh simulator
+nix develop .#specter -c cargo build -p bhwi-cli
+BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#specter \
+  -c cargo test -p bhwi-e2e-cli specter -- --test-threads=1
 ```
 
 Jade:
@@ -346,6 +374,18 @@ KeepKey:
 - Emulator outputs are `x86_64-linux` only. Physical HID/WebUSB and browser
   WebHID/WebUSB support remain available on their existing platforms. See
   [KEEPKEY](KEEPKEY.md).
+
+Specter-DIY:
+
+- Uses recursively pinned `cryptoadvance/specter-diy` revision
+  `b9c85b9651d3e4cea2fbc954a8c5558844367c81`.
+- Builds the Unix simulator under `$XDG_CACHE_HOME/bhwi/specter` and uses a
+  fresh temporary filesystem for every run.
+- Binds its unauthenticated GUI controller and simulated USB TCP endpoint to
+  loopback only. The defaults are GUI `127.0.0.1:8787` and USB
+  `127.0.0.1:8789`.
+- `specter-init` drives the GUI controller to load the synthetic fixture,
+  enable USB, and reboot without printing the mnemonic.
 
 ## Notes
 

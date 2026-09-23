@@ -19,10 +19,11 @@ use bhwi::trezor::{
 };
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
-    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, KeepKey, Ledger, Trezor,
+    DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, KeepKey, Ledger, Specter, Trezor,
     WalletRegistration, bitbox::BitBox, coldcard::Coldcard,
     transport::bitbox::hid::BitBoxTransportHID, transport::coldcard::hid::ColdcardTransportHID,
-    transport::ledger::hid::LedgerTransportHID, transport::trezor::TrezorTransport,
+    transport::ledger::hid::LedgerTransportHID, transport::specter::SpecterTransport,
+    transport::trezor::TrezorTransport,
 };
 use bitcoin::{
     Network,
@@ -204,6 +205,7 @@ pub enum Device {
     Ledger(Ledger<LedgerTransportHID<webhid::WebHidDevice>>),
     Coldcard(Coldcard<ColdcardTransportHID<webhid::WebHidDevice>>),
     Jade(Jade<WebSerialDevice, PinServer>),
+    Specter(Specter<SpecterTransport<WebSerialDevice>>),
     BitBox(BitBox<BitBoxTransportHID<webhid::WebHidDevice>>),
     TrezorOne(Trezor<TrezorTransport<webhid::WebHidDevice>>),
     TrezorT(Trezor<TrezorTransport<webusb::WebUsbDevice>>),
@@ -217,6 +219,7 @@ impl<'a> AsRef<dyn HWI + 'a> for Device {
             Device::Coldcard(l) => l,
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
+            Device::Specter(s) => s,
             Device::BitBox(b) => b,
             Device::TrezorOne(t) => t,
             Device::TrezorT(t) => t,
@@ -232,6 +235,7 @@ impl<'a> AsMut<dyn HWI + 'a> for Device {
             Device::Coldcard(l) => l,
             Device::Ledger(l) => l,
             Device::Jade(j) => j,
+            Device::Specter(s) => s,
             Device::BitBox(b) => b,
             Device::TrezorOne(t) => t,
             Device::TrezorT(t) => t,
@@ -425,6 +429,36 @@ impl Client {
     }
 
     #[wasm_bindgen]
+    pub async fn connect_specter(
+        &mut self,
+        network: &str,
+        on_close_cb: JsValue,
+    ) -> Result<(), JsValue> {
+        let network = Network::from_str(network).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let device = WebSerialDevice::get_webserial_device(115200, on_close_cb)
+            .await
+            .ok_or(JsValue::from_str("Failed to connect to Specter-DIY"))?;
+        // Specter-DIY selects its network on-device; this only validates responses.
+        self.device = Some(Device::Specter(Specter::new(
+            network,
+            SpecterTransport::new(device),
+        )));
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn disconnect_specter(&mut self) {
+        if !matches!(&self.device, Some(Device::Specter(_))) {
+            return;
+        }
+        let Some(Device::Specter(specter)) = self.device.take() else {
+            unreachable!("checked Specter device before taking it");
+        };
+        let mut serial = specter.transport.into_inner();
+        serial.close();
+    }
+
+    #[wasm_bindgen]
     pub async fn unlock(&mut self, network: &str) -> Result<(), JsValue> {
         match &mut self.device {
             Some(d) => d.as_mut().unlock(network).await,
@@ -463,7 +497,11 @@ impl Client {
             Device::KeepKeyHid(_) | Device::KeepKeyWebUsb(_) => Some(
                 DeviceContext::KeepKeyManagement(KeepKeyManagementContext::Pin(pin)),
             ),
-            Device::Ledger(_) | Device::Coldcard(_) | Device::Jade(_) | Device::BitBox(_) => None,
+            Device::Ledger(_)
+            | Device::Coldcard(_)
+            | Device::Jade(_)
+            | Device::Specter(_)
+            | Device::BitBox(_) => None,
         };
         device.as_mut().send_pin(context).await
     }
@@ -538,7 +576,7 @@ impl Client {
         wallet_hmac_hex: Option<String>,
         wallet_descriptor: Option<String>,
     ) -> Result<String, JsValue> {
-        // BitBox re-supplies the policy descriptor on every address display; Ledger needs the
+        // BitBox and Specter-DIY need the descriptor to resolve an address; Ledger needs the
         // registered policy plus its hmac; Coldcard/Jade resolve the wallet by name on-device.
         let context = match &self.device {
             Some(Device::BitBox(_)) => {
@@ -577,6 +615,15 @@ impl Client {
                     ));
                 }
             },
+            Some(Device::Specter(_)) => {
+                let desc = wallet_descriptor.ok_or_else(|| {
+                    JsValue::from_str("Specter-DIY descriptor address requires wallet_descriptor")
+                })?;
+                let policy: WalletPolicy = desc
+                    .parse()
+                    .map_err(|e| JsValue::from_str(&format!("Invalid wallet descriptor: {e}")))?;
+                Some(DeviceContext::Specter { policy })
+            }
             _ => None,
         };
         let address = DisplayAddress::ByDescriptor {

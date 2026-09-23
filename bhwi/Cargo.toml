@@ -11,11 +11,12 @@ description = "development kit"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "trezor"]
+default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "specter", "trezor"]
 coldcard = ["dep:aes", "dep:ctr", "dep:k256"]
 jade = ["dep:hex", "serde", "serde_bytes", "serde_cbor"]
 keepkey = ["trezor"]
 ledger = []
+specter = []
 bitbox = [
     "dep:byteorder",
     "dep:either",

@@ -36,7 +36,7 @@ jobs:
         run: |
           cargo check -p bhwi --no-default-features
           cargo check -p bhwi-async --no-default-features
-          for f in bitbox coldcard jade ledger trezor; do
+          for f in bitbox coldcard jade ledger specter trezor; do
             cargo check -p bhwi --no-default-features --features "$f"
             cargo check -p bhwi-async --no-default-features --features "$f"
           done

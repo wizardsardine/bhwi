@@ -422,6 +422,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bhwi-e2e-specter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bhwi",
+ "bhwi-async",
+ "miniscript",
+ "tokio",
+]
+
+[[package]]
 name = "bhwi-e2e-trezor"
 version = "0.1.0"
 dependencies = [

@@ -236,7 +236,9 @@ fn hwi_device_manager(selector: &HwiSelector) -> Result<DeviceManager, HwiError>
             }
         },
     };
-    Ok(DeviceManager::new(selector.device_selector(device_type)))
+    Ok(DeviceManager::new_without_specter(
+        selector.device_selector(device_type),
+    ))
 }
 
 async fn find_hwi_device(selector: &HwiSelector) -> Result<(DeviceManager, Device), HwiError> {
@@ -825,7 +827,7 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
         .as_deref()
         .and_then(|raw| parse_device_type(raw).ok());
     let raw_device_type = device_type.and(selector.device_type.as_deref());
-    let manager = DeviceManager::new(selector.device_selector(device_type));
+    let manager = DeviceManager::new_without_specter(selector.device_selector(device_type));
     let devices = match manager.enumerate().await {
         Ok(devices) => devices,
         Err(err) => {
@@ -1415,7 +1417,11 @@ async fn backup_device(
             }
         }
         DeviceType::Coldcard => {}
-        DeviceType::KeepKey | DeviceType::Ledger | DeviceType::Jade | DeviceType::Trezor => {
+        DeviceType::KeepKey
+        | DeviceType::Ledger
+        | DeviceType::Jade
+        | DeviceType::Specter
+        | DeviceType::Trezor => {
             let unsupported = HwiUnsupportedDeviceAction::Backup {
                 label,
                 backup_passphrase,
@@ -3224,6 +3230,7 @@ fn hwi_can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
         DeviceType::Jade => false,
         DeviceType::KeepKey => false,
         DeviceType::Coldcard => model.contains("edge"),
+        DeviceType::Specter => false,
         DeviceType::Trezor => model != "trezor_one",
     }
 }
@@ -3309,7 +3316,7 @@ fn label_for(device_type: DeviceType, label: Option<String>) -> Option<Option<St
         DeviceType::Coldcard | DeviceType::KeepKey | DeviceType::Ledger | DeviceType::Trezor => {
             Some(label)
         }
-        DeviceType::BitBox02 | DeviceType::Jade => None,
+        DeviceType::BitBox02 | DeviceType::Jade | DeviceType::Specter => None,
     }
 }
 
@@ -3470,6 +3477,7 @@ fn hwi_unavailable_action_message(
         (DeviceType::BitBox02, HwiUnsupportedDeviceAction::TogglePassphrase) => {
             "BitBox02 passphrase toggling is not implemented"
         }
+        (DeviceType::Specter, _) => "Specter-DIY does not support this operation from the host",
     }
     .to_owned()
 }

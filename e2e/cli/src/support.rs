@@ -27,6 +27,12 @@ impl Cli {
         }
     }
 
+    pub(crate) fn bitcoin() -> Self {
+        Self {
+            args: vec!["--network".to_string(), "bitcoin".to_string()],
+        }
+    }
+
     pub(crate) fn for_device(fingerprint: &str) -> Self {
         Self::global().with_args(["--fingerprint", fingerprint])
     }

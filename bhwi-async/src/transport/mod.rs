@@ -6,6 +6,8 @@ pub mod coldcard;
 pub mod jade;
 #[cfg(feature = "ledger")]
 pub mod ledger;
+#[cfg(feature = "specter")]
+pub mod specter;
 #[cfg(any(feature = "trezor", feature = "keepkey"))]
 pub mod trezor;
 

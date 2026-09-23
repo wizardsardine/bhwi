@@ -8,6 +8,8 @@ pub mod jade;
 pub mod keepkey;
 #[cfg(feature = "ledger")]
 pub mod ledger;
+#[cfg(feature = "specter")]
+pub mod specter;
 pub mod transport;
 #[cfg(feature = "trezor")]
 pub mod trezor;
@@ -39,6 +41,8 @@ pub use jade::Jade;
 pub use keepkey::KeepKey;
 #[cfg(feature = "ledger")]
 pub use ledger::Ledger;
+#[cfg(feature = "specter")]
+pub use specter::Specter;
 #[cfg(feature = "trezor")]
 pub use trezor::Trezor;
 

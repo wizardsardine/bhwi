@@ -9,7 +9,7 @@ use strum::{EnumIter, IntoEnumIterator};
 
 use crate::{
     bitbox::BitBoxDevice, coldcard::ColdcardDevice, config::DeviceSelector, jade::JadeDevice,
-    keepkey::KeepKeyDevice, ledger::LedgerDevice, trezor::TrezorDevice,
+    keepkey::KeepKeyDevice, ledger::LedgerDevice, specter::SpecterDevice, trezor::TrezorDevice,
 };
 
 pub mod address;
@@ -23,22 +23,19 @@ pub mod jade;
 pub mod keepkey;
 pub mod ledger;
 pub mod management;
+pub mod specter;
 pub mod trezor;
 pub mod udev;
 pub mod webusb;
 
-#[derive(Serialize)]
 pub struct Device {
     name: String,
     device_type: DeviceType,
     path: String,
     model: String,
-    #[serde(skip)]
     device: Box<dyn HWIDevice>,
     is_emulated: bool,
-    #[serde(default, serialize_with = "option_fingerprint")]
     fingerprint: Option<Fingerprint>,
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
     info: Option<Info>,
 }
 
@@ -82,6 +79,79 @@ impl From<bhwi_async::Info> for Info {
             needs_pin_sent: info.needs_pin_sent,
             needs_passphrase_sent: info.needs_passphrase_sent,
         }
+    }
+}
+
+#[derive(Serialize)]
+struct SerializedDevice<'a> {
+    name: &'a str,
+    device_type: DeviceType,
+    path: &'a str,
+    model: &'a str,
+    is_emulated: bool,
+    #[serde(default, serialize_with = "option_fingerprint")]
+    fingerprint: Option<Fingerprint>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    info: Option<SerializedInfo<'a>>,
+}
+
+enum SerializedInfo<'a> {
+    Standard(&'a Info),
+    Specter(&'a Info),
+}
+
+impl Serialize for SerializedInfo<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Standard(info) => info.serialize(serializer),
+            Self::Specter(info) => SpecterInfo::from(*info).serialize(serializer),
+        }
+    }
+}
+
+/// Specter-DIY does not expose firmware metadata through its USB protocol.
+/// Keep the ordinary `Info` JSON representation unchanged for other devices.
+#[derive(Serialize)]
+struct SpecterInfo<'a> {
+    networks: &'a [Network],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<&'a str>,
+}
+
+impl<'a> From<&'a Info> for SpecterInfo<'a> {
+    fn from(info: &'a Info) -> Self {
+        Self {
+            networks: &info.networks,
+            label: info.label.as_deref(),
+        }
+    }
+}
+
+impl Serialize for Device {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let info = self.info.as_ref().map(|info| {
+            if self.device_type == DeviceType::Specter {
+                SerializedInfo::Specter(info)
+            } else {
+                SerializedInfo::Standard(info)
+            }
+        });
+        SerializedDevice {
+            name: &self.name,
+            device_type: self.device_type,
+            path: &self.path,
+            model: &self.model,
+            is_emulated: self.is_emulated,
+            fingerprint: self.fingerprint,
+            info,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -143,6 +213,15 @@ impl Device {
     pub async fn info(&mut self) -> Result<Info> {
         if let Some(ref info) = self.info {
             Ok(info.clone())
+        } else if self.device_type == DeviceType::Specter {
+            // Specter-DIY has no firmware-version command.  Keep list output
+            // useful without sending the unsupported common GetVersion request.
+            let info = Info {
+                version: "unavailable".into(),
+                ..Info::default()
+            };
+            self.info = Some(info.clone());
+            Ok(info)
         } else {
             let info: Info = self.device.get_info().await?.into();
             self.info = Some(info.clone());
@@ -162,6 +241,7 @@ pub enum DeviceType {
     #[value(name = "keepkey", alias = "keep-key")]
     KeepKey,
     Ledger,
+    Specter,
     Trezor,
 }
 
@@ -173,9 +253,16 @@ impl DeviceType {
             DeviceType::Coldcard => ColdcardDevice::enumerate(selector).await?,
             DeviceType::Jade => JadeDevice::enumerate(selector).await?,
             DeviceType::KeepKey => KeepKeyDevice::enumerate(selector).await?,
+            DeviceType::Specter => SpecterDevice::enumerate(selector).await?,
             DeviceType::Trezor => TrezorDevice::enumerate(selector).await?,
         })
     }
+}
+
+fn default_device_types(include_specter: bool) -> Vec<DeviceType> {
+    DeviceType::iter()
+        .filter(|device_type| include_specter || *device_type != DeviceType::Specter)
+        .collect()
 }
 
 fn collect_enumeration_results<T>(
@@ -205,11 +292,23 @@ fn collect_enumeration_results<T>(
 
 pub struct DeviceManager {
     pub selector: DeviceSelector,
+    include_specter: bool,
 }
 
 impl DeviceManager {
     pub fn new(selector: DeviceSelector) -> Self {
-        Self { selector }
+        Self {
+            selector,
+            include_specter: true,
+        }
+    }
+
+    /// Python-HWI has no Specter-DIY compatibility contract.
+    pub(crate) fn new_without_specter(selector: DeviceSelector) -> Self {
+        Self {
+            selector,
+            include_specter: false,
+        }
     }
 
     pub async fn get_device_with_fingerprint(&self) -> Result<Option<Device>> {
@@ -259,7 +358,7 @@ impl DeviceManager {
             .selector
             .device_type
             .map(|device_type| vec![device_type])
-            .unwrap_or_else(|| DeviceType::iter().collect());
+            .unwrap_or_else(|| default_device_types(self.include_specter));
         let results = join_all(
             device_types
                 .into_iter()
@@ -295,7 +394,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::collect_enumeration_results;
+    use super::{Info, SerializedInfo, collect_enumeration_results, default_device_types};
+    use crate::DeviceType;
 
     #[test]
     fn enumeration_results_unfiltered_success_plus_error() {
@@ -323,6 +423,30 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.to_string(), "first");
+    }
+
+    #[test]
+    fn ordinary_info_keeps_the_firmware_null_json_contract() {
+        let info = Info::default();
+        let value = serde_json::to_value(info).expect("serialize info");
+        assert!(value.get("firmware").is_some_and(|value| value.is_null()));
+    }
+
+    #[test]
+    fn specter_info_omits_unavailable_firmware_from_json() {
+        let info = Info {
+            version: "unavailable".into(),
+            ..Info::default()
+        };
+        let value = serde_json::to_value(SerializedInfo::Specter(&info)).expect("serialize info");
+        assert!(value.get("version").is_none());
+        assert!(value.get("firmware").is_none());
+    }
+
+    #[test]
+    fn python_hwi_device_enumeration_excludes_specter() {
+        assert!(default_device_types(true).contains(&DeviceType::Specter));
+        assert!(!default_device_types(false).contains(&DeviceType::Specter));
     }
 
     #[test]

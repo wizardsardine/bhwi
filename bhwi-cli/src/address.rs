@@ -85,6 +85,14 @@ impl DeviceManager {
                             "both --hmac and --wallet-descriptor must be provided for Ledger descriptor addresses"
                         ),
                     },
+                    DeviceType::Specter => {
+                        let policy = wallet_descriptor.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "--wallet-descriptor is required for Specter descriptor addresses"
+                            )
+                        })?;
+                        Some(DeviceContext::Specter { policy })
+                    }
                     _ => None,
                 };
                 (
