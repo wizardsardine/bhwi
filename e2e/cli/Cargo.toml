@@ -7,7 +7,7 @@ license-file.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-bhwi = { workspace = true, features = ["keepkey"] }
+bhwi = { workspace = true, features = ["keepkey", "specter"] }
 bhwi-async.workspace = true
 bhwi-cli = { path = "../../bhwi-cli" }
 bhwi-e2e-trezor = { path = "../trezor" }
