@@ -7,8 +7,9 @@ import bitboxIcon from './assets/devices/bitbox02.svg';
 import trezorOneIcon from './assets/devices/trezor-one.svg';
 import trezorTIcon from './assets/devices/trezor-model-t.svg';
 import keepkeyIcon from './assets/devices/keepkey.svg';
+import genericHardwareWalletIcon from './assets/devices/generic-hardware-wallet.svg';
 
-type DeviceType = 'Coldcard' | 'Jade' | 'Ledger' | 'BitBox02' | 'TrezorOne' | 'TrezorT' | 'KeepKey';
+type DeviceType = 'Coldcard' | 'Jade' | 'Ledger' | 'BitBox02' | 'TrezorOne' | 'TrezorT' | 'KeepKey' | 'Specter';
 
 const DEVICE_ICONS: Record<DeviceType, string> = {
     'Coldcard': coldcardIcon,
@@ -18,6 +19,7 @@ const DEVICE_ICONS: Record<DeviceType, string> = {
     'TrezorOne': trezorOneIcon,
     'TrezorT': trezorTIcon,
     'KeepKey': keepkeyIcon,
+    'Specter': genericHardwareWalletIcon,
 };
 type Network = 'bitcoin' | 'testnet';
 
@@ -75,6 +77,7 @@ const App = () => {
     const [connecting, setConnecting] = useState<DeviceType | null>(null);
     const [selectedDevice, setSelectedDevice] = useState<DeviceType>('Coldcard');
     const [jadeNetwork, setJadeNetwork] = useState<Network>('bitcoin');
+    const [specterNetwork, setSpecterNetwork] = useState<Network>('bitcoin');
     const [trezorNetwork, setTrezorNetwork] = useState<Network>('bitcoin');
     const [trezorPassphrase, setTrezorPassphrase] = useState('');
     const [keepKeyNetwork, setKeepKeyNetwork] = useState<Network>('bitcoin');
@@ -134,6 +137,12 @@ const App = () => {
     const errorMessage = (err: unknown, fallback: string): string =>
         err instanceof Error ? err.message : typeof err === 'string' ? err : fallback;
 
+    const reconnectAfterSpecterError = () => {
+        if (device?.type !== 'Specter') return;
+        device.client.disconnect_specter();
+        setDevice(null);
+    };
+
     const completeConnection = async (client: Client, type: DeviceType, network?: Network) => {
         await client.unlock(network ?? 'bitcoin');
         setPairingCode(null);
@@ -153,7 +162,7 @@ const App = () => {
         const masterFingerprint = await client.get_master_fingerprint();
 
         let detectedNetwork: Network | null = null;
-        if (type === 'Jade') {
+        if (type === 'Jade' || type === 'Specter') {
             detectedNetwork = network ?? 'bitcoin';
         } else {
             try {
@@ -173,7 +182,7 @@ const App = () => {
         setDerivationPath(`m/48'/${ct}'/0'/2'`);
         setAddressPath(`m/84'/${ct}'/0'/0/0`);
         setSignMsgPath(`m/84'/${ct}'/0'/0/0`);
-        if (type === 'KeepKey' && addressFormat === 'taproot') {
+        if ((type === 'KeepKey' || type === 'Specter') && addressFormat === 'taproot') {
             setAddressFormat('native-segwit');
         }
         setDevice({ client, type, masterFingerprint, network: detectedNetwork });
@@ -208,7 +217,7 @@ const App = () => {
         if (processing) return;
         setConnecting(type);
         setProcessing(true);
-        let client: Client | null = null;
+        let client: Client | undefined;
         try {
             await initWasm();
             client = new Client();
@@ -228,6 +237,9 @@ const App = () => {
                     break;
                 case 'Jade':
                     await client.connect_jade(network ?? 'bitcoin', onCloseCallback);
+                    break;
+                case 'Specter':
+                    await client.connect_specter(network ?? 'bitcoin', onCloseCallback);
                     break;
                 case 'Ledger':
                     await client.connect_ledger(onCloseCallback);
@@ -264,6 +276,9 @@ const App = () => {
 
             await completeConnection(client, type, network);
         } catch (err) {
+            if (type === 'Specter') {
+                client?.disconnect_specter();
+            }
             showError(errorMessage(err, `Failed to connect to ${type}`));
             console.error(`Error connecting to ${type}:`, err);
         } finally {
@@ -309,6 +324,7 @@ const App = () => {
             const address = await device.client.display_address_by_path(path, true, format);
             setAddressResults(prev => [{ derivationPath: path, address }, ...prev]);
         } catch (err) {
+            reconnectAfterSpecterError();
             const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to display address";
             const warning = getPathNetworkWarning(path);
             const message = warning && raw.includes("UnexpectedResult")
@@ -342,6 +358,7 @@ const App = () => {
             const label = `${descriptorName} [${descriptorChange ? '1' : '0'}/${descriptorIndex}]`;
             setAddressResults(prev => [{ derivationPath: label, address }, ...prev]);
         } catch (err) {
+            reconnectAfterSpecterError();
             const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to display address";
             showError(message);
             console.error("Error displaying address by descriptor:", err);
@@ -374,6 +391,7 @@ const App = () => {
                 hmac: registration.hmac,
             }, ...prev]);
         } catch (err) {
+            reconnectAfterSpecterError();
             const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to register wallet";
             showError(message);
             console.error("Error registering wallet:", err);
@@ -398,6 +416,7 @@ const App = () => {
             );
             setPsbtResults(prev => [signed, ...prev]);
         } catch (err) {
+            reconnectAfterSpecterError();
             const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to sign PSBT";
             showError(message);
             console.error("Error signing PSBT:", err);
@@ -417,6 +436,7 @@ const App = () => {
             const signature = await device.client.sign_message(signMsgText, signMsgPath);
             setSignMsgResults(prev => [{ message: signMsgText, derivationPath: signMsgPath, signature }, ...prev]);
         } catch (err) {
+            reconnectAfterSpecterError();
             const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to sign message";
             showError(message);
             console.error("Error signing message:", err);
@@ -436,6 +456,7 @@ const App = () => {
             const xpub = await device.client.get_extended_pubkey(derivationPath, false);
             setXpubResults(prev => [{ derivationPath, xpub }, ...prev]);
         } catch (err) {
+            reconnectAfterSpecterError();
             const message = err instanceof Error ? err.message : typeof err === 'string' ? err : "Failed to fetch xpub";
             showError(message);
             console.error("Error fetching xpub:", err);
@@ -677,28 +698,37 @@ const App = () => {
                                                 </label>
                                             </div>
                                         </div>
-                                        <label htmlFor="descriptor-hmac" className="block text-sm text-gray-400 mb-2">
-                                            Wallet HMAC (hex, Ledger only)
-                                        </label>
-                                        <input
-                                            id="descriptor-hmac"
-                                            type="text"
-                                            value={descriptorHmac}
-                                            onChange={(e) => setDescriptorHmac(e.target.value)}
-                                            placeholder="Optional — 64 hex characters"
-                                            className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
-                                        />
-                                        <label htmlFor="descriptor-policy" className="block text-sm text-gray-400 mb-2">
-                                            Wallet Descriptor (Ledger only)
-                                        </label>
-                                        <textarea
-                                            id="descriptor-policy"
-                                            value={descriptorPolicy}
-                                            onChange={(e) => setDescriptorPolicy(e.target.value)}
-                                            placeholder="Optional — e.g. wsh(sortedmulti(2,@0/**,@1/**))"
-                                            rows={2}
-                                            className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
-                                        />
+                                        {device.type === 'Ledger' && (
+                                            <>
+                                                <label htmlFor="descriptor-hmac" className="block text-sm text-gray-400 mb-2">
+                                                    Wallet HMAC (hex)
+                                                </label>
+                                                <input
+                                                    id="descriptor-hmac"
+                                                    type="text"
+                                                    value={descriptorHmac}
+                                                    onChange={(e) => setDescriptorHmac(e.target.value)}
+                                                    placeholder="64 hex characters"
+                                                    className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                                />
+                                            </>
+                                        )}
+                                        {(device.type === 'Ledger' || device.type === 'BitBox02' || device.type === 'Specter') && (
+                                            <>
+                                                <label htmlFor="descriptor-policy" className="block text-sm text-gray-400 mb-2">
+                                                    Wallet Descriptor {device.type === 'Specter' ? '(required)' : device.type === 'BitBox02' ? '(required)' : '(registered wallets only)'}
+                                                </label>
+                                                <textarea
+                                                    id="descriptor-policy"
+                                                    value={descriptorPolicy}
+                                                    onChange={(e) => setDescriptorPolicy(e.target.value)}
+                                                    placeholder="e.g. wsh(sortedmulti(2,@0/**,@1/**))"
+                                                    rows={2}
+                                                    required={device.type === 'Specter'}
+                                                    className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 font-mono text-sm focus:outline-none focus:border-blue-500 mb-4"
+                                                />
+                                            </>
+                                        )}
                                         <button
                                             type="submit"
                                             disabled={processing}
@@ -723,10 +753,15 @@ const App = () => {
                                                     <option value="legacy">Legacy (P2PKH) — m/44'/{coinType}'/0'/0/i</option>
                                                     <option value="nested-segwit">Nested SegWit (P2SH-P2WPKH) — m/49'/{coinType}'/0'/0/i</option>
                                                     <option value="native-segwit">Native SegWit (P2WPKH) — m/84'/{coinType}'/0'/0/i</option>
-                                                    {device.type !== 'KeepKey' && (
+                                                    {device.type !== 'KeepKey' && device.type !== 'Specter' && (
                                                         <option value="taproot">Taproot (P2TR) — m/86'/{coinType}'/0'/0/i</option>
                                                     )}
                                                 </select>
+                                                {device.type === 'Specter' && (
+                                                    <p className="text-xs text-gray-500 -mt-2 mb-4">
+                                                        Specter-DIY cannot display Taproot addresses with this firmware.
+                                                    </p>
+                                                )}
                                                 <label htmlFor="address-index" className="block text-sm text-gray-400 mb-2">
                                                     Index
                                                 </label>
@@ -1003,6 +1038,33 @@ const App = () => {
                                 <span className="font-medium">Coldcard</span>
                             </label>
 
+                            <label className="flex flex-wrap items-center gap-3 bg-gray-800 px-6 py-3 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors">
+                                <input
+                                    type="radio"
+                                    name="device"
+                                    checked={selectedDevice === 'Specter'}
+                                    onChange={() => setSelectedDevice('Specter')}
+                                    className="w-4 h-4 accent-blue-600"
+                                />
+                                <img src={DEVICE_ICONS['Specter']} alt="" className="h-10 w-10 object-contain" />
+                                <span className="font-medium">Specter-DIY</span>
+                                <select
+                                    value={specterNetwork}
+                                    onChange={(e) => {
+                                        setSpecterNetwork(e.target.value as Network);
+                                        setSelectedDevice('Specter');
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="ml-auto bg-gray-700 border border-gray-600 rounded-lg px-3 py-1 text-sm focus:outline-none focus:border-blue-500"
+                                >
+                                    <option value="bitcoin">Mainnet</option>
+                                    <option value="testnet">Testnet</option>
+                                </select>
+                                <p className="w-full text-xs text-gray-400">
+                                    Select the network already chosen on the device. Enable USB in Specter-DIY, reboot it, then confirm each request on-device.
+                                </p>
+                            </label>
+
                             <label className="flex items-center gap-3 bg-gray-800 px-6 py-3 rounded-lg cursor-pointer hover:bg-gray-700 transition-colors">
                                 <input
                                     type="radio"
@@ -1173,6 +1235,8 @@ const App = () => {
                                 selectedDevice,
                                 selectedDevice === 'Jade'
                                     ? jadeNetwork
+                                    : selectedDevice === 'Specter'
+                                        ? specterNetwork
                                     : selectedDevice === 'TrezorOne' || selectedDevice === 'TrezorT'
                                         ? trezorNetwork
                                         : selectedDevice === 'KeepKey'
