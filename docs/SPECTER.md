@@ -68,7 +68,11 @@ nix run .#specter
 nix run .#specter-init
 nix develop .#specter -c cargo test -p bhwi-e2e-specter -- --test-threads=1
 
-# Build and run the native CLI tests
+# In Terminal 1, press Ctrl-C and run nix run .#specter again
+# Then, in Terminal 2, reinitialize the wallet
+nix run .#specter-init
+
+# Build and run the native CLI tests against the fresh simulator
 nix develop .#specter -c cargo build -p bhwi-cli
 BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#specter \
   -c cargo test -p bhwi-e2e-cli specter -- --test-threads=1
