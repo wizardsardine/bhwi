@@ -43,9 +43,9 @@ pub trait Interpreter {
 ```
 
 `bhwi-async` is one such driver: it pumps the common interpreter (BitBox02,
-Coldcard, Jade, KeepKey, Ledger, and Trezor) over HID, TCP, UDP, or the browser
-and routes each `Transmit` to the device transport, the Jade PIN server, or a
-typed host-interaction provider via its `Recipient`.
+Coldcard, Jade, KeepKey, Ledger, Specter-DIY, and Trezor) over HID, USB serial,
+TCP, UDP, or the browser and routes each `Transmit` to the device transport,
+the Jade PIN server, or a typed host-interaction provider via its `Recipient`.
 
 ## Workspace
 
@@ -63,14 +63,18 @@ typed host-interaction provider via its `Recipient`.
 - [Jade](https://github.com/Blockstream/Jade)
 - [KeepKey](https://github.com/keepkey/keepkey-firmware)
 - [Ledger](https://github.com/LedgerHQ/app-bitcoin-new)
+- [Specter-DIY](https://github.com/cryptoadvance/specter-diy)
 - [Trezor](https://github.com/trezor/trezor-firmware) (Model One and Model T)
 
 Every device implements the full [`HWI` trait](bhwi-async/src/lib.rs): `unlock`,
 `get_info`, `get_master_fingerprint`, `get_extended_pubkey`, `sign_message`,
-`display_address`, `register_wallet` and `sign_tx`. Two capability gaps remain:
-`backup_device` is supported on BitBox02 and Coldcard but not on Jade, KeepKey,
-Ledger, or Trezor, and `register_wallet` is unsupported on KeepKey and Trezor,
-which verify supported multisig descriptors at display and signing time instead.
+`display_address`, `register_wallet` and `sign_tx`. Three capability gaps
+remain: `backup_device` is supported on BitBox02 and Coldcard but not on Jade,
+KeepKey, Ledger, Specter-DIY, or Trezor; `register_wallet` is unsupported on
+KeepKey and Trezor, which verify supported multisig descriptors at display and
+signing time instead; and `get_info` is unsupported on Specter-DIY, whose
+protocol exposes no firmware version. See [docs/SPECTER.md](docs/SPECTER.md)
+for the Specter-DIY setup and limits.
 
 ## CLI
 
@@ -105,7 +109,7 @@ claimed. See [docs/HWI_PARITY.md](docs/HWI_PARITY.md).
 - [docs/DEVICE_ONBOARDING.md](docs/DEVICE_ONBOARDING.md): adding a device
 - [docs/HWI_PARITY.md](docs/HWI_PARITY.md): Python-HWI parity
 - [docs/NIX.md](docs/NIX.md): Nix emulator runners
-- Device emulation: [BITBOX](docs/BITBOX.md) · [COLDCARD](docs/COLDCARD.md) · [JADE](docs/JADE.md) · [LEDGER](docs/LEDGER.md)
+- Device emulation: [BITBOX](docs/BITBOX.md) · [COLDCARD](docs/COLDCARD.md) · [JADE](docs/JADE.md) · [KEEPKEY](docs/KEEPKEY.md) · [LEDGER](docs/LEDGER.md) · [SPECTER](docs/SPECTER.md) · [TREZOR](docs/TREZOR.md)
 
 ## License
 
