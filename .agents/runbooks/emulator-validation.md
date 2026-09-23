@@ -130,3 +130,24 @@ nix build .#checks.x86_64-linux.emulator-scripts
 ```
 
 New scripts must be staged before this flake check can see them.
+
+## Specter-DIY
+
+Start the simulator, then initialize its deterministic synthetic fixture in a
+separate command. The GUI controller listens on port 8787 and the USB protocol
+opens on port 8789 after initialization. If another local service uses the GUI
+port, the simulator chooses the next available one; set `SPECTER_GUI_PORT` to
+that port for the initializer.
+
+```sh
+nix run .#specter
+nix run .#specter-init
+nix develop .#specter -c cargo test -p bhwi-e2e-specter -- --test-threads=1
+
+nix develop -c cargo build -p bhwi-cli
+BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#specter \
+  -c cargo test -p bhwi-e2e-cli specter -- --test-threads=1
+```
+
+Do not print or attach simulator/controller logs: initialization data and
+protocol payloads are sensitive even when test fixtures are synthetic.
