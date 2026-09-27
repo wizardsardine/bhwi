@@ -172,8 +172,10 @@ signing.
 Ledger does not persist a wallet registry. Registration authenticates a policy
 and returns an HMAC, so an "already registered" wallet means the caller retained
 the policy name, descriptor, and HMAC and supplies them again for later signing.
-The native `register-wallet` and `sign-psbt` commands expose that reusable flow;
-HWI `signtx` registers inferred non-default policies for the current invocation.
+The native `descriptor register` and `psbt sign` commands expose that reusable
+flow; shared options such as `--fingerprint` and `--network` may appear before
+the command group, between the group and action, or after the action. HWI
+`signtx` registers inferred non-default policies for the current invocation.
 
 For classic multisig `displayaddress`, the candidate `hwi` accepts both
 `sortedmulti` and order-preserving `multi` policies in legacy `sh(...)`,

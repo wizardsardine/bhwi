@@ -325,7 +325,7 @@ fn command_output_is_sensitive(args: &[String]) -> bool {
     args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "sign-psbt"
+            "psbt"
                 | "signtx"
                 | "--psbt"
                 | "--passphrase"
@@ -351,7 +351,7 @@ fn run_ok(args: &[String]) -> Result<String> {
 fn ensure_success(args: &[String], output: Output) -> Result<String> {
     let hide_output = args
         .iter()
-        .any(|arg| matches!(arg.as_str(), "sign-psbt" | "signtx" | "--psbt"));
+        .any(|arg| matches!(arg.as_str(), "psbt" | "signtx" | "--psbt"));
     let safe_stdout = || {
         if hide_output {
             "<redacted>".to_owned()
@@ -559,14 +559,15 @@ fn assert_keypool(name: &str, stdout: &str, expected: KeypoolExpectation<'_>) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{command_output, redacted_args};
+    use super::{command_output, ensure_success, redacted_args, stopped_command_error};
 
     #[test]
     fn diagnostics_redact_secrets_and_psbt_paths() {
         let args = [
             "--passphrase",
             "secret",
-            "sign-psbt",
+            "psbt",
+            "sign",
             "--psbt",
             "wallet.psbt",
         ]
@@ -576,7 +577,8 @@ mod tests {
             [
                 "--passphrase",
                 "<redacted>",
-                "sign-psbt",
+                "psbt",
+                "sign",
                 "--psbt",
                 "<redacted>"
             ]
@@ -587,6 +589,42 @@ mod tests {
             redacted_args(&args),
             ["device", "send-pin", "<redacted>"].map(str::to_owned)
         );
+    }
+
+    #[test]
+    fn psbt_failure_and_timeout_diagnostics_hide_payloads() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+        use std::process::Output;
+
+        for args in [
+            vec!["psbt", "sign", "--psbt", "private-wallet.psbt"],
+            vec!["psbt", "sign", "--psbt=private-wallet.psbt"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            let stdout = b"private-stdout".to_vec();
+            let stderr = b"private-stderr".to_vec();
+            let output = Output {
+                status: std::process::ExitStatus::from_raw(1),
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+            };
+            for diagnostic in [
+                ensure_success(&args, output)
+                    .expect_err("failed PSBT signing")
+                    .to_string(),
+                stopped_command_error(&args, "timed out", &stdout, &stderr).to_string(),
+            ] {
+                assert!(diagnostic.contains("psbt"));
+                assert!(diagnostic.contains("sign"));
+                assert!(diagnostic.contains("<redacted>"));
+                for secret in ["private-wallet.psbt", "private-stdout", "private-stderr"] {
+                    assert!(!diagnostic.contains(secret), "leaked {secret}");
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]

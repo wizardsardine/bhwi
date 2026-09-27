@@ -84,18 +84,29 @@ for the Specter-DIY setup and limits.
 cargo build -p bhwi-cli
 ```
 
-| command           | purpose                                              |
-| ----------------- | ---------------------------------------------------- |
-| `device`          | list devices, firmware/app info, device management   |
-| `xpub`            | get an extended public key at a derivation path      |
-| `descriptor`      | descriptor / pubkey-descriptor operations            |
-| `address`         | display, check and get addresses                     |
-| `register-wallet` | register a wallet policy on the device               |
-| `sign-psbt`       | sign a PSBT                                           |
-| `sign-message`    | sign a message                                       |
+| command               | purpose                                            |
+| --------------------- | -------------------------------------------------- |
+| `address get`         | get or display a device address                    |
+| `descriptor pubkeys`  | get device pubkey descriptors                      |
+| `descriptor keypool`  | get a ranged keypool descriptor                    |
+| `descriptor register` | register a named wallet policy on the device       |
+| `device`              | list devices and manage hardware wallets           |
+| `xpub get`            | get an extended public key at a derivation path    |
+| `psbt sign`           | sign a base64-text PSBT file                        |
+| `message sign`        | sign a message at a derivation path                |
 
-Output is chainable by default (no headers); use `--pretty` for tables and
-`--json` for structured output suitable for `jq`.
+Shared `--fingerprint`, `--device-type`, `--device-path`, `--network`,
+`--format`, and `--passphrase` options work before a command group, between
+the group and action, or after the action. For example:
+
+```sh
+bhwi message sign --network testnet --fingerprint f5acc2fd \
+  --message hello --path "m/44'/1'/0'/0"
+```
+
+Output is chainable by default (no headers). Use `--format pretty` or
+`--format json` where supported; PSBT, address, and xpub output remains plain
+regardless of format.
 
 ## HWI parity
 

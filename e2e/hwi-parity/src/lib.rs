@@ -176,13 +176,7 @@ fn sensitive_command(args: &[OsString]) -> bool {
     args.iter().any(|arg| {
         matches!(
             arg.to_string_lossy().as_ref(),
-            "signtx"
-                | "sign-psbt"
-                | "--psbt"
-                | "--password"
-                | "-p"
-                | "--backup_passphrase"
-                | "sendpin"
+            "signtx" | "psbt" | "--psbt" | "--password" | "-p" | "--backup_passphrase" | "sendpin"
         )
     })
 }
@@ -4134,7 +4128,8 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 "testnet",
                 "--fingerprint",
                 &wallet.fingerprint,
-                "register-wallet",
+                "descriptor",
+                "register",
                 "--name",
                 &wallet.name,
                 "--descriptor",

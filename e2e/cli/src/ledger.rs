@@ -112,9 +112,12 @@ fn ledger_sign_message() -> Result<()> {
     )))?;
     assert_command(CommandCase {
         name: "sign message hello",
-        cli: Cli::for_device(LEDGER_FINGERPRINT),
+        cli: Cli::global(),
         args: &[
-            "sign-message",
+            "message",
+            "sign",
+            "--fingerprint",
+            LEDGER_FINGERPRINT,
             "--message",
             "hello",
             "--path",
@@ -131,7 +134,8 @@ fn ledger_register_wallet_and_descriptor_address() -> Result<()> {
         "../../ledger/automations/register_wallet_accept.json"
     )))?;
     let hmac = Cli::for_device(LEDGER_FINGERPRINT).run_ok([
-        "register-wallet",
+        "descriptor",
+        "register",
         "--name",
         "clitestwallet",
         "--descriptor",
@@ -165,7 +169,8 @@ fn ledger_sign_psbt() -> Result<()> {
         "../../ledger/automations/register_wallet_accept.json"
     )))?;
     let hmac = Cli::for_device(LEDGER_FINGERPRINT).run_ok([
-        "register-wallet",
+        "descriptor",
+        "register",
         "--name",
         "clipsbttest",
         "--descriptor",
@@ -179,7 +184,8 @@ fn ledger_sign_psbt() -> Result<()> {
         "../../ledger/automations/sign_psbt.json"
     )))?;
     let signed = Cli::for_device(LEDGER_FINGERPRINT).run_ok([
-        "sign-psbt",
+        "psbt",
+        "sign",
         "--psbt",
         psbt_file.to_str().context("utf-8 temp path")?,
         "--name",
@@ -198,7 +204,8 @@ fn ledger_sign_psbt() -> Result<()> {
         "../../ledger/automations/sign_psbt.json"
     )))?;
     let signed_again = Cli::for_device(LEDGER_FINGERPRINT).run_ok([
-        "sign-psbt",
+        "psbt",
+        "sign",
         "--psbt",
         psbt_file.to_str().context("utf-8 temp path")?,
         "--name",
