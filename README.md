@@ -84,16 +84,24 @@ for the Specter-DIY setup and limits.
 cargo build -p bhwi-cli
 ```
 
-| command               | purpose                                            |
-| --------------------- | -------------------------------------------------- |
-| `address get`         | get or display a device address                    |
-| `descriptor pubkeys`  | get device pubkey descriptors                      |
-| `descriptor keypool`  | get a ranged keypool descriptor                    |
-| `descriptor register` | register a named wallet policy on the device       |
-| `device`              | list devices and manage hardware wallets           |
-| `xpub get`            | get an extended public key at a derivation path    |
-| `psbt sign`           | sign a base64-text PSBT file                        |
-| `message sign`        | sign a message at a derivation path                |
+| command      | subcommand          | purpose                                                  |
+| ------------ | ------------------- | -------------------------------------------------------- |
+| `address`    | `get`               | get an address from the device                           |
+| `descriptor` | `pubkeys`           | get pubkey descriptors from the device                   |
+| `descriptor` | `keypool`           | get a ranged keypool descriptor from the selected device |
+| `descriptor` | `register`          | register a named wallet policy with the selected device  |
+| `device`     | `list`              | list all available devices                               |
+| `device`     | `backup`            | start a backup on the selected device                    |
+| `device`     | `setup`             | initialize an unseeded device                            |
+| `device`     | `wipe`              | erase wallet material from the selected device           |
+| `device`     | `restore`           | restore an unseeded device via its mnemonic flow         |
+| `device`     | `toggle-passphrase` | toggle mnemonic-passphrase use on the selected device    |
+| `device`     | `prompt-pin`        | ask the selected device to show its PIN keypad           |
+| `device`     | `send-pin`          | send the keypad positions shown on the device screen     |
+| `device`     | `install-udev-rules` | install udev rules for hardware wallet device access     |
+| `xpub`       | `get`               | get an extended public key at a derivation path          |
+| `psbt`       | `sign`              | sign a PSBT with the selected device                     |
+| `message`    | `sign`              | sign a message with the selected device                  |
 
 Shared `--fingerprint`, `--device-type`, `--device-path`, `--network`,
 `--format`, and `--passphrase` options work before a command group, between
