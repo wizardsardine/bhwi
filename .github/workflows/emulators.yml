@@ -32,6 +32,8 @@ jobs:
           nix develop -c cargo build -p bhwi-cli --bin hwi
           REFERENCE_HWI_BIN="$ref/bin/hwi-reference-bhwi" HWI_BIN="$PWD/target/debug/hwi" \
             nix develop -c cargo test -p bhwi-e2e-hwi-parity
+      - name: Run CLI diagnostic tests
+        run: nix develop -c cargo test -p bhwi-e2e-cli support::tests -- --test-threads=1
 
   bitbox-e2e:
     needs: nix-flake

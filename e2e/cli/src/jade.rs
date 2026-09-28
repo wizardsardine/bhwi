@@ -116,7 +116,8 @@ fn jade_register_wallet_and_descriptor_address() -> Result<()> {
     );
 
     let output = cli.run_ok([
-        "register-wallet",
+        "descriptor",
+        "register",
         "--name",
         "jade-cli",
         "--descriptor",
@@ -162,7 +163,8 @@ fn jade_sign_message() -> Result<()> {
         name: "sign message hello",
         cli: Cli::for_device(JADE_FINGERPRINT),
         args: &[
-            "sign-message",
+            "message",
+            "sign",
             "--message",
             "hello",
             "--path",

@@ -201,7 +201,8 @@ fn run_register_command(descriptor: &str) -> Result<Output> {
             "testnet",
             "--fingerprint",
             COLDCARD_FINGERPRINT,
-            "register-wallet",
+            "descriptor",
+            "register",
             "--name",
             "cold-cli",
             "--descriptor",
@@ -210,7 +211,7 @@ fn run_register_command(descriptor: &str) -> Result<Output> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("failed to spawn bhwi register-wallet command")?;
+        .context("failed to spawn bhwi descriptor register command")?;
 
     let persisted = runtime.block_on(async {
         let mut control =
@@ -223,7 +224,7 @@ fn run_register_command(descriptor: &str) -> Result<Output> {
         }
         if child.try_wait()?.is_none() {
             let _ = child.kill();
-            bail!("timed out waiting for bhwi register-wallet acknowledgement");
+            bail!("timed out waiting for bhwi descriptor register acknowledgement");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         control.exchange(b"XKEYy", false).await?;
@@ -245,7 +246,7 @@ fn run_register_command(descriptor: &str) -> Result<Output> {
     let output = child.wait_with_output()?;
     if !output.status.success() {
         bail!(
-            "bhwi register-wallet failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            "bhwi descriptor register failed with status {}\nstdout:\n{}\nstderr:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)

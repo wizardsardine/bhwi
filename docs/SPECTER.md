@@ -22,10 +22,11 @@ bhwi --device-type specter device list
 bhwi --device-type specter xpub get "m/84'/0'/0'"
 ```
 
-Use the native global selectors with other commands as needed:
+Use the native global selectors with other commands as needed; they can also
+follow the action:
 
 ```sh
-bhwi --device-type specter --fingerprint <fingerprint> sign-message \
+bhwi message sign --device-type specter --fingerprint <fingerprint> \
   --path "m/84'/0'/0'/0/0" --message "message to sign"
 ```
 

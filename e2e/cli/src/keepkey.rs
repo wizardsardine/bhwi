@@ -500,7 +500,7 @@ fn keepkey_psbt_signature_is_cryptographically_valid() -> Result<()> {
         .path()
         .to_str()
         .context("temporary PSBT path is not UTF-8")?;
-    let output = run_approved(&cli(), ["sign-psbt", "--psbt", path])?;
+    let output = run_approved(&cli(), ["psbt", "sign", "--psbt", path])?;
     let signed = Psbt::from_str(output.trim()).context("parse signed KeepKey PSBT")?;
     verify_psbt_signature(&original, &signed, &key)
 }
@@ -511,7 +511,8 @@ fn keepkey_message_signature_recovers_the_derived_key() -> Result<()> {
     let output = run_approved(
         &cli(),
         [
-            "sign-message",
+            "message",
+            "sign",
             "--message",
             message,
             "--path",
@@ -609,7 +610,8 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
     assert_failure(
         &cli,
         [
-            "sign-psbt",
+            "psbt",
+            "sign",
             "--psbt",
             file.path()
                 .to_str()
@@ -644,7 +646,8 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
         assert_failure(
             &cli,
             [
-                "register-wallet",
+                "descriptor",
+                "register",
                 "--name",
                 "keepkey-unsupported",
                 "--descriptor",

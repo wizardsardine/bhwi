@@ -29,27 +29,27 @@ use clap::{Parser, Subcommand, ValueEnum};
 use miniscript::descriptor::{DescriptorType, WalletPolicy};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = "Bitcoin hardware wallet commands", long_about = None)]
 struct Args {
     #[command(subcommand)]
     command: Commands,
-    /// default will be the first connected device with the master fingerprint matching.
-    #[arg(long, alias = "fg", value_parser = clap::value_parser!(bitcoin::bip32::Fingerprint))]
+    /// Select a device by master fingerprint (default: first available device)
+    #[arg(long, alias = "fg", global = true, value_parser = clap::value_parser!(bitcoin::bip32::Fingerprint))]
     fingerprint: Option<Fingerprint>,
     /// select a device implementation by type
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, global = true)]
     device_type: Option<DeviceType>,
     /// select a device by transport path
-    #[arg(long)]
+    #[arg(long, global = true)]
     device_path: Option<String>,
-    /// default will be the Bitcoin mainnet network.
-    #[arg(long, short, value_parser = clap::value_parser!(bitcoin::Network), default_value_t = bitcoin::Network::Bitcoin)]
+    /// Bitcoin network
+    #[arg(long, short, global = true, value_parser = clap::value_parser!(bitcoin::Network), default_value_t = bitcoin::Network::Bitcoin)]
     network: Network,
-    /// output formatting
-    #[arg(long, short)]
+    /// Output format where supported (default: plain)
+    #[arg(long, short, global = true)]
     format: Option<OutputFormat>,
     /// passphrase for devices that take one from the host
-    #[arg(long, short)]
+    #[arg(long, short, global = true)]
     passphrase: Option<String>,
 }
 
@@ -74,25 +74,30 @@ impl From<&Args> for DeviceSelector {
 
 #[derive(Debug, Clone, Subcommand)]
 enum Commands {
+    /// Get and display device addresses
     #[command(subcommand)]
     Address(AddressCommands),
+    /// Get descriptors and register wallet policies
     #[command(subcommand)]
     Descriptor(DescriptorCommands),
+    /// List and manage hardware wallets
     #[command(subcommand)]
     Device(DeviceCommands),
+    /// Get extended public keys
     #[command(subcommand)]
     Xpub(XpubCommands),
-    /// Register a wallet policy on the device
-    RegisterWallet {
-        /// Name of the wallet
-        #[arg(long)]
-        name: String,
-        /// Miniscript wallet policy descriptor
-        #[arg(long)]
-        descriptor: String,
-    },
+    /// Work with partially signed Bitcoin transactions
+    #[command(subcommand)]
+    Psbt(PsbtCommands),
+    /// Work with Bitcoin signed messages
+    #[command(subcommand)]
+    Message(MessageCommands),
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum PsbtCommands {
     /// Sign a PSBT with the selected device
-    SignPsbt {
+    Sign {
         /// PSBT file in base64 text format
         #[arg(long)]
         psbt: PathBuf,
@@ -105,19 +110,23 @@ enum Commands {
         /// HMAC from wallet registration (hex-encoded 64 chars)
         #[arg(long)]
         hmac: Option<String>,
-        /// Output file. Defaults to stdout.
+        /// Output file for the signed base64 PSBT (default: stdout; --format does not change PSBT output)
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum MessageCommands {
     /// Sign a message with the selected device
-    SignMessage {
+    Sign {
         /// Message to sign
         #[arg(long)]
         message: String,
         /// BIP32 derivation path (e.g. m/44'/0'/0'/0/0)
         #[arg(long, value_parser = clap::value_parser!(DerivationPath))]
         path: DerivationPath,
-        /// Output file. Defaults to stdout.
+        /// Output file for the signature in the selected format (default: stdout)
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
@@ -228,6 +237,7 @@ impl From<KeypoolAddressFormat> for DescriptorType {
 
 #[derive(Debug, Clone, Subcommand)]
 enum XpubCommands {
+    /// Get an extended public key at a derivation path
     Get {
         #[arg(value_parser = clap::value_parser!(bitcoin::bip32::DerivationPath))]
         path: DerivationPath,
@@ -259,6 +269,15 @@ enum DescriptorCommands {
         /// Use the internal/change branch
         #[arg(long, default_value_t = false)]
         internal: bool,
+    },
+    /// Register a named wallet policy with the selected device
+    Register {
+        /// Name of the wallet
+        #[arg(long)]
+        name: String,
+        /// Miniscript wallet policy descriptor
+        #[arg(long)]
+        descriptor: String,
     },
 }
 
@@ -561,7 +580,7 @@ async fn main() -> Result<()> {
                 println!("{}", d.device().get_extended_pubkey(path, false).await?);
             }
         }
-        Commands::RegisterWallet { name, descriptor } => {
+        Commands::Descriptor(DescriptorCommands::Register { name, descriptor }) => {
             if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
                 let registration = d.device().register_wallet(&name, &descriptor).await?;
                 match format {
@@ -588,13 +607,13 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::SignPsbt {
+        Commands::Psbt(PsbtCommands::Sign {
             psbt,
             name,
             descriptor,
             hmac,
             output,
-        } => {
+        }) => {
             let psbt_text = std::fs::read_to_string(psbt)?;
             let psbt = Psbt::from_str(psbt_text.trim())?;
             let hmac = hmac.as_deref().map(parse_hmac).transpose()?;
@@ -609,11 +628,11 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::SignMessage {
+        Commands::Message(MessageCommands::Sign {
             message,
             path,
             output,
-        } => {
+        }) => {
             if let Some(mut d) = dev_man.get_device_with_fingerprint().await? {
                 let (header, signature) = d.device().sign_message(message.as_bytes(), path).await?;
                 let signature = message_signature_base64(header, &signature);
@@ -693,19 +712,20 @@ mod tests {
         let descriptor = "wpkh([f5acc2fd/84'/1'/0']tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/<0;1>/*)";
         let args = Args::parse_from([
             "bhwi",
-            "register-wallet",
+            "descriptor",
+            "register",
             "--name",
             "clitestwallet",
             "--descriptor",
             descriptor,
         ]);
 
-        let Commands::RegisterWallet {
+        let Commands::Descriptor(DescriptorCommands::Register {
             name,
             descriptor: parsed,
-        } = args.command
+        }) = args.command
         else {
-            panic!("expected register-wallet command");
+            panic!("expected descriptor register command");
         };
         assert_eq!(name, "clitestwallet");
         assert_eq!(parsed, descriptor);
@@ -853,35 +873,167 @@ mod tests {
 
     #[test]
     fn parses_representative_global_and_signing_args() {
-        let args = Args::parse_from([
-            "bhwi",
+        let shared = [
             "--network",
             "testnet",
             "--fingerprint",
             "f5acc2fd",
+            "--device-type",
+            "ledger",
+            "--device-path",
+            "tcp:localhost:9999",
             "--format",
             "json",
-            "sign-message",
-            "--message",
-            "hello",
-            "--path",
-            "m/44'/1'/0'/0",
-        ]);
+            "--passphrase",
+            "secret",
+        ];
+        for argv in [
+            [
+                vec!["bhwi"],
+                shared.to_vec(),
+                vec![
+                    "message",
+                    "sign",
+                    "--message",
+                    "hello",
+                    "--path",
+                    "m/44'/1'/0'/0",
+                ],
+            ],
+            [
+                vec!["bhwi", "message"],
+                shared.to_vec(),
+                vec!["sign", "--message", "hello", "--path", "m/44'/1'/0'/0"],
+            ],
+            [
+                vec![
+                    "bhwi",
+                    "message",
+                    "sign",
+                    "--message",
+                    "hello",
+                    "--path",
+                    "m/44'/1'/0'/0",
+                ],
+                shared.to_vec(),
+                vec![],
+            ],
+        ] {
+            let args = Args::try_parse_from(argv.concat()).expect("shared options parse");
+            assert_eq!(args.network, Network::Testnet);
+            assert_eq!(
+                args.fingerprint.as_ref().expect("fingerprint").to_string(),
+                "f5acc2fd"
+            );
+            assert_eq!(args.device_type, Some(DeviceType::Ledger));
+            assert_eq!(args.device_path.as_deref(), Some("tcp:localhost:9999"));
+            assert!(matches!(args.format, Some(OutputFormat::Json)));
+            let selector = args.device_selector();
+            assert_eq!(selector.network, Network::Testnet);
+            assert_eq!(selector.fingerprint.as_ref(), args.fingerprint.as_ref());
+            assert_eq!(selector.device_type, Some(DeviceType::Ledger));
+            assert_eq!(selector.device_path.as_deref(), Some("tcp:localhost:9999"));
+            assert_eq!(
+                selector.passphrase.as_ref().map(|p| p.as_str()),
+                Some("secret")
+            );
+            assert!(matches!(
+                args.command,
+                Commands::Message(MessageCommands::Sign {
+                    message,
+                    path,
+                    output: None,
+                }) if message == "hello" && path.to_string() == "44'/1'/0'/0"
+            ));
+        }
+    }
 
-        assert_eq!(args.network, Network::Testnet);
-        assert_eq!(
-            args.fingerprint.expect("fingerprint").to_string().as_str(),
-            "f5acc2fd"
-        );
-        assert!(matches!(args.format, Some(OutputFormat::Json)));
+    #[test]
+    fn parses_psbt_sign_policy_and_output() {
+        let descriptor = "wpkh([f5acc2fd/84'/1'/0']tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/<0;1>/*)";
+        let hmac = "ab".repeat(32);
+        let args = Args::try_parse_from([
+            "bhwi",
+            "psbt",
+            "sign",
+            "--psbt",
+            "input.psbt",
+            "--wallet-name",
+            "wallet",
+            "--descriptor",
+            descriptor,
+            "--hmac",
+            &hmac,
+            "-o",
+            "signed.psbt",
+        ])
+        .expect("parse PSBT policy");
         assert!(matches!(
             args.command,
-            Commands::SignMessage {
-                message,
-                path,
-                output: None,
-            } if message == "hello" && path.to_string() == "44'/1'/0'/0"
+            Commands::Psbt(PsbtCommands::Sign { psbt, name, descriptor: Some(policy), hmac: Some(parsed_hmac), output: Some(output) })
+                if psbt.as_os_str() == "input.psbt"
+                    && name.as_deref() == Some("wallet")
+                    && policy == WalletPolicy::from_str(descriptor).expect("valid wallet policy")
+                    && parsed_hmac == hmac
+                    && output.as_os_str() == "signed.psbt"
         ));
+    }
+
+    #[test]
+    fn rejects_missing_leaf_inputs_and_unimplemented_commands() {
+        for argv in [
+            vec!["bhwi", "descriptor", "register"],
+            vec!["bhwi", "descriptor", "register", "--name", "wallet"],
+            vec![
+                "bhwi",
+                "descriptor",
+                "register",
+                "--descriptor",
+                "wpkh(key)",
+            ],
+            vec!["bhwi", "psbt", "sign"],
+            vec!["bhwi", "message", "sign"],
+            vec!["bhwi", "message", "sign", "--message", "hello"],
+            vec!["bhwi", "message", "sign", "--path", "m/44'/1'/0'/0"],
+        ] {
+            assert_eq!(
+                Args::try_parse_from(argv).unwrap_err().kind(),
+                ErrorKind::MissingRequiredArgument
+            );
+        }
+        for argv in [
+            ["bhwi", "descriptor"],
+            ["bhwi", "psbt"],
+            ["bhwi", "message"],
+        ] {
+            assert!(Args::try_parse_from(argv).is_err());
+        }
+        assert!(
+            Args::try_parse_from([
+                "bhwi",
+                "message",
+                "sign",
+                "--message",
+                "hello",
+                "--path",
+                "not/a/path",
+            ])
+            .is_err()
+        );
+        for name in ["register-wallet", "sign-psbt", "sign-message"] {
+            assert_eq!(
+                Args::try_parse_from(["bhwi", name, "--help"])
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidSubcommand
+            );
+        }
+        for argv in [["bhwi", "message", "verify"], ["bhwi", "psbt", "decode"]] {
+            assert_eq!(
+                Args::try_parse_from(argv).unwrap_err().kind(),
+                ErrorKind::InvalidSubcommand
+            );
+        }
     }
 
     #[test]

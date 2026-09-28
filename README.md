@@ -84,18 +84,37 @@ for the Specter-DIY setup and limits.
 cargo build -p bhwi-cli
 ```
 
-| command           | purpose                                              |
-| ----------------- | ---------------------------------------------------- |
-| `device`          | list devices, firmware/app info, device management   |
-| `xpub`            | get an extended public key at a derivation path      |
-| `descriptor`      | descriptor / pubkey-descriptor operations            |
-| `address`         | display, check and get addresses                     |
-| `register-wallet` | register a wallet policy on the device               |
-| `sign-psbt`       | sign a PSBT                                           |
-| `sign-message`    | sign a message                                       |
+| command      | subcommand          | purpose                                                  |
+| ------------ | ------------------- | -------------------------------------------------------- |
+| `address`    | `get`               | get an address from the device                           |
+| `descriptor` | `pubkeys`           | get pubkey descriptors from the device                   |
+| `descriptor` | `keypool`           | get a ranged keypool descriptor from the selected device |
+| `descriptor` | `register`          | register a named wallet policy with the selected device  |
+| `device`     | `list`              | list all available devices                               |
+| `device`     | `backup`            | start a backup on the selected device                    |
+| `device`     | `setup`             | initialize an unseeded device                            |
+| `device`     | `wipe`              | erase wallet material from the selected device           |
+| `device`     | `restore`           | restore an unseeded device via its mnemonic flow         |
+| `device`     | `toggle-passphrase` | toggle mnemonic-passphrase use on the selected device    |
+| `device`     | `prompt-pin`        | ask the selected device to show its PIN keypad           |
+| `device`     | `send-pin`          | send the keypad positions shown on the device screen     |
+| `device`     | `install-udev-rules` | install udev rules for hardware wallet device access     |
+| `xpub`       | `get`               | get an extended public key at a derivation path          |
+| `psbt`       | `sign`              | sign a PSBT with the selected device                     |
+| `message`    | `sign`              | sign a message with the selected device                  |
 
-Output is chainable by default (no headers); use `--pretty` for tables and
-`--json` for structured output suitable for `jq`.
+Shared `--fingerprint`, `--device-type`, `--device-path`, `--network`,
+`--format`, and `--passphrase` options work before a command group, between
+the group and action, or after the action. For example:
+
+```sh
+bhwi message sign --network testnet --fingerprint f5acc2fd \
+  --message hello --path "m/44'/1'/0'/0"
+```
+
+Output is chainable by default (no headers). Use `--format pretty` or
+`--format json` where supported; PSBT, address, and xpub output remains plain
+regardless of format.
 
 ## HWI parity
 

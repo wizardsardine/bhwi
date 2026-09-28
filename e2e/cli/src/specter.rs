@@ -208,7 +208,8 @@ fn registers_wallet_and_displays_descriptor_address(gui: &mut GuiController) -> 
         "CLI wallet import",
         cli.clone(),
         &[
-            "register-wallet",
+            "descriptor",
+            "register",
             "--name",
             &name,
             "--descriptor",
@@ -242,7 +243,8 @@ fn sign_message_recovers_the_expected_key(gui: &mut GuiController) -> Result<()>
         "CLI message signing",
         cli,
         &[
-            "sign-message",
+            "message",
+            "sign",
             "--message",
             message,
             "--path",
