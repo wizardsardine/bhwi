@@ -94,7 +94,12 @@ impl GuiController {
                 self.codec.push(&bytes[..received])?;
                 self.codec.next()
             }
-            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
+                ) =>
+            {
                 Ok(None)
             }
             Err(error) => Err(error).context(format!("{scenario}: read Specter GUI controller")),
