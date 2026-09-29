@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod approve;
 #[cfg(test)]
+mod bitbox;
+#[cfg(test)]
 mod coldcard;
 #[cfg(test)]
 mod jade;
