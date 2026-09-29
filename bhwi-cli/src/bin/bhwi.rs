@@ -490,7 +490,6 @@ async fn run() -> Result<()> {
                     other => anyhow::bail!("device setup is not supported for {other}"),
                 };
                 let success = device
-                    .device()
                     .setup_device(
                         SetupOptions {
                             label,
@@ -515,7 +514,7 @@ async fn run() -> Result<()> {
                 ) {
                     anyhow::bail!("device wipe is not supported for {}", device.device_type());
                 }
-                if !device.device().wipe_device().await? {
+                if !device.wipe_device().await? {
                     anyhow::bail!("device wipe was not completed");
                 }
                 if let Some(OutputFormat::Json) = format {
@@ -537,7 +536,6 @@ async fn run() -> Result<()> {
                     }
                 };
                 if !device
-                    .device()
                     .restore_device(RestoreOptions { label, word_count }, Some(context))
                     .await?
                 {
@@ -561,7 +559,7 @@ async fn run() -> Result<()> {
                         device.device_type()
                     );
                 }
-                if !device.device().toggle_passphrase().await? {
+                if !device.toggle_passphrase().await? {
                     anyhow::bail!("passphrase setting was not changed");
                 }
                 if let Some(OutputFormat::Json) = format {

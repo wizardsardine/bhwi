@@ -1434,7 +1434,6 @@ async fn setup_device(
         }
     };
     match device
-        .device()
         .setup_device(
             SetupOptions {
                 label,
@@ -1473,7 +1472,7 @@ async fn wipe_device(selector: HwiSelector) -> HwiResponse {
         ));
     }
 
-    match device.device().wipe_device().await {
+    match device.wipe_device().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
         Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
@@ -1570,7 +1569,6 @@ async fn restore_device(
         }
     };
     match device
-        .device()
         .restore_device(RestoreOptions { label, word_count }, context)
         .await
     {
@@ -1613,7 +1611,7 @@ async fn toggle_passphrase_device(selector: HwiSelector) -> HwiResponse {
         ));
     }
 
-    match device.device().toggle_passphrase().await {
+    match device.toggle_passphrase().await {
         Ok(success) => {
             if success && needs_pin_sent {
                 eprintln!("Confirm the action by entering your PIN");
