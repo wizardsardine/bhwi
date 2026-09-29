@@ -330,7 +330,6 @@ dependencies = [
  "futures",
  "hex",
  "miniscript",
- "rand_core 0.6.4",
  "rpassword",
  "serde",
  "serde_json",

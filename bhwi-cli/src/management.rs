@@ -9,8 +9,9 @@ use anyhow::Result;
 use bhwi::bitbox::{SetupEntropy, SetupMode};
 use bhwi::common::DeviceContext;
 #[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
+use bhwi_async::management::host_entropy;
+#[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 use chrono::Local;
-use rand_core::{OsRng, RngCore};
 
 /// Creates Trezor setup context with 32 bytes of OS-generated entropy.
 ///
@@ -18,10 +19,8 @@ use rand_core::{OsRng, RngCore};
 ///
 /// Panics if the operating system cannot supply random entropy.
 #[cfg(feature = "trezor")]
-pub fn trezor_setup_context() -> DeviceContext {
-    let mut host_entropy = [0; 32];
-    OsRng.fill_bytes(&mut host_entropy);
-    bhwi_async::management::trezor_setup_context(host_entropy)
+pub fn trezor_setup_context() -> Result<DeviceContext> {
+    Ok(bhwi_async::management::trezor_setup_context(host_entropy()?))
 }
 
 /// Creates Trezor PIN context from nonempty ASCII-digit keypad positions.
@@ -55,10 +54,10 @@ pub fn trezor_restore_context() -> Result<DeviceContext> {
 ///
 /// Panics if the operating system cannot supply random entropy.
 #[cfg(feature = "keepkey")]
-pub fn keepkey_setup_context() -> DeviceContext {
-    let mut host_entropy = [0; 32];
-    OsRng.fill_bytes(&mut host_entropy);
-    bhwi_async::management::keepkey_setup_context(host_entropy)
+pub fn keepkey_setup_context() -> Result<DeviceContext> {
+    Ok(bhwi_async::management::keepkey_setup_context(
+        host_entropy()?
+    ))
 }
 
 /// Creates KeepKey PIN context from nonempty ASCII-digit keypad positions.
@@ -109,10 +108,8 @@ pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     let mode = if is_emulated {
         SetupMode::RestoreFromMnemonic
     } else {
-        let mut entropy = [0; 32];
-        OsRng.fill_bytes(&mut entropy);
         SetupMode::NewWallet {
-            entropy: SetupEntropy::new(entropy),
+            entropy: SetupEntropy::new(host_entropy()?),
         }
     };
     Ok(bhwi_async::management::bitbox_setup_context(
@@ -198,7 +195,7 @@ mod tests {
     #[cfg(feature = "keepkey")]
     fn keepkey_contexts_use_keepkey_management_variants() {
         assert!(matches!(
-            keepkey_setup_context(),
+            keepkey_setup_context().unwrap(),
             DeviceContext::KeepKeyManagement(bhwi::keepkey::ManagementContext::Setup { .. })
         ));
         assert!(matches!(
