@@ -292,6 +292,7 @@ dependencies = [
  "bhwi",
  "byteorder",
  "futures",
+ "rand_core 0.6.4",
  "serde_cbor",
  "thiserror 1.0.69",
 ]
