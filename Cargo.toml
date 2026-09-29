@@ -21,6 +21,7 @@ clap = { version = "4.4.7", features = ["derive"] }
 bhwi = { path = "./bhwi", version = "0.1", default-features = false }
 bhwi-async = { path = "./bhwi-async", version = "0.1", default-features = false }
 bhwi-async-transport = { path = "./bhwi-async-transport", version = "0.1", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures = "0.3"
 hex = "0.4.3"
 log = "0.4"
