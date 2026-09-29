@@ -9,6 +9,10 @@ readme = "../README.md"
 keywords = ["bitcoin", "miniscript", "hardware-wallet", "ipc"]
 description = "Cap'n Proto server exposing bhwi to other processes"
 
+[[bin]]
+name = "bhwi-ipc"
+path = "src/bin/bhwi-ipc.rs"
+
 [features]
 default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "specter", "trezor"]
 bitbox = ["bhwi-async-transport/bitbox", "dep:chrono"]
@@ -20,6 +24,7 @@ specter = ["bhwi-async-transport/specter"]
 trezor = ["bhwi-async-transport/trezor", "dep:async-trait", "dep:chrono"]
 
 [dependencies]
+anyhow.workspace = true
 async-trait = { workspace = true, optional = true }
 bhwi-async = { workspace = true, default-features = false }
 bhwi-async-transport = { workspace = true, default-features = false }
@@ -27,9 +32,11 @@ bitcoin = { workspace = true, features = ["base64"] }
 capnp.workspace = true
 capnp-rpc.workspace = true
 chrono = { workspace = true, optional = true }
+clap.workspace = true
 futures.workspace = true
 miniscript.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "io-util", "sync", "time"] }
+tokio-util = { workspace = true, features = ["compat"] }
 
 [build-dependencies]
 capnpc.workspace = true
