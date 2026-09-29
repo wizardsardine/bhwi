@@ -392,6 +392,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bhwi-e2e-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bhwi",
+ "bhwi-ipc",
+ "bitcoin",
+ "capnp",
+ "capnp-rpc",
+ "futures",
+ "miniscript",
+ "prost",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "bhwi-e2e-jade"
 version = "0.1.0"
 dependencies = [
