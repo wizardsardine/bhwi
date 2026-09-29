@@ -24,6 +24,7 @@ bhwi = { path = "./bhwi", version = "0.1", default-features = false }
 bhwi-async = { path = "./bhwi-async", version = "0.1", default-features = false }
 bhwi-async-transport = { path = "./bhwi-async-transport", version = "0.1", default-features = false }
 capnp = "0.27.2"
+capnp-rpc = "0.27"
 capnpc = "0.27"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures = "0.3"
