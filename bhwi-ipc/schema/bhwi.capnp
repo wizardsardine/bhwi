@@ -83,6 +83,9 @@ struct Result(Ok) {
     ok @0 :Ok;
     error @1 :Error;
   }
+  warnings @2 :List(Text);
+  # Harmless notes on an `ok` result, for the client to show or drop. Empty on
+  # an `error`.
 }
 
 struct Error {

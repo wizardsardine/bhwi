@@ -41,6 +41,10 @@ Every method returns `Result(T)`: either `ok` or `error { code, message }`. A
 failure the client can act on is always an `error` arm. An RPC exception means a
 lost connection, an unreadable request or a bug in the server.
 
+An `ok` result may carry `warnings`: plain messages about something harmless,
+for the client to show or drop. Nothing that changes which wallet or network
+the client gets is a warning; that is an `error`.
+
 Codes up to `other` mirror `bhwi::common::ErrorKind` one to one, and its
 documentation describes each. The server adds two of its own and gives a few
 shared codes a server-side meaning:
@@ -72,7 +76,12 @@ reach emulators.
 
 `networkMismatch` reports a device whose own networks do not include the
 selector's. An empty `reported` list means the device claims no network, which
-is never a mismatch.
+is never a mismatch. Coldcard, BitBox02 and Specter-DIY claim none, and a Trezor
+reports the selector's network back.
+
+On a mismatched device, extended pubkeys, descriptors, keypools, wallet
+registration, PSBT signing and addresses not shown on the device answer
+`wrongNetwork`. An address shown on the device succeeds with a warning.
 
 The passphrase is chosen per selector: `none`, a `value`, or `askPrompter`, which
 calls `Prompter.requestPassphrase` before enumerating. A BitBox02 takes its

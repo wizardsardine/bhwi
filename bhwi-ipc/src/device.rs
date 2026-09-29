@@ -4,7 +4,7 @@ use std::str::FromStr;
 use bhwi_async::descriptors::{
     GetKeypoolOptions, PubkeyDescriptors, get_keypool_descriptor, get_pubkey_descriptors,
 };
-use bhwi_async::device::{DeviceType, supports_device_management};
+use bhwi_async::device::{DeviceType, networks_string, supports_device_management};
 use bhwi_async::display_address::display_address_context;
 use bhwi_async::display_address::display_address_from_descriptor;
 #[cfg(feature = "bitbox")]
@@ -15,6 +15,7 @@ use bhwi_async::signing::message_signature;
 use bhwi_async::{
     DeviceBackup, DeviceContext, DisplayAddress, RestoreOptions, SetupOptions, WalletRegistration,
 };
+use bitcoin::Network;
 use bitcoin::base64::prelude::{BASE64_STANDARD, Engine as _};
 use bitcoin::psbt::Psbt;
 use miniscript::descriptor::WalletPolicy;
@@ -90,6 +91,7 @@ impl device::Server for DeviceServer {
             let path = convert::derivation_path(request.get_path()?.to_str()?)?;
             let display = request.get_display();
             let mut device = self.session.lock_open().await?;
+            refuse_wrong_network(&mut device, self.session.network).await?;
             device
                 .device()
                 .get_extended_pubkey(path, display)
@@ -112,6 +114,7 @@ impl device::Server for DeviceServer {
             self.session.ensure_open()?;
             let network = self.session.network;
             let mut device = self.session.lock_open().await?;
+            refuse_wrong_network(&mut device, network).await?;
             let fingerprint = device
                 .fingerprint()
                 .await
@@ -159,6 +162,7 @@ impl device::Server for DeviceServer {
                 network: self.session.network,
             };
             let mut device = self.session.lock_open().await?;
+            refuse_wrong_network(&mut device, self.session.network).await?;
             let fingerprint = device
                 .fingerprint()
                 .await
@@ -250,17 +254,32 @@ impl device::Server for DeviceServer {
                     (address, None)
                 }
             };
-            device
+            let shown = match &address {
+                DisplayAddress::ByPath { display, .. }
+                | DisplayAddress::ByDescriptor { display, .. } => *display,
+                DisplayAddress::ByMultisig(_) => true,
+            };
+            let warning = network_mismatch(&mut device, self.session.network).await?;
+            if let (Some(message), false) = (&warning, shown) {
+                return Err(Failure::new(ErrorCode::WrongNetwork, message));
+            }
+            let address = device
                 .device()
                 .display_address(address, context)
                 .await
-                .map_err(|err| error::device(&err))
+                .map_err(|err| error::device(&err))?;
+            Ok((address, warning))
         }
         .await;
         error::reply(
             results.get().init_result(),
             outcome,
-            |mut builder, address| builder.set_ok(address.as_str()),
+            |mut builder, (address, warning)| {
+                if let Some(warning) = warning {
+                    builder.reborrow().init_warnings(1).set(0, warning.as_str());
+                }
+                builder.set_ok(address.as_str())
+            },
         )
     }
 
@@ -275,6 +294,7 @@ impl device::Server for DeviceServer {
             let name = request.get_name()?.to_string()?;
             let policy = request.get_policy()?.to_string()?;
             let mut device = self.session.lock_open().await?;
+            refuse_wrong_network(&mut device, self.session.network).await?;
             device
                 .device()
                 .register_wallet(&name, &policy)
@@ -322,6 +342,8 @@ impl device::Server for DeviceServer {
                     registered.get_hmac()?,
                 )?),
             };
+            refuse_wrong_network(&mut *self.session.lock_open().await?, self.session.network)
+                .await?;
             Ok::<_, Failure>(SigningServer::spawn(self.session.clone(), psbt, context))
         }
         .await;
@@ -519,6 +541,35 @@ fn manageable(device_type: DeviceType, command: &str) -> Result<(), Failure> {
         ErrorCode::Unsupported,
         format!("device {command} is not supported for {device_type}"),
     ))
+}
+
+/// A device that reports no networks makes no claim, so Coldcard, BitBox02 and
+/// Specter-DIY never mismatch, and Trezor echoes back the requested network.
+async fn network_mismatch(
+    device: &mut bhwi_async::device::Device,
+    network: Network,
+) -> Result<Option<String>, Failure> {
+    let mismatch = device
+        .network_mismatch(network)
+        .await
+        .map_err(|err| error::device(&err))?;
+    Ok(mismatch.map(|mismatch| {
+        format!(
+            "the device is on {}, not {}",
+            networks_string(&mismatch.reported),
+            mismatch.expected
+        )
+    }))
+}
+
+async fn refuse_wrong_network(
+    device: &mut bhwi_async::device::Device,
+    network: Network,
+) -> Result<(), Failure> {
+    match network_mismatch(device, network).await? {
+        Some(message) => Err(Failure::new(ErrorCode::WrongNetwork, message)),
+        None => Ok(()),
+    }
 }
 
 fn display_address_error(err: bhwi_async::display_address::DisplayAddressError) -> Failure {
