@@ -463,8 +463,12 @@ dependencies = [
 name = "bhwi-ipc"
 version = "0.1.0"
 dependencies = [
+ "bhwi-async",
+ "bhwi-async-transport",
+ "bitcoin",
  "capnp",
  "capnpc",
+ "miniscript",
 ]
 
 [[package]]

@@ -8,3 +8,8 @@ pub mod bhwi_capnp {
     #![allow(clippy::all, missing_docs)]
     include!(concat!(env!("OUT_DIR"), "/bhwi_capnp.rs"));
 }
+
+/// Conversions between wire types and bhwi types.
+pub mod convert;
+/// Wire error codes and the failures that carry them.
+pub mod error;
