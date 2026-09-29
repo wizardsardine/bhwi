@@ -284,10 +284,32 @@ impl<S: DeviceSource> DeviceManager<S> {
     pub async fn select(
         &self,
     ) -> Result<(Option<Device>, Vec<SkippedDevice>), SelectError<S::Error>> {
+        let (device, skipped) = self.select_reserved(|_| Some(())).await?;
+        Ok((device.map(|(device, ())| device), skipped))
+    }
+
+    /// Offers each candidate to `reserve` before opening it, so a device someone
+    /// else holds is never contacted.
+    pub async fn select_reserved<R>(
+        &self,
+        reserve: impl Fn(&str) -> Option<R>,
+    ) -> Result<(Option<(Device, R)>, Vec<SkippedDevice>), SelectError<S::Error>> {
+        let (device, skipped) = self.select_once(&reserve).await?;
+        Ok((device, skipped))
+    }
+
+    async fn select_once<R>(
+        &self,
+        reserve: &impl Fn(&str) -> Option<R>,
+    ) -> Result<(Option<(Device, R)>, Vec<SkippedDevice>), SelectError<S::Error>> {
         let candidates = self.list().await.map_err(SelectError::Source)?;
         let mut skipped = Vec::new();
         let mut target_dev = None;
         for candidate in candidates {
+            let Some(reservation) = reserve(&candidate.path) else {
+                skipped.push(skipped_candidate(&candidate, &device_in_use()));
+                continue;
+            };
             let mut d = match self.open(&candidate).await {
                 Ok(device) => device,
                 Err(err) => {
@@ -308,12 +330,12 @@ impl<S: DeviceSource> DeviceManager<S> {
             }
 
             let Some(fingerprint) = self.selector.fingerprint else {
-                target_dev = Some(d);
+                target_dev = Some((d, reservation));
                 break;
             };
             match d.fingerprint().await {
                 Ok(found) if found == fingerprint => {
-                    target_dev = Some(d);
+                    target_dev = Some((d, reservation));
                     break;
                 }
                 Ok(_) => {}
@@ -325,14 +347,14 @@ impl<S: DeviceSource> DeviceManager<S> {
                 }
             }
         }
-        let Some(dev) = target_dev else {
+        let Some((dev, reservation)) = target_dev else {
             return Ok((None, skipped));
         };
         #[cfg(all(feature = "bitbox", any(feature = "trezor", feature = "keepkey")))]
         if self.selector.passphrase.is_some() && dev.device_type() == DeviceType::BitBox02 {
             return Err(SelectError::HostPassphraseRejected);
         }
-        Ok((Some(dev), skipped))
+        Ok((Some((dev, reservation)), skipped))
     }
 
     /// Opens and probes candidates, caching information and initialized-wallet fingerprints.
@@ -342,9 +364,24 @@ impl<S: DeviceSource> DeviceManager<S> {
     /// device-side cancellations mapped to authentication refusals, are collected
     /// as skipped devices.
     pub async fn scan(&self) -> Result<DeviceScan, SelectError<S::Error>> {
+        Ok(self.scan_reserved(|_| Some(())).await?.0)
+    }
+
+    /// The reservations come back with the scan because its devices are open
+    /// and must stay claimed for as long as the caller holds them.
+    pub async fn scan_reserved<R>(
+        &self,
+        reserve: impl Fn(&str) -> Option<R>,
+    ) -> Result<(DeviceScan, Vec<R>), SelectError<S::Error>> {
         let candidates = self.list().await.map_err(SelectError::Source)?;
         let mut scan = DeviceScan::default();
+        let mut reservations = Vec::new();
         for candidate in candidates {
+            let Some(reservation) = reserve(&candidate.path) else {
+                scan.skipped
+                    .push(skipped_candidate(&candidate, &device_in_use()));
+                continue;
+            };
             let mut device = match self.open(&candidate).await {
                 Ok(device) => device,
                 Err(err) => {
@@ -353,12 +390,15 @@ impl<S: DeviceSource> DeviceManager<S> {
                 }
             };
             match probe(&mut device, self.selector.network).await {
-                Ok(()) => scan.devices.push(device),
+                Ok(()) => {
+                    scan.devices.push(device);
+                    reservations.push(reservation);
+                }
                 Err(err) if err.kind() == Some(ErrorKind::UserCancelled) => return Err(err.into()),
                 Err(err) => scan.skipped.push(skipped_candidate(&candidate, &err)),
             }
         }
-        Ok(scan)
+        Ok((scan, reservations))
     }
 
     /// Selects a wallet, returning an error if all candidates were skipped.
@@ -422,6 +462,10 @@ fn skipped_candidate(
         &candidate.path,
         error,
     )
+}
+
+fn device_in_use() -> common::Error {
+    common::Error::new(ErrorKind::Busy, "the device is held by another caller")
 }
 
 fn unopened_candidate<E>(candidate: &DeviceCandidate, error: &E) -> SkippedDevice
