@@ -1,12 +1,13 @@
 use anyhow::Result;
-use bhwi_ipc::bhwi_capnp::{DeviceType, Network};
+use bhwi_ipc::bhwi_capnp::{AddressFormat, DeviceType, ErrorCode, Network};
 
-use crate::approve::Approver;
+use crate::approve::{Approver, approving};
 use crate::support::{
     Registered, account_xpub, assert_address_matches_xpub_on, assert_descriptor_set,
     assert_info_matches_discovery, assert_keypool_on, assert_listed_emulator,
     assert_registered_wallet_on, assert_registers_wallet_on, assert_shows_address_on,
-    assert_signs_message_on, assert_signs_psbt_on, ok, open, set_selector_on, with_server,
+    assert_signs_message_on, assert_signs_psbt_on, error_code, ok, open, open_on, set_selector_on,
+    with_server,
 };
 
 const LEDGER_FINGERPRINT: &str = "f5acc2fd";
@@ -67,6 +68,60 @@ fn a_network_the_app_is_not_for_is_reported_as_a_mismatch() -> Result<()> {
         let reported = mismatch.get_reported()?;
         assert_eq!(reported.len(), 1);
         assert_eq!(reported.get(0)?, Network::Testnet);
+        Ok(())
+    })
+}
+
+#[test]
+fn a_network_the_app_is_not_for_refuses_an_xpub() -> Result<()> {
+    with_server(|client| async move {
+        let device = open_on(
+            &client,
+            Network::Bitcoin,
+            DeviceType::Ledger,
+            LEDGER_FINGERPRINT,
+        )
+        .await?;
+        let mut request = device.get_extended_pubkey_request();
+        request.get().set_path("m/84'/1'/0'");
+        let response = request.send().promise.await?;
+        assert_eq!(
+            error_code(response.get()?.get_result()?)?,
+            ErrorCode::WrongNetwork
+        );
+        Ok(())
+    })
+}
+
+/// Showing one address on the device is the only command a wrong network allows.
+#[test]
+fn a_network_the_app_is_not_for_shows_an_address_only_on_screen_with_a_warning() -> Result<()> {
+    with_server(|client| async move {
+        let device = open_on(
+            &client,
+            Network::Bitcoin,
+            DeviceType::Ledger,
+            LEDGER_FINGERPRINT,
+        )
+        .await?;
+        for display in [false, true] {
+            let mut request = device.display_address_request();
+            {
+                let mut target = request.get().init_target().init_path();
+                target.set_path("m/84'/1'/0'/0/0");
+                target.set_display(display);
+                target.set_address_format(AddressFormat::P2wpkh);
+            }
+            let approver = display.then_some(Approver::Speculos);
+            let response = approving(approver, || request.send().promise).await??;
+            let result = response.get()?.get_result()?;
+            if display {
+                ok(result)?;
+                assert_eq!(result.get_warnings()?.len(), 1);
+            } else {
+                assert_eq!(error_code(result)?, ErrorCode::WrongNetwork);
+            }
+        }
         Ok(())
     })
 }
