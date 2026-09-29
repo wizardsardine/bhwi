@@ -24,6 +24,8 @@ jobs:
             toolchain: stable
             components: rustfmt, clippy
             override: true
+      - name: Install Cap'n Proto
+        run: sudo apt-get update && sudo apt-get install -y capnproto
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
@@ -46,6 +48,12 @@ jobs:
           cargo check -p bhwi-async-transport --no-default-features --all-targets
           cargo check -p bhwi-async --no-default-features --features jade,ledger
           cargo check -p bhwi-async-transport
+          cargo check -p bhwi-ipc --no-default-features
+          for f in bitbox coldcard jade keepkey ledger specter trezor; do
+            cargo check -p bhwi-ipc --no-default-features --features "$f"
+          done
+          # The two front ends in one build.
+          cargo check -p bhwi-e2e-ipc -p bhwi-cli
 
   unit_tests:
     needs: linter
@@ -74,6 +82,9 @@ jobs:
       - name: Test on Rust ${{ matrix.toolchain }} (non Windows)
         if: matrix.os == 'macOS-latest'
         run: cargo test --verbose --color always -- --nocapture
+      - name: Install Cap'n Proto
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y capnproto
       - name: Test on Rust ${{ matrix.toolchain }} (non Windows)
         if: matrix.os == 'ubuntu-latest'
         run: |
