@@ -55,6 +55,7 @@ the Jade PIN server, or a typed host-interaction provider via its `Recipient`.
 | `bhwi-async` | `async`/`await` `HWI` trait over the interpreters, with protocol framing. |
 | `bhwi-async-transport` | Native device channels (HID/USB/serial/TCP) and discovery.     |
 | `bhwi-cli`   | `bhwi` command-line tool and the `hwi` parity binary.              |
+| `bhwi-ipc`   | Cap'n Proto RPC server for callers that do not link Rust; see [`docs/IPC.md`](docs/IPC.md). |
 | `bhwi-wasm`  | WebAssembly bindings for browser callers.                          |
 
 ## Supported devices
