@@ -11,20 +11,25 @@ description = "Cap'n Proto server exposing bhwi to other processes"
 
 [features]
 default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "specter", "trezor"]
-bitbox = ["bhwi-async-transport/bitbox"]
+bitbox = ["bhwi-async-transport/bitbox", "dep:chrono"]
 coldcard = ["bhwi-async-transport/coldcard"]
 jade = ["bhwi-async-transport/jade"]
-keepkey = ["bhwi-async-transport/keepkey"]
+keepkey = ["bhwi-async-transport/keepkey", "dep:async-trait", "dep:chrono"]
 ledger = ["bhwi-async-transport/ledger"]
 specter = ["bhwi-async-transport/specter"]
-trezor = ["bhwi-async-transport/trezor"]
+trezor = ["bhwi-async-transport/trezor", "dep:async-trait", "dep:chrono"]
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
 bhwi-async = { workspace = true, default-features = false }
 bhwi-async-transport = { workspace = true, default-features = false }
 bitcoin = { workspace = true, features = ["base64"] }
 capnp.workspace = true
+capnp-rpc.workspace = true
+chrono = { workspace = true, optional = true }
+futures.workspace = true
 miniscript.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "io-util", "sync", "time"] }
 
 [build-dependencies]
 capnpc.workspace = true
