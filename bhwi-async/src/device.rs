@@ -87,6 +87,14 @@ pub fn reports_device_info(device_type: DeviceType) -> bool {
     matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor)
 }
 
+/// These take setup, restore, wipe and passphrase toggling from the host.
+pub fn supports_device_management(device_type: DeviceType) -> bool {
+    matches!(
+        device_type,
+        DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
+    )
+}
+
 /// Filters discovery candidates and optionally selects a wallet by fingerprint.
 #[derive(Debug, Clone)]
 pub struct DeviceSelector {
@@ -1426,6 +1434,20 @@ mod tests {
         ));
         let converted = crate::HWIDeviceError::from(boxed);
         assert_eq!(converted.kind(), Some(ErrorKind::UserCancelled));
+    }
+
+    #[test]
+    fn only_seed_from_host_devices_are_manageable() {
+        for device_type in DeviceType::ALL {
+            assert_eq!(
+                supports_device_management(device_type),
+                matches!(
+                    device_type,
+                    DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
+                ),
+                "{device_type}"
+            );
+        }
     }
 
     #[test]
