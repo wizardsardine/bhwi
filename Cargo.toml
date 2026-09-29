@@ -1,8 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    "bhwi", "bhwi-async", "bhwi-wasm", "bhwi-cli", "bhwi-async-transport", "e2e/*"
+    "bhwi", "bhwi-async", "bhwi-wasm", "bhwi-cli", "bhwi-async-transport", "bhwi-ipc", "e2e/*"
 ]
+# bhwi-ipc is left out: it serves a Unix socket and its build.rs needs the capnp
+# binary, which the Windows CI job has neither of.
 default-members = ["bhwi", "bhwi-async", "bhwi-cli", "bhwi-async-transport"]
 
 [workspace.package]
@@ -21,6 +23,8 @@ clap = { version = "4.4.7", features = ["derive"] }
 bhwi = { path = "./bhwi", version = "0.1", default-features = false }
 bhwi-async = { path = "./bhwi-async", version = "0.1", default-features = false }
 bhwi-async-transport = { path = "./bhwi-async-transport", version = "0.1", default-features = false }
+capnp = "0.27.2"
+capnpc = "0.27"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures = "0.3"
 hex = "0.4.3"

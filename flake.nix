@@ -263,6 +263,8 @@
           pkgs.clang
           pkgs.corepack_22
           pkgs.nodejs_22
+          # bhwi-ipc's build.rs shells out to the capnp binary.
+          pkgs.capnproto
         ];
         emulatorInputs =
           [
