@@ -84,6 +84,15 @@ jobs:
             cat bitbox.log || true
             exit 1
           }
+      - name: Run BitBox IPC e2e
+        run: |
+          set -o pipefail
+          nix develop .#bitbox -c cargo build -p bhwi-ipc
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#bitbox -c cargo test -p bhwi-e2e-ipc bitbox -- --test-threads=1 2>&1 | tee bitbox-ipc-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox IPC e2e log" bitbox-ipc-e2e.log
+            cat bitbox-ipc-e2e.log || true
+            exit 1
+          }
       - name: Stop shared BitBox simulator before management lifecycle
         run: bash nix/scripts/stop-emulator.sh bitbox.pid tcp localhost 15423 60
       - name: Start fresh BitBox02 simulator for setup lifecycle
@@ -164,6 +173,25 @@ jobs:
           }
       - name: Stop candidate HWI restore simulator before upstream gate
         run: bash nix/scripts/stop-emulator.sh bitbox.pid tcp localhost 15423 5
+      - name: Start fresh BitBox02 simulator for IPC lifecycle
+        run: |
+          nix run .#bitbox > bitbox-ipc-lifecycle.log 2>&1 &
+          echo $! > bitbox.pid
+          bash nix/scripts/wait-for-port.sh localhost 15423 600 "$(cat bitbox.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox IPC lifecycle startup log" bitbox-ipc-lifecycle.log
+            cat bitbox-ipc-lifecycle.log || true
+            exit 1
+          }
+      - name: Run BitBox IPC pairing, setup, toggle-passphrase, and wipe lifecycle
+        run: |
+          set -o pipefail
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#bitbox -c cargo test -p bhwi-e2e-ipc bitbox::bitbox_pairs_then_sets_up_toggles_and_wipes -- --ignored --exact --test-threads=1 2>&1 | tee bitbox-ipc-management.log || {
+            bash nix/scripts/emit-gh-error-log.sh "BitBox IPC lifecycle log" bitbox-ipc-management.log
+            cat bitbox-ipc-management.log || true
+            exit 1
+          }
+      - name: Stop BitBox IPC lifecycle simulator
+        run: bash nix/scripts/stop-emulator.sh bitbox.pid tcp localhost 15423 5
       - name: Run upstream HWI BitBox02 suite
         run: timeout 45m nix run .#hwi-upstream-bitbox
       - name: Stop BitBox simulator
@@ -219,6 +247,15 @@ jobs:
           nix develop .#coldcard -c cargo test -p bhwi-e2e-coldcard -- --test-threads=1 2>&1 | tee coldcard-e2e.log || {
             bash nix/scripts/emit-gh-error-log.sh "Coldcard e2e log" coldcard-e2e.log
             cat coldcard-e2e.log || true
+            exit 1
+          }
+      - name: Run Coldcard IPC e2e
+        run: |
+          set -o pipefail
+          nix develop .#coldcard -c cargo build -p bhwi-ipc
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#coldcard -c cargo test -p bhwi-e2e-ipc coldcard -- --test-threads=1 2>&1 | tee coldcard-ipc-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Coldcard IPC e2e log" coldcard-ipc-e2e.log
+            cat coldcard-ipc-e2e.log || true
             exit 1
           }
       - name: Stop Coldcard simulator before upstream gate
@@ -305,6 +342,15 @@ jobs:
             cat ledger-cli-e2e.log || true
             exit 1
           }
+      - name: Run Ledger IPC e2e except PSBT signing
+        run: |
+          set -o pipefail
+          nix develop .#ledger -c cargo build -p bhwi-ipc
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#ledger -c cargo test -p bhwi-e2e-ipc ledger -- --skip ledger_signs_a_psbt --test-threads=1 2>&1 | tee ledger-ipc-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger IPC e2e log" ledger-ipc-e2e.log
+            cat ledger-ipc-e2e.log || true
+            exit 1
+          }
       - name: Restart Ledger Speculos before PSBT CLI e2e
         run: |
           bash nix/scripts/stop-emulator.sh ledger.pid tcp localhost 9999 60
@@ -334,6 +380,37 @@ jobs:
           BHWI_BIN="$PWD/target/debug/bhwi" nix develop .#ledger -c cargo test -p bhwi-e2e-cli ledger_sign_psbt -- --test-threads=1 2>&1 | tee ledger-cli-psbt-e2e.log || {
             bash nix/scripts/emit-gh-error-log.sh "Ledger PSBT CLI e2e log" ledger-cli-psbt-e2e.log
             cat ledger-cli-psbt-e2e.log || true
+            exit 1
+          }
+      - name: Restart Ledger Speculos before PSBT IPC e2e
+        run: |
+          bash nix/scripts/stop-emulator.sh ledger.pid tcp localhost 9999 60
+          rm -f ledger.pid
+          setsid bash -c 'echo "$$" > ledger.pid; exec nix run .#ledger' > ledger.log 2>&1 &
+          for _ in {1..100}; do
+            [[ -s ledger.pid ]] && break
+            sleep 0.1
+          done
+          test -s ledger.pid
+          tail -n +1 -F ledger.log &
+          echo $! > ledger-tail.pid
+          bash nix/scripts/wait-for-port.sh localhost 9999 1800 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          bash nix/scripts/wait-for-port.sh localhost 5000 300 "$(cat ledger.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger restart log" ledger.log
+            cat ledger.log || true
+            exit 1
+          }
+          kill "$(cat ledger-tail.pid)" || true
+      - name: Run Ledger PSBT IPC e2e
+        run: |
+          set -o pipefail
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#ledger -c cargo test -p bhwi-e2e-ipc ledger_signs_a_psbt -- --test-threads=1 2>&1 | tee ledger-ipc-psbt-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Ledger PSBT IPC e2e log" ledger-ipc-psbt-e2e.log
+            cat ledger-ipc-psbt-e2e.log || true
             exit 1
           }
       - name: Restart Ledger Speculos before Ledger e2e
@@ -476,6 +553,24 @@ jobs:
             cat jade-e2e.log || true
             exit 1
           }
+      - name: Run Jade IPC e2e
+        run: |
+          set -o pipefail
+          nix develop .#jade -c cargo build -p bhwi-ipc
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#jade -c cargo test -p bhwi-e2e-ipc jade -- --test-threads=1 2>&1 | tee jade-ipc-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Jade IPC e2e log" jade-ipc-e2e.log
+            cat jade-ipc-e2e.log || true
+            exit 1
+          }
+      # Last Jade step: the abort reboots the emulator and clears its seed.
+      - name: Run Jade IPC abort test
+        run: |
+          set -o pipefail
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#jade -c cargo test -p bhwi-e2e-ipc jade::an_aborted_signing_run_reports_the_cancellation -- --ignored --exact --test-threads=1 2>&1 | tee jade-ipc-abort.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Jade IPC abort log" jade-ipc-abort.log
+            cat jade-ipc-abort.log || true
+            exit 1
+          }
       - name: Stop Jade services before upstream gate
         run: |
           bash nix/scripts/stop-emulator.sh jade.pid tcp localhost 30121 60
@@ -552,6 +647,15 @@ jobs:
           timeout 20m nix run .#hwi-parity-trezor -- -- --test-threads=1 2>&1 | tee trezor-hwi-parity.log || {
             bash nix/scripts/emit-gh-error-log.sh "Trezor HWI parity log" trezor-hwi-parity.log
             cat trezor-hwi-parity.log || true
+            exit 1
+          }
+      - name: Run Trezor IPC e2e
+        run: |
+          set -o pipefail
+          nix develop .#trezor -c cargo build -p bhwi-ipc
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#trezor -c cargo test -p bhwi-e2e-ipc trezor -- --test-threads=1 2>&1 | tee trezor-ipc-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "Trezor IPC e2e log" trezor-ipc-e2e.log
+            cat trezor-ipc-e2e.log || true
             exit 1
           }
       - name: Stop shared Trezor emulator
@@ -717,6 +821,46 @@ jobs:
               fi
               exit 1
             }
+      - name: Restart Specter-DIY simulator for IPC e2e
+        run: |
+          bash nix/scripts/stop-emulator.sh specter.pid tcp 127.0.0.1 8789 60
+          rm -f specter.pid
+          setsid bash -c 'echo "$$" > specter.pid; exec nix run .#specter' > specter-ipc.log 2>&1 &
+          for _ in {1..100}; do
+            [[ -s specter.pid ]] && break
+            sleep 0.1
+          done
+          test -s specter.pid
+          bash nix/scripts/wait-for-port.sh 127.0.0.1 8787 600 "$(cat specter.pid)" || {
+            echo "Specter-DIY IPC simulator did not open its GUI controller; raw firmware logs are withheld."
+            exit 1
+          }
+      - name: Initialize synthetic Specter-DIY IPC fixture
+        run: |
+          nix run .#specter-init > specter-ipc-init.log 2>&1 || {
+            echo "Specter-DIY IPC initialization failed; controller output is withheld."
+            exit 1
+          }
+      - name: Wait for Specter-DIY IPC USB protocol
+        run: |
+          bash nix/scripts/wait-for-port.sh 127.0.0.1 8789 120 "$(cat specter.pid)" || {
+            echo "Specter-DIY IPC simulator did not enable its USB protocol; raw firmware logs are withheld."
+            exit 1
+          }
+      - name: Run Specter-DIY IPC e2e
+        run: |
+          nix develop .#specter -c cargo build -p bhwi-ipc
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#specter \
+            -c cargo test -p bhwi-e2e-ipc specter -- --test-threads=1 > specter-ipc-e2e.log 2>&1 || {
+              failed_tests="$(sed -nE 's/^test ([^ ]+) \.\.\. FAILED$/\1/p' specter-ipc-e2e.log | sort -u)"
+              if [[ -n "$failed_tests" ]]; then
+                echo "Specter-DIY IPC e2e failed in these Rust tests:"
+                printf '%s\n' "$failed_tests"
+              else
+                echo "Specter-DIY IPC e2e failed; no Rust test failure marker was found and output is withheld."
+              fi
+              exit 1
+            }
       - name: Stop Specter-DIY simulator
         if: always()
         run: bash nix/scripts/stop-emulator.sh specter.pid tcp 127.0.0.1 8789 60
@@ -785,6 +929,15 @@ jobs:
             cat keepkey.log || true
             exit 1
           }
+      - name: Run KeepKey IPC e2e
+        run: |
+          set -o pipefail
+          nix develop .#keepkey -c cargo build -p bhwi-ipc
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#keepkey -c cargo test -p bhwi-e2e-ipc keepkey -- --test-threads=1 2>&1 | tee keepkey-ipc-e2e.log || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey IPC e2e log" keepkey-ipc-e2e.log
+            cat keepkey-ipc-e2e.log || true
+            exit 1
+          }
       - name: Stop shared KeepKey emulator
         run: bash nix/scripts/stop-emulator.sh keepkey.pid
       - name: Start fresh KeepKey emulator for direct lifecycle
@@ -834,6 +987,30 @@ jobs:
             exit 1
           }
       - name: Stop KeepKey CLI lifecycle emulator
+        run: bash nix/scripts/stop-emulator.sh keepkey.pid
+      - name: Start fresh KeepKey emulator for IPC lifecycle
+        run: |
+          profile="$RUNNER_TEMP/keepkey-ipc-profile"
+          rm -rf "$profile"
+          mkdir -p "$profile"
+          KEEPKEY_PROFILE_DIR="$profile" nix run .#keepkey > keepkey-ipc-lifecycle-emulator.log 2>&1 &
+          echo $! > keepkey.pid
+          bash nix/scripts/wait-for-udp-emulator.sh 127.0.0.1 11044 120 "$(cat keepkey.pid)" || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey IPC lifecycle startup log" keepkey-ipc-lifecycle-emulator.log
+            cat keepkey-ipc-lifecycle-emulator.log || true
+            exit 1
+          }
+      - name: Run KeepKey IPC setup, restore, and PIN lifecycle
+        run: |
+          set -o pipefail
+          BHWI_IPC_BIN="$PWD/target/debug/bhwi-ipc" nix develop .#keepkey -c cargo test -p bhwi-e2e-ipc keepkey::keepkey_setup_restore_and_pin_lifecycle -- --ignored --exact --test-threads=1 2>&1 | tee keepkey-ipc-lifecycle.log || {
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey IPC lifecycle log" keepkey-ipc-lifecycle.log
+            cat keepkey-ipc-lifecycle.log || true
+            bash nix/scripts/emit-gh-error-log.sh "KeepKey IPC lifecycle emulator log" keepkey-ipc-lifecycle-emulator.log
+            cat keepkey-ipc-lifecycle-emulator.log || true
+            exit 1
+          }
+      - name: Stop KeepKey IPC lifecycle emulator
         run: bash nix/scripts/stop-emulator.sh keepkey.pid
       - name: Start fresh KeepKey emulator for HWI lifecycle
         run: |
