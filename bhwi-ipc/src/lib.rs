@@ -15,6 +15,9 @@ pub mod convert;
 pub mod device;
 /// Wire error codes and the failures that carry them.
 pub mod error;
+/// Unix socket binding and the accept loop.
+#[cfg(unix)]
+pub mod listener;
 /// The client's `Prompter` capability, called while a command runs.
 pub mod prompt;
 /// Which devices are held, so each has one client at a time.
