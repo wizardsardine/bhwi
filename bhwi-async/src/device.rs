@@ -8,7 +8,9 @@ use bhwi::common::{self, ErrorKind};
 #[cfg(any(feature = "trezor", feature = "keepkey"))]
 use bhwi::passphrase::HostPassphrase;
 
-use crate::{ErrorKindOf, HWIDevice, HWIDeviceError, Info};
+use crate::{
+    DeviceContext, ErrorKindOf, HWIDevice, HWIDeviceError, Info, RestoreOptions, SetupOptions,
+};
 
 /// A supported hardware-wallet family, independent of enabled backend features.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -830,6 +832,49 @@ impl Device {
     /// Returns whether discovery identified this device as an emulator.
     pub fn is_emulated(&self) -> bool {
         self.is_emulated
+    }
+
+    /// Creates a wallet on the device and clears the cached fingerprint and information.
+    pub async fn setup_device(
+        &mut self,
+        options: SetupOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, HWIDeviceError> {
+        let result = self.device.setup_device(options, context).await;
+        self.clear_state();
+        result
+    }
+
+    /// Restores a wallet on the device and clears the cached fingerprint and information.
+    pub async fn restore_device(
+        &mut self,
+        options: RestoreOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, HWIDeviceError> {
+        let result = self.device.restore_device(options, context).await;
+        self.clear_state();
+        result
+    }
+
+    /// Wipes the device and clears the cached fingerprint and information.
+    pub async fn wipe_device(&mut self) -> Result<bool, HWIDeviceError> {
+        let result = self.device.wipe_device().await;
+        self.clear_state();
+        result
+    }
+
+    /// Turns passphrase protection on or off and clears the cached fingerprint and information.
+    pub async fn toggle_passphrase(&mut self) -> Result<bool, HWIDeviceError> {
+        let result = self.device.toggle_passphrase().await;
+        self.clear_state();
+        result
+    }
+
+    /// A lifecycle command can change the seed or the device settings, even
+    /// when it fails, so what was read before it no longer holds.
+    fn clear_state(&mut self) {
+        self.fingerprint = None;
+        self.info = None;
     }
 
     /// Returns the last successfully queried fingerprint, without performing I/O.
