@@ -11,6 +11,8 @@ mod keepkey;
 #[cfg(test)]
 mod ledger;
 #[cfg(test)]
+mod specter;
+#[cfg(test)]
 mod support;
 #[cfg(test)]
 mod trezor;
