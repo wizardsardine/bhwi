@@ -10,7 +10,7 @@ keywords = ["bitcoin", "miniscript", "hardware-wallet"]
 description = "Async HWI trait over the bhwi sans-IO Bitcoin hardware wallet interpreters"
 
 [features]
-default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "specter", "trezor"]
+default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "specter", "trezor", "host-entropy"]
 bitbox = ["bhwi/bitbox"]
 coldcard = ["bhwi/coldcard"]
 jade = ["bhwi/jade", "serde_cbor"]
@@ -18,10 +18,12 @@ keepkey = ["bhwi/keepkey"]
 ledger = ["bhwi/ledger"]
 specter = ["bhwi/specter"]
 trezor = ["bhwi/trezor"]
+host-entropy = ["dep:rand_core"]
 
 [dependencies]
 async-trait.workspace = true
 bhwi.workspace = true
+rand_core = { workspace = true, features = ["getrandom"], optional = true }
 serde_cbor = { workspace = true, optional = true }
 thiserror.workspace = true
 

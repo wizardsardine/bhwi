@@ -484,9 +484,9 @@ async fn run() -> Result<()> {
                     #[cfg(feature = "bitbox")]
                     DeviceType::BitBox02 => bitbox_setup_context(device.is_emulated())?,
                     #[cfg(feature = "trezor")]
-                    DeviceType::Trezor => trezor_setup_context(),
+                    DeviceType::Trezor => trezor_setup_context()?,
                     #[cfg(feature = "keepkey")]
-                    DeviceType::KeepKey => keepkey_setup_context(),
+                    DeviceType::KeepKey => keepkey_setup_context()?,
                     other => anyhow::bail!("device setup is not supported for {other}"),
                 };
                 let success = device

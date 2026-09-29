@@ -1412,27 +1412,25 @@ async fn setup_device(
         ));
     }
 
-    let context = match device.device_type() {
+    let context: anyhow::Result<bhwi::common::DeviceContext> = match device.device_type() {
         #[cfg(feature = "keepkey")]
         DeviceType::KeepKey => keepkey_setup_context(),
         #[cfg(feature = "trezor")]
         DeviceType::Trezor => trezor_setup_context(),
         #[cfg(feature = "bitbox")]
-        DeviceType::BitBox02 => match bitbox_setup_context(device.is_emulated()) {
-            Ok(context) => context,
-            Err(err) => {
-                return HwiResponse::Error(HwiError::new(
-                    HwiErrorCode::DeviceFailure,
-                    err.to_string(),
-                ));
-            }
-        },
+        DeviceType::BitBox02 => bitbox_setup_context(device.is_emulated()),
         #[allow(unreachable_patterns)]
         device_type => {
             return HwiResponse::Error(HwiError::new(
                 HwiErrorCode::UnsupportedCommand,
                 format!("{device_type} support is not compiled into this build"),
             ));
+        }
+    };
+    let context = match context {
+        Ok(context) => context,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, err.to_string()));
         }
     };
     match device
