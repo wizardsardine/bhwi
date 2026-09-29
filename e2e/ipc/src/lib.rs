@@ -8,3 +8,5 @@ mod jade;
 mod ledger;
 #[cfg(test)]
 mod support;
+#[cfg(test)]
+mod trezor;
