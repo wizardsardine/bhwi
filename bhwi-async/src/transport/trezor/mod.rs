@@ -1,4 +1,7 @@
-use crate::{Transport, transport::Channel};
+use crate::{
+    ErrorKind, Transport,
+    transport::{Channel, io_error_kind},
+};
 use async_trait::async_trait;
 
 const REPORT_SIZE: usize = 64;
@@ -20,7 +23,7 @@ pub enum TrezorTransportError {
     ),
 
     /// A channel I/O failure.
-    #[error("IO error")]
+    #[error("IO error: {0}")]
     Io(
         /// The channel error.
         #[from]
@@ -91,6 +94,13 @@ impl<C: Channel> Transport for TrezorTransport<C> {
             }
         }
         Ok(data)
+    }
+
+    fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+        match error {
+            TrezorTransportError::Io(error) => io_error_kind(error),
+            TrezorTransportError::Comm(_) => ErrorKind::Transport,
+        }
     }
 }
 

@@ -18,7 +18,10 @@ pub use bhwi::ledger::LEDGER_DEVICE_ID;
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::Cursor;
 
-use crate::{Transport, transport::Channel};
+use crate::{
+    ErrorKind, Transport,
+    transport::{Channel, io_error_kind},
+};
 
 /// The channel identifier used in Ledger HID reports.
 pub const LEDGER_CHANNEL: u16 = 0x0101;
@@ -38,7 +41,7 @@ pub enum LedgerHIDError {
     ),
 
     /// A channel I/O or header-read failure.
-    #[error("HID IO error")]
+    #[error("HID IO error: {0}")]
     Hid(
         /// The I/O error.
         #[from]
@@ -154,5 +157,12 @@ impl<C: Channel> Transport for LedgerTransportHID<C> {
         }
 
         Ok(apdu_answer)
+    }
+
+    fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+        match error {
+            LedgerHIDError::Hid(error) => io_error_kind(error),
+            LedgerHIDError::Comm(_) => ErrorKind::Transport,
+        }
     }
 }

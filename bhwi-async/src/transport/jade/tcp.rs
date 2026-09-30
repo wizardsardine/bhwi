@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use crate::{Transport, transport::jade::CborStream};
+use crate::{
+    ErrorKind, Transport,
+    transport::{io_error_kind, jade::CborStream},
+};
 
 /// Jade command exchanges over a CBOR byte stream.
 pub struct TcpTransport<C> {
@@ -22,5 +25,9 @@ impl<C: CborStream> Transport for TcpTransport<C> {
     async fn exchange(&mut self, command: &[u8], _encrypted: bool) -> Result<Vec<u8>, Self::Error> {
         self.client.write_all(command).await?;
         self.client.read_cbor_message().await
+    }
+
+    fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+        io_error_kind(error)
     }
 }

@@ -27,7 +27,8 @@ pub trait CborStream {
         loop {
             let n = self.read(&mut chunk).await?;
             if n == 0 {
-                return Err(std::io::Error::other(
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
                     "stream ended before complete CBOR message",
                 ));
             }

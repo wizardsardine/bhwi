@@ -1,4 +1,7 @@
-use crate::{Transport, transport::Channel};
+use crate::{
+    ErrorKind, Transport,
+    transport::{Channel, io_error_kind},
+};
 use async_trait::async_trait;
 
 pub use bhwi::coldcard::COLDCARD_DEVICE_ID;
@@ -17,7 +20,7 @@ pub enum ColdcardHIDError {
     ),
 
     /// A channel I/O failure.
-    #[error("HID IO error")]
+    #[error("HID IO error: {0}")]
     Hid(
         /// The channel error.
         #[from]
@@ -101,5 +104,12 @@ impl<C: Channel> Transport for ColdcardTransportHID<C> {
         }
 
         Ok(data)
+    }
+
+    fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+        match error {
+            ColdcardHIDError::Hid(error) => io_error_kind(error),
+            ColdcardHIDError::Comm(_) => ErrorKind::Transport,
+        }
     }
 }

@@ -1,5 +1,7 @@
 //! Native discovery and transport errors.
 
+use bhwi_async::{ErrorKind, transport::io_error_kind};
+
 use crate::DeviceType;
 
 /// A result from native device discovery or opening.
@@ -84,4 +86,40 @@ pub enum NativeError {
         /// The failed protocol probe.
         source: bhwi_async::HWIDeviceError,
     },
+}
+
+impl NativeError {
+    /// Returns the failure kind of a discovery or opening error.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::NotCompiled(_) => ErrorKind::Unsupported,
+            Self::MissingDeviceId(_) => ErrorKind::InvalidInput,
+            Self::Gone(_) => ErrorKind::Disconnected,
+            Self::Io(error) => io_error_kind(error),
+            #[cfg(any(
+                feature = "bitbox",
+                feature = "coldcard",
+                feature = "keepkey",
+                feature = "ledger",
+                feature = "trezor"
+            ))]
+            Self::Hid(async_hid::HidError::Disconnected | async_hid::HidError::NotConnected) => {
+                ErrorKind::Disconnected
+            }
+            #[cfg(any(
+                feature = "bitbox",
+                feature = "coldcard",
+                feature = "keepkey",
+                feature = "ledger",
+                feature = "trezor"
+            ))]
+            Self::Hid(_) => ErrorKind::Transport,
+            #[cfg(any(feature = "keepkey", feature = "trezor"))]
+            Self::Usb(_) => ErrorKind::Transport,
+            #[cfg(any(feature = "jade", feature = "specter"))]
+            Self::Serial(_) | Self::SerialSysfsMissing => ErrorKind::Transport,
+            #[cfg(feature = "specter")]
+            Self::Probe { source, .. } => source.kind().unwrap_or(ErrorKind::Other),
+        }
+    }
 }

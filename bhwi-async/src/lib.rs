@@ -49,6 +49,7 @@ use async_trait::async_trait;
 pub use bhwi::common::DeviceBackup;
 pub use bhwi::common::DeviceContext;
 pub use bhwi::common::DisplayAddress;
+pub use bhwi::common::ErrorKind;
 pub use bhwi::common::Info;
 pub use bhwi::common::RestoreOptions;
 pub use bhwi::common::SetupOptions;
@@ -106,6 +107,11 @@ pub trait Transport {
     fn is_post_write_disconnect(&self, _error: &Self::Error) -> bool {
         false
     }
+
+    /// Returns the kind of `error`; defaults to [`ErrorKind::Transport`].
+    fn error_kind(&self, _error: &Self::Error) -> ErrorKind {
+        ErrorKind::Transport
+    }
 }
 
 /// Sends interpreter PIN-server requests using caller-provided HTTP I/O.
@@ -117,6 +123,11 @@ pub trait HttpClient {
     type Error: Debug;
     /// Sends the encoded request to `url` and returns the encoded response body.
     async fn request(&self, url: &str, request: &[u8]) -> Result<Vec<u8>, Self::Error>;
+
+    /// Returns the kind of `error`; defaults to [`ErrorKind::Transport`].
+    fn error_kind(&self, _error: &Self::Error) -> ErrorKind {
+        ErrorKind::Transport
+    }
 }
 
 /// Collects typed user input requested by a device.
@@ -296,13 +307,51 @@ pub trait HWIDevice {
 
 /// An erased wallet-operation error that retains the original error as its source.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct HWIDeviceError(#[from] Box<dyn StdError + Send + Sync + 'static>);
+#[error("{error}")]
+pub struct HWIDeviceError {
+    #[source]
+    error: Box<dyn StdError + Send + Sync + 'static>,
+    kind: Option<ErrorKind>,
+}
 
 impl HWIDeviceError {
     /// Wraps a backend error while retaining its error chain.
     pub fn new(error: impl StdError + Send + Sync + 'static) -> Self {
-        Self(Box::new(error))
+        Self {
+            error: Box::new(error),
+            kind: None,
+        }
+    }
+
+    /// Creates an erased error with an explicit kind.
+    pub fn with_kind(error: impl StdError + Send + Sync + 'static, kind: ErrorKind) -> Self {
+        Self {
+            kind: Some(kind),
+            ..Self::new(error)
+        }
+    }
+
+    /// Returns the kind set on this error, or else the first one in its source chain.
+    pub fn kind(&self) -> Option<ErrorKind> {
+        self.kind
+    }
+}
+
+impl From<Box<dyn StdError + Send + Sync + 'static>> for HWIDeviceError {
+    fn from(error: Box<dyn StdError + Send + Sync + 'static>) -> Self {
+        Self { error, kind: None }
+    }
+}
+
+/// An error that reports its [`ErrorKind`].
+pub trait ErrorKindOf {
+    /// Returns the error's kind.
+    fn error_kind(&self) -> ErrorKind;
+}
+
+impl ErrorKindOf for common::Error {
+    fn error_kind(&self) -> ErrorKind {
+        self.kind()
     }
 }
 
@@ -310,18 +359,22 @@ impl HWIDeviceError {
 #[derive(Debug, thiserror::Error)]
 pub enum Error<E, F> {
     /// A device transport failure.
-    #[error("transport error: {0}")]
-    Transport(
+    #[error("transport error: {error}")]
+    Transport {
+        /// The failure kind.
+        kind: ErrorKind,
         /// The transport's error.
-        E,
-    ),
+        error: E,
+    },
 
     /// A PIN-server HTTP failure.
-    #[error("http client error: {0}")]
-    HttpClient(
+    #[error("http client error: {error}")]
+    HttpClient {
+        /// The failure kind.
+        kind: ErrorKind,
         /// The HTTP client's error.
-        F,
-    ),
+        error: F,
+    },
 
     /// An interpreter or host-interaction failure.
     #[error("{0}")]
@@ -330,6 +383,30 @@ pub enum Error<E, F> {
         #[from]
         common::Error,
     ),
+}
+
+impl<E, F> Error<E, F> {
+    /// Returns the failure kind from whichever layer failed.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Transport { kind, .. } | Self::HttpClient { kind, .. } => *kind,
+            Self::Interpreter(error) => error.kind(),
+        }
+    }
+}
+
+impl<E, F> ErrorKindOf for Error<E, F> {
+    fn error_kind(&self) -> ErrorKind {
+        self.kind()
+    }
+}
+
+fn kinded<E>(error: E) -> HWIDeviceError
+where
+    E: ErrorKindOf + StdError + Send + Sync + 'static,
+{
+    let kind = error.error_kind();
+    HWIDeviceError::with_kind(error, kind)
 }
 
 #[async_trait(?Send)]
@@ -344,11 +421,10 @@ where
         {
             Ok(backup)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -362,11 +438,10 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -376,11 +451,10 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -394,11 +468,10 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -408,11 +481,10 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -422,11 +494,10 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -436,11 +507,10 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -464,11 +534,10 @@ where
         {
             Ok(version)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -478,11 +547,10 @@ where
         {
             Ok(fg)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -496,11 +564,10 @@ where
         {
             Ok(xpub)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -520,11 +587,10 @@ where
         {
             Ok((header, signature))
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -538,11 +604,10 @@ where
         {
             Ok(addr)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -552,7 +617,7 @@ where
         policy: &str,
     ) -> Result<WalletRegistration, Self::Error> {
         let wallet_policy = WalletPolicy::from_str(policy)
-            .map_err(|e| common::Error::new(common::ErrorKind::Serialization, e.to_string()))?;
+            .map_err(|e| common::Error::new(ErrorKind::Serialization, e.to_string()))?;
         if let common::Response::WalletRegistration(registration) = run_command(
             self,
             common::Command::RegisterWallet {
@@ -564,11 +629,10 @@ where
         {
             Ok(registration)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -582,11 +646,10 @@ where
         {
             Ok(psbt)
         } else {
-            Err(common::Error::new(
-                common::ErrorKind::UnexpectedResponse,
-                "no error or result returned",
+            Err(
+                common::Error::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+                    .into(),
             )
-            .into())
         }
     }
 }
@@ -595,10 +658,10 @@ where
 impl<T> HWIDevice for T
 where
     T: HWI,
-    T::Error: StdError + Send + Sync + 'static,
+    T::Error: ErrorKindOf + StdError + Send + Sync + 'static,
 {
     async fn backup_device(&mut self) -> Result<DeviceBackup, HWIDeviceError> {
-        HWI::backup_device(self).await.map_err(HWIDeviceError::new)
+        HWI::backup_device(self).await.map_err(kinded)
     }
 
     async fn setup_device(
@@ -608,11 +671,11 @@ where
     ) -> Result<bool, HWIDeviceError> {
         HWI::setup_device(self, options, context)
             .await
-            .map_err(HWIDeviceError::new)
+            .map_err(kinded)
     }
 
     async fn wipe_device(&mut self) -> Result<bool, HWIDeviceError> {
-        HWI::wipe_device(self).await.map_err(HWIDeviceError::new)
+        HWI::wipe_device(self).await.map_err(kinded)
     }
 
     async fn restore_device(
@@ -622,39 +685,31 @@ where
     ) -> Result<bool, HWIDeviceError> {
         HWI::restore_device(self, options, context)
             .await
-            .map_err(HWIDeviceError::new)
+            .map_err(kinded)
     }
 
     async fn toggle_passphrase(&mut self) -> Result<bool, HWIDeviceError> {
-        HWI::toggle_passphrase(self)
-            .await
-            .map_err(HWIDeviceError::new)
+        HWI::toggle_passphrase(self).await.map_err(kinded)
     }
 
     async fn prompt_pin(&mut self) -> Result<bool, HWIDeviceError> {
-        HWI::prompt_pin(self).await.map_err(HWIDeviceError::new)
+        HWI::prompt_pin(self).await.map_err(kinded)
     }
 
     async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, HWIDeviceError> {
-        HWI::send_pin(self, context)
-            .await
-            .map_err(HWIDeviceError::new)
+        HWI::send_pin(self, context).await.map_err(kinded)
     }
 
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError> {
-        HWI::unlock(self, network)
-            .await
-            .map_err(HWIDeviceError::new)
+        HWI::unlock(self, network).await.map_err(kinded)
     }
 
     async fn get_info(&mut self) -> Result<Info, HWIDeviceError> {
-        HWI::get_info(self).await.map_err(HWIDeviceError::new)
+        HWI::get_info(self).await.map_err(kinded)
     }
 
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError> {
-        HWI::get_master_fingerprint(self)
-            .await
-            .map_err(HWIDeviceError::new)
+        HWI::get_master_fingerprint(self).await.map_err(kinded)
     }
 
     async fn get_extended_pubkey(
@@ -664,7 +719,7 @@ where
     ) -> Result<Xpub, HWIDeviceError> {
         HWI::get_extended_pubkey(self, path, display)
             .await
-            .map_err(HWIDeviceError::new)
+            .map_err(kinded)
     }
 
     async fn sign_message(
@@ -672,9 +727,7 @@ where
         message: &[u8],
         path: DerivationPath,
     ) -> Result<(u8, Signature), HWIDeviceError> {
-        HWI::sign_message(self, message, path)
-            .await
-            .map_err(HWIDeviceError::new)
+        HWI::sign_message(self, message, path).await.map_err(kinded)
     }
 
     async fn display_address(
@@ -684,7 +737,7 @@ where
     ) -> Result<String, HWIDeviceError> {
         HWI::display_address(self, address, context)
             .await
-            .map_err(HWIDeviceError::new)
+            .map_err(kinded)
     }
 
     async fn register_wallet(
@@ -694,7 +747,7 @@ where
     ) -> Result<WalletRegistration, HWIDeviceError> {
         HWI::register_wallet(self, name, policy)
             .await
-            .map_err(HWIDeviceError::new)
+            .map_err(kinded)
     }
 
     async fn sign_tx(
@@ -702,9 +755,7 @@ where
         psbt: Psbt,
         context: Option<common::DeviceContext>,
     ) -> Result<Psbt, HWIDeviceError> {
-        HWI::sign_tx(self, psbt, context)
-            .await
-            .map_err(HWIDeviceError::new)
+        HWI::sign_tx(self, psbt, context).await.map_err(kinded)
     }
 }
 
@@ -801,12 +852,15 @@ where
                 let res = http_client
                     .request(url, &t.payload)
                     .await
-                    .map_err(Error::HttpClient)?;
+                    .map_err(|error| Error::HttpClient {
+                        kind: http_client.error_kind(&error),
+                        error,
+                    })?;
                 transmit = intpr.exchange(res)?;
             }
             common::Recipient::Host(request) => {
                 let interaction = host_interaction.as_deref_mut().ok_or_else(|| {
-                    common::Error::new(common::ErrorKind::Unsupported, "host interaction required")
+                    common::Error::new(ErrorKind::Unsupported, "host interaction required")
                 })?;
                 let response = interaction.respond(request).await?;
                 transmit = intpr.exchange(response.into_bytes_for(request)?)?;
@@ -819,7 +873,12 @@ where
                     {
                         return Ok(common::Response::DeviceAction(true));
                     }
-                    Err(error) => return Err(Error::Transport(error)),
+                    Err(error) => {
+                        return Err(Error::Transport {
+                            kind: transport.error_kind(&error),
+                            error,
+                        });
+                    }
                 };
                 transmit = intpr.exchange(exchange)?;
             }

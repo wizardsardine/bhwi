@@ -1034,8 +1034,10 @@ mod tests {
 
     #[test]
     fn a_transport_error_keeps_the_layer_that_carries_its_meaning() {
-        let wrapped: crate::Error<std::io::Error, std::io::Error> =
-            crate::Error::Transport(std::io::Error::other("Broken pipe"));
+        let wrapped: crate::Error<std::io::Error, std::io::Error> = crate::Error::Transport {
+            kind: bhwi::common::ErrorKind::Transport,
+            error: std::io::Error::other("Broken pipe"),
+        };
 
         let skipped = SkippedDevice::new(DeviceType::KeepKey, "keepkey", "udp:11044", &wrapped);
         assert_eq!(skipped.error, "transport error: Broken pipe");

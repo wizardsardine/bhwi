@@ -71,17 +71,26 @@ impl Channel for WebUsbChannel {
         let mut out = self.out.lock().await;
         out.submit(data.to_vec().into());
         let completion = out.next_complete().await;
-        completion.status.map_err(io::Error::other)?;
+        completion.status.map_err(transfer_io_error)?;
         Ok(completion.actual_len)
     }
 
     async fn receive(&mut self, data: &mut [u8]) -> io::Result<usize> {
         self.ep_in.submit(Buffer::new(PACKET_SIZE));
         let completion = self.ep_in.next_complete().await;
-        completion.status.map_err(io::Error::other)?;
+        completion.status.map_err(transfer_io_error)?;
         let n = completion.actual_len.min(data.len());
         data[..n].copy_from_slice(&completion.buffer[..n]);
         Ok(n)
+    }
+}
+
+fn transfer_io_error(error: nusb::transfer::TransferError) -> io::Error {
+    match error {
+        nusb::transfer::TransferError::Disconnected => {
+            io::Error::new(io::ErrorKind::NotConnected, error)
+        }
+        error => io::Error::other(error),
     }
 }
 

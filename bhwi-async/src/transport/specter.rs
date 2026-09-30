@@ -12,7 +12,7 @@ use std::{
 use async_trait::async_trait;
 use bhwi::specter::{MAX_RESPONSE_FRAME_SIZE, ResponseDecoder, SpecterError};
 
-use crate::Transport;
+use crate::{ErrorKind, Transport};
 
 /// Default limit for an on-device confirmation after a request is sent.
 pub const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -191,6 +191,18 @@ impl<S: SpecterStream> Transport for SpecterTransport<S> {
                 self.state = ExchangeState::Ready;
                 return Ok(response);
             }
+        }
+    }
+
+    fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+        match error {
+            SpecterTransportError::Disconnected => ErrorKind::Disconnected,
+            SpecterTransportError::Io(_)
+            | SpecterTransportError::Timeout
+            | SpecterTransportError::Cancelled
+            | SpecterTransportError::Protocol(_)
+            | SpecterTransportError::ResponseTooLarge
+            | SpecterTransportError::Poisoned => ErrorKind::Transport,
         }
     }
 }

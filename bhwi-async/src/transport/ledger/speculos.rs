@@ -2,7 +2,10 @@ use std::fmt::Debug;
 
 use async_trait::async_trait;
 
-use crate::{Transport, transport::Channel};
+use crate::{
+    ErrorKind, Transport,
+    transport::{Channel, io_error_kind},
+};
 
 /// Ledger APDU exchanges over a Speculos length-prefixed channel.
 ///
@@ -59,5 +62,12 @@ impl<C: Channel> Transport for LedgerTransportTcp<C> {
         self.channel.receive(&mut resp).await?;
 
         Ok(resp)
+    }
+
+    fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+        match error {
+            LedgerTcpError::Io(error) => io_error_kind(error),
+            LedgerTcpError::InvalidResponse => ErrorKind::Transport,
+        }
     }
 }
