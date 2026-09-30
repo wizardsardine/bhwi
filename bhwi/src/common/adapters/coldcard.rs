@@ -236,7 +236,7 @@ fn coldcard_multisig_display_address(
     address: MultisigDisplayAddress,
 ) -> Result<ColdcardMultisigDisplayAddress, ColdcardError> {
     if !address.sorted {
-        return Err(ColdcardError::Device(
+        return Err(ColdcardError::InvalidInput(
             "Coldcards only allow sortedmulti descriptors".to_string(),
         ));
     }
