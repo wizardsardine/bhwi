@@ -12,7 +12,7 @@ use thiserror::Error;
 pub enum BitBoxDeviceError {
     /// An unrecognized device error code.
     #[error("error code not recognized")]
-    Unknown,
+    Unknown(i32),
     /// Input rejected by the device.
     #[error("invalid input")]
     InvalidInput,
@@ -55,7 +55,23 @@ impl BitBoxDeviceError {
             107 => Self::Duplicate,
             108 => Self::NoiseEncrypt,
             109 => Self::NoiseDecrypt,
-            _ => Self::Unknown,
+            _ => Self::Unknown(code),
+        }
+    }
+
+    /// Returns the device's numeric error code.
+    pub fn code(&self) -> i32 {
+        match self {
+            Self::InvalidInput => 101,
+            Self::Memory => 102,
+            Self::Generic => 103,
+            Self::UserAbort => 104,
+            Self::InvalidState => 105,
+            Self::Disabled => 106,
+            Self::Duplicate => 107,
+            Self::NoiseEncrypt => 108,
+            Self::NoiseDecrypt => 109,
+            Self::Unknown(code) => *code,
         }
     }
 }
@@ -133,6 +149,18 @@ pub enum BitBoxError {
         /// Invalid-input description.
         &'static str,
     ),
+    /// A command missing caller-supplied data.
+    #[error("missing command info: {0}")]
+    MissingContext(&'static str),
+    /// An operation the device cannot perform.
+    #[error("missing command info: {0}")]
+    Unsupported(&'static str),
+    /// Setup attempted on an initialized device.
+    #[error("The BitBox02 must be wiped before setup.")]
+    AlreadyInitialized,
+    /// An operation that needs an initialized device.
+    #[error("The BitBox02 must be initialized first.")]
+    NotInitialized,
     /// An address format unsupported by this adapter.
     #[error("unsupported display address: {0}")]
     UnsupportedDisplayAddress(
@@ -151,6 +179,9 @@ pub enum BitBoxError {
         /// Transport failure description.
         String,
     ),
+    /// The device disconnected.
+    #[error("transport error: {0}")]
+    Disconnected(String),
 }
 
 impl From<prost::DecodeError> for BitBoxError {

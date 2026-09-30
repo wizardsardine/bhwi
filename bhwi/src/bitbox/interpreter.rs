@@ -1236,10 +1236,7 @@ where
                     _ => return Err(BitBoxError::UnexpectedResponse.into()),
                 };
                 if info.initialized {
-                    return Err(BitBoxError::InvalidInput(
-                        "The BitBox02 must be wiped before setup.",
-                    )
-                    .into());
+                    return Err(BitBoxError::AlreadyInitialized.into());
                 }
                 if setup.label.is_empty() {
                     let bytes = self.start_setup_initialization(setup)?;
@@ -1291,10 +1288,7 @@ where
                     _ => return Err(BitBoxError::UnexpectedResponse.into()),
                 };
                 if !info.initialized {
-                    return Err(BitBoxError::InvalidInput(
-                        "The BitBox02 must be initialized first.",
-                    )
-                    .into());
+                    return Err(BitBoxError::NotInitialized.into());
                 }
                 let bytes = self.build_encrypted(api::reset_request())?;
                 self.state = State::WipeWaitReset;
@@ -1312,10 +1306,7 @@ where
                     _ => return Err(BitBoxError::UnexpectedResponse.into()),
                 };
                 if info.initialized {
-                    return Err(BitBoxError::InvalidInput(
-                        "The BitBox02 must be wiped before setup.",
-                    )
-                    .into());
+                    return Err(BitBoxError::AlreadyInitialized.into());
                 }
                 if restore.label.is_empty() {
                     let bytes = self.build_encrypted(api::restore_from_mnemonic_request(
@@ -1358,10 +1349,7 @@ where
                     _ => return Err(BitBoxError::UnexpectedResponse.into()),
                 };
                 if !info.initialized {
-                    return Err(BitBoxError::InvalidInput(
-                        "The BitBox02 must be initialized first.",
-                    )
-                    .into());
+                    return Err(BitBoxError::NotInitialized.into());
                 }
                 let bytes = self.build_encrypted(api::set_mnemonic_passphrase_enabled_request(
                     !info.mnemonic_passphrase_enabled,

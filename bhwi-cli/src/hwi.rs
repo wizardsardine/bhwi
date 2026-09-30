@@ -2557,6 +2557,19 @@ fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
         if error.kind() == ErrorKind::InvalidInput && error.message() == "Passphrase too long" {
             return HwiError::new(HwiErrorCode::BadArgument, error.message());
         }
+        // Upstream `bitbox02_exception`: 101 and 103 raise UnavailableActionError,
+        // any other device code is re-raised as an unknown error. Upstream's `init()`
+        // rejects an uninitialized device first, which here answers 105.
+        if let Some(bhwi::common::DeviceCode::BitBox(code)) = error.device_code()
+            && error.kind() != ErrorKind::UserCancelled
+        {
+            let code = match code {
+                105 => HwiErrorCode::DeviceNotInitialized,
+                101 | 103 => HwiErrorCode::UnsupportedCommand,
+                _ => HwiErrorCode::DeviceFailure,
+            };
+            return HwiError::new(code, hwi_message(error));
+        }
         // Upstream's `ledger_bitcoin` raises these from inside a command, past
         // `ledger_exception`, as unknown errors. Opening the app has no upstream
         // counterpart and a refusal keeps its own path; every other code keeps -3.
@@ -2596,6 +2609,13 @@ fn classify_device_error_for(
 ) -> HwiError {
     let classified = classify_device_error(err);
     if device_type == DeviceType::Ledger && classified.code == HwiErrorCode::ActionCanceled.code() {
+        return HwiError::new(HwiErrorCode::DeviceFailure, classified.error);
+    }
+    // A rejected BitBox02 pairing carries no device code; upstream reports it as -13.
+    if device_type == DeviceType::BitBox02
+        && classified.code == HwiErrorCode::ActionCanceled.code()
+        && common_device_error(err).is_some_and(|error| error.device_code().is_none())
+    {
         return HwiError::new(HwiErrorCode::DeviceFailure, classified.error);
     }
     classified
@@ -4393,6 +4413,50 @@ mod tests {
                 HwiErrorCode::DeviceAlreadyUnlocked.code()
             );
         }
+    }
+
+    #[test]
+    fn bitbox02_device_codes_follow_upstream_exception_mapping() {
+        use bhwi::common::{DeviceCode, Error as CommonError, ErrorKind};
+
+        for (code, kind, expected) in [
+            (
+                101,
+                ErrorKind::InvalidInput,
+                HwiErrorCode::UnsupportedCommand,
+            ),
+            (
+                103,
+                ErrorKind::DeviceFailure,
+                HwiErrorCode::UnsupportedCommand,
+            ),
+            (105, ErrorKind::NotReady, HwiErrorCode::DeviceNotInitialized),
+            (107, ErrorKind::Duplicate, HwiErrorCode::DeviceFailure),
+            (104, ErrorKind::UserCancelled, HwiErrorCode::ActionCanceled),
+        ] {
+            let err = wrapped_device_error(
+                CommonError::new(kind, "bitbox device error")
+                    .with_device_code(DeviceCode::BitBox(code)),
+            );
+            assert_eq!(
+                classify_device_error_for(DeviceType::BitBox02, &err).code,
+                expected.code(),
+                "{code}"
+            );
+        }
+
+        let pairing = wrapped_device_error(CommonError::new(
+            ErrorKind::AuthenticationRefused,
+            "authentication refused",
+        ));
+        assert_eq!(
+            classify_device_error_for(DeviceType::BitBox02, &pairing).code,
+            HwiErrorCode::DeviceFailure.code()
+        );
+        assert_eq!(
+            classify_device_error_for(DeviceType::KeepKey, &pairing).code,
+            HwiErrorCode::ActionCanceled.code()
+        );
     }
 
     #[test]
