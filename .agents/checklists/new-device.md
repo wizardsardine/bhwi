@@ -48,10 +48,13 @@ status are all accounted for.
 - Add a matching forwarding feature to `bhwi-async`, gate its device module,
   export, and device-specific transport wiring, and verify both library crates
   with `--no-default-features --features <device>`.
-- Add `bhwi-cli/src/<device>.rs` with discovery/enumeration and execution
+- Add `bhwi-async-transport/src/<device>.rs` with discovery/enumeration and execution
   wiring.
-- Add the device to `DeviceType`, `DeviceType::enumerate`, selector matching,
-  HWI parsing, and HWI label handling.
+- Register the device: `DeviceType`, `DeviceType::ALL` and `as_str` in
+  `bhwi-async/src/device.rs`, `DeviceTypeArg` in `bhwi-cli/src/lib.rs`,
+  `NativeSource::enumerate_device_type` and `is_supported` in
+  `bhwi-async-transport/src/lib.rs`, a feature in all four manifests, then selector
+  matching, HWI parsing and HWI label handling in `bhwi-cli`.
 - Ensure native `bhwi` CLI output follows quiet success, `--pretty`, and
   `--json` rules.
 - Ensure Python-HWI-compatible `hwi` output uses Python HWI command names, JSON

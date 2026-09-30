@@ -9,11 +9,11 @@ license-file.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 base64ct = { workspace = true, features = ["alloc"] }
-bhwi-async = { workspace = true, features = ["emulators", "jade"] }
+bhwi-async = { workspace = true, features = ["jade"] }
 bitcoin.workspace = true
 miniscript.workspace = true
 reqwest.workspace = true
 serde_cbor.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 
-bhwi-cli = { path = "../../bhwi-cli" }
+bhwi-async-transport = { workspace = true, default-features = false, features = ["jade"] }

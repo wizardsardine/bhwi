@@ -13,9 +13,9 @@ use bhwi::keepkey::{
 };
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 use bhwi::miniscript::descriptor::WalletPolicy;
+use bhwi::passphrase::HostPassphrase;
 use bhwi::trezor::{
-    HostPassphrase, HostPin, ManagementContext as TrezorManagementContext, TREZOR_DEVICE_ID,
-    TREZOR_ONE_DEVICE_ID,
+    HostPin, ManagementContext as TrezorManagementContext, TREZOR_DEVICE_ID, TREZOR_ONE_DEVICE_ID,
 };
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{

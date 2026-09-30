@@ -2,7 +2,6 @@ use async_trait::async_trait;
 pub use bhwi::jade::JADE_DEVICE_IDS;
 use serde_cbor::Value;
 
-#[cfg(feature = "emulators")]
 pub mod tcp;
 
 #[async_trait(?Send)]

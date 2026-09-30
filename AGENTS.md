@@ -102,7 +102,7 @@
 - Ledger PSBT signing may need wallet policy context for non-standard policies; standard policies may not.
 - Jade uses CBOR-RPC and may require PIN server routing via `Recipient::PinServer`.
 - Coldcard commands are encrypted after the initial public-key exchange.
-- Keep transport-specific code in `bhwi-async`, `bhwi-wasm`, `bhwi-cli`, or `e2e`, not in the core interpreter.
+- Keep transport-specific code in `bhwi-async`, `bhwi-async-transport`, `bhwi-wasm`, or `e2e`, not in the core interpreter.
 
 ## Review Preflight
 

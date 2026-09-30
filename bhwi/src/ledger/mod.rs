@@ -66,7 +66,7 @@ pub enum LedgerError {
 fn is_cancel(status_word: StatusWord) -> bool {
     matches!(
         status_word,
-        StatusWord::Deny | StatusWord::SecurityStatusNotSatisfied
+        StatusWord::Deny | StatusWord::SecurityStatusNotSatisfied | StatusWord::UserRefusedOnDevice
     )
 }
 
@@ -656,6 +656,9 @@ where
                         (State::Finished(LedgerResponse::Xpub(xpub)), None)
                     }
                     LedgerCommand::OpenApp(..) => {
+                        if is_cancel(res.status_word) {
+                            return Err(LedgerError::UserCancelled.into());
+                        }
                         if matches!(
                             res.status_word,
                             StatusWord::OK | StatusWord::ClaNotSupported

@@ -52,7 +52,8 @@ the Jade PIN server, or a typed host-interaction provider via its `Recipient`.
 | crate        | description                                                        |
 | ------------ | ------------------------------------------------------------------ |
 | `bhwi`       | Core sans-IO interpreters and the `common` command/response model. |
-| `bhwi-async` | `async`/`await` `HWI` trait over the interpreters, with transports.|
+| `bhwi-async` | `async`/`await` `HWI` trait over the interpreters, with protocol framing. |
+| `bhwi-async-transport` | Native device channels (HID/USB/serial/TCP) and discovery.     |
 | `bhwi-cli`   | `bhwi` command-line tool and the `hwi` parity binary.              |
 | `bhwi-wasm`  | WebAssembly bindings for browser callers.                          |
 
@@ -83,6 +84,16 @@ for the Specter-DIY setup and limits.
 ```sh
 cargo build -p bhwi-cli
 ```
+
+All devices are built by default. Build a subset with the `bitbox`,
+`coldcard`, `jade`, `keepkey`, `ledger`, `specter` and `trezor` features:
+
+```sh
+cargo build -p bhwi-cli --no-default-features --features jade,ledger
+```
+
+The same features exist on `bhwi`, `bhwi-async` and `bhwi-async-transport`, and each
+forwards to the crate below it. `device install-udev-rules` is Linux only.
 
 | command      | subcommand          | purpose                                                  |
 | ------------ | ------------------- | -------------------------------------------------------- |
