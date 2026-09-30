@@ -7,6 +7,16 @@ repository = "https://github.com/wizardsardine/bhwi"
 license-file.workspace = true
 keywords = ["bitcoin",  "miniscript"]
 description = "development kit"
+readme = "README.md"
+documentation = "https://docs.rs/bhwi-wasm"
+homepage = "https://wizardsardine.github.io/bhwi/"
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "wasm32-unknown-unknown"
+targets = []
+rustc-args = ["--cfg=web_sys_unstable_apis"]
+rustdoc-args = ["--cfg=web_sys_unstable_apis"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

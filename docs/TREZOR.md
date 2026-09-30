@@ -153,9 +153,9 @@ gate starts the prepared emulator for its own model.
 
 - [trezor-firmware](https://github.com/trezor/trezor-firmware) — both the legacy
   (Model One) and core (Model T) emulators, and the protobuf definitions the
-  vendored bindings in [`bhwi/src/trezor/proto.rs`](../bhwi/src/trezor/proto.rs)
+  vendored bindings in [`bhwi/src/trezor/proto.rs`](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/trezor/proto.rs)
   are generated from.
 - `hwilib/devices/trezorlib` in Bitcoin Core HWI — the reference client the BHWI
   protocol code is checked against.
 
-The pinned firmware revision is recorded in [`flake.nix`](../flake.nix).
+The pinned firmware revision is recorded in [`flake.nix`](https://github.com/wizardsardine/bhwi/blob/main/flake.nix).

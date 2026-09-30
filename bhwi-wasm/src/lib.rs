@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 pub mod ledger;
 pub mod pinserver;
 pub mod webhid;

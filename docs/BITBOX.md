@@ -59,4 +59,4 @@ restarts it before continuing.
   Rust client the BHWI protocol code was ported from.
 
 The pinned simulator binary is downloaded from the firmware repository's release
-assets; the version and hash are recorded in [`flake.nix`](../flake.nix).
+assets; the version and hash are recorded in [`flake.nix`](https://github.com/wizardsardine/bhwi/blob/main/flake.nix).

@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 use async_trait::async_trait;
 use futures::future::join_all;
 

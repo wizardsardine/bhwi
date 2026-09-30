@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 #[cfg(feature = "bitbox")]
 pub mod bitbox;
 #[cfg(feature = "coldcard")]

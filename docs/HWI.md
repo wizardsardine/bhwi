@@ -117,7 +117,7 @@ nix run .#hwi-parity-ledger -- candidate_getxpub_matches_reference -- --nocaptur
 
 For a direct harness invocation, use the matching development shell and set all
 three harness variables as described in the
-[HWI parity runbook](../.agents/runbooks/hwi-parity.md). For example, after
+[HWI parity runbook](https://github.com/wizardsardine/bhwi/blob/main/.agents/runbooks/hwi-parity.md). For example, after
 starting and initializing only a Ledger emulator:
 
 ```sh

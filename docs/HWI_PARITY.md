@@ -9,7 +9,7 @@ commands and devices where parity is claimed.
 - A pinned reference HWI is exposed as the `hwi-reference-bhwi` flake package,
   built with `nix build .#hwi-reference-bhwi`. Its binary imports upstream
   `hwilib` and restricts the recognized device list via `commands.all_devs`
-  (see [`flake.nix`](../flake.nix)).
+  (see [`flake.nix`](https://github.com/wizardsardine/bhwi/blob/main/flake.nix)).
 - Per-device flake apps run the harness with `HWI_PARITY_DEVICE_TYPE` set:
   `nix run .#hwi-parity-<device>`. Each builds `bhwi-cli --bins`, then runs
   `bhwi-e2e-hwi-parity`, comparing `REFERENCE_HWI_BIN` against the candidate

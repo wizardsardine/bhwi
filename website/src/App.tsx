@@ -553,8 +553,14 @@ const App = () => {
                 </div>
             )}
 
-            <header className="border-b border-gray-800 px-6 py-4">
+            <header className="flex items-center justify-between gap-4 border-b border-gray-800 px-6 py-4">
                 <h1 className="text-2xl font-bold">BHWI</h1>
+                <a
+                    href={`${import.meta.env.BASE_URL}docs/`}
+                    className="rounded-lg px-3 py-2 text-sm text-blue-400 hover:text-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                    Documentation
+                </a>
             </header>
 
             {isFirefox && (

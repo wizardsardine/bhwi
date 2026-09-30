@@ -21,7 +21,7 @@ machine that performs no I/O itself, so it fits synchronous, asynchronous, FFI
 and WASM callers alike. This matters most across an FFI boundary, where the host
 language often brings its own native I/O stack: a sans-IO core lets that language
 plug in its own transport directly instead of embedding a Rust runtime. The
-repository ships [`bhwi-async`](bhwi-async) for those who want a ready-made
+repository ships [`bhwi-async`](https://github.com/wizardsardine/bhwi/tree/main/bhwi-async) for those who want a ready-made
 rust async layer. See [docs/VISION.md](docs/VISION.md) for the full rationale
 behind this design.
 
@@ -67,7 +67,7 @@ the Jade PIN server, or a typed host-interaction provider via its `Recipient`.
 - [Specter-DIY](https://github.com/cryptoadvance/specter-diy)
 - [Trezor](https://github.com/trezor/trezor-firmware) (Model One and Model T)
 
-Every device implements the full [`HWI` trait](bhwi-async/src/lib.rs): `unlock`,
+Every device implements the full [`HWI` trait](https://github.com/wizardsardine/bhwi/blob/main/bhwi-async/src/lib.rs): `unlock`,
 `get_info`, `get_master_fingerprint`, `get_extended_pubkey`, `sign_message`,
 `display_address`, `register_wallet` and `sign_tx`. Three capability gaps
 remain: `backup_device` is supported on BitBox02 and Coldcard but not on Jade,
@@ -135,13 +135,24 @@ claimed. See [docs/HWI_PARITY.md](docs/HWI_PARITY.md).
 
 ## Documentation
 
+- [Documentation book](https://wizardsardine.github.io/bhwi/docs/): development guides
+- [API reference](https://wizardsardine.github.io/bhwi/docs/API.html): released APIs on docs.rs and current development APIs
 - [docs/VISION.md](docs/VISION.md): design rationale
 - [docs/DEVICE_ONBOARDING.md](docs/DEVICE_ONBOARDING.md): adding a device
 - [docs/HWI_PARITY.md](docs/HWI_PARITY.md): Python-HWI parity
 - [docs/NIX.md](docs/NIX.md): Nix emulator runners
 - Device emulation: [BITBOX](docs/BITBOX.md) · [COLDCARD](docs/COLDCARD.md) · [JADE](docs/JADE.md) · [KEEPKEY](docs/KEEPKEY.md) · [LEDGER](docs/LEDGER.md) · [SPECTER](docs/SPECTER.md) · [TREZOR](docs/TREZOR.md)
 
+Merges to `main` publish documentation automatically alongside the browser demo.
+Developers maintain Markdown and Rust doc comments; navigation (`SUMMARY.md`)
+and HTML are generated, not maintained by hand. The new crate overviews and
+docs.rs metadata apply to future releases, not existing published versions.
+
+For local preview, build `nix build .#website-ghpages` and serve its combined
+output under `/bhwi/`. The Vite development app does not serve the generated
+book.
+
 ## License
 
-BHWI is released under the terms of the license in [LICENSE](LICENSE). The
-BitBox02 integration additionally carries [BITBOX_LICENSE](BITBOX_LICENSE).
+BHWI is released under the terms of the license in [LICENSE](https://github.com/wizardsardine/bhwi/blob/main/LICENSE). The
+BitBox02 integration additionally carries [BITBOX_LICENSE](https://github.com/wizardsardine/bhwi/blob/main/BITBOX_LICENSE).

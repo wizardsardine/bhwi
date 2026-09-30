@@ -9,13 +9,13 @@ to add or maintain support for a hardware wallet in BHWI.
   integrations.
 - [VISION](VISION.md): gives the project context and the reason BHWI keeps
   protocol logic separate from transport I/O.
-- [Common command interface](../bhwi/src/common.rs): lists the device-agnostic
+- [Common command interface](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/common.rs): lists the device-agnostic
   commands, responses, recipients, and device-specific context.
-- [Protocol framing](../bhwi-async/src/transport): defines the `Channel` trait and
+- [Protocol framing](https://github.com/wizardsardine/bhwi/tree/main/bhwi-async/src/transport): defines the `Channel` trait and
   the per-device wire framing carried over it.
-- [Transport crate](../bhwi-async-transport/src): implements `Channel` over HID,
+- [Transport crate](https://github.com/wizardsardine/bhwi/tree/main/bhwi-async-transport/src): implements `Channel` over HID,
   WebUSB, serial, TCP, and emulator sockets, and enumerates the devices found.
-- [CLI crate](../bhwi-cli/src): shows how command parsing and output formatting
+- [CLI crate](https://github.com/wizardsardine/bhwi/tree/main/bhwi-cli/src): shows how command parsing and output formatting
   sit on top of it.
 
 ## Shared Bitcoin Standards
@@ -41,13 +41,13 @@ to add or maintain support for a hardware wallet in BHWI.
 ## BitBox02
 
 - Local code (gated behind the `bitbox` cargo feature):
-  - [Interpreter](../bhwi/src/bitbox/interpreter.rs)
-  - [Bitcoin request/response builders](../bhwi/src/bitbox/api.rs)
-  - [Protobuf messages](../bhwi/src/bitbox/proto.rs)
-  - [Noise pairing state](../bhwi/src/bitbox/noise.rs)
-  - [U2F-HID framing](../bhwi/src/bitbox/u2f.rs)
-  - [PSBT signing](../bhwi/src/bitbox/sign.rs)
-  - [Wallet policy handling](../bhwi/src/bitbox/policy.rs)
+  - [Interpreter](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/bitbox/interpreter.rs)
+  - [Bitcoin request/response builders](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/bitbox/api.rs)
+  - [Protobuf messages](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/bitbox/proto.rs)
+  - [Noise pairing state](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/bitbox/noise.rs)
+  - [U2F-HID framing](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/bitbox/u2f.rs)
+  - [PSBT signing](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/bitbox/sign.rs)
+  - [Wallet policy handling](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/bitbox/policy.rs)
   - [E2E docs](BITBOX.md)
 - Upstream references:
   - [BitBox02 firmware and simulator](https://github.com/BitBoxSwiss/bitbox02-firmware)
@@ -59,7 +59,7 @@ to add or maintain support for a hardware wallet in BHWI.
     `DeviceContext::BitBox`; the device holds no persistent policy token like a
     Ledger HMAC.
   - Wallet policies share the miniscript `WalletPolicy` extraction in
-    [`bhwi/src/policy.rs`](../bhwi/src/policy.rs) with the Ledger backend.
+    [`bhwi/src/policy.rs`](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/policy.rs) with the Ledger backend.
   - Use these commands for emulator-backed tests:
 
 ```sh
@@ -70,11 +70,11 @@ nix develop .#bitbox -c cargo test -p bhwi-e2e-bitbox -- --test-threads=1
 ## Ledger
 
 - Local code (gated behind the `ledger` cargo feature):
-  - [Interpreter](../bhwi/src/ledger/mod.rs)
-  - [APDU helpers](../bhwi/src/ledger/apdu.rs)
-  - [Command encoders](../bhwi/src/ledger/command.rs)
-  - [Wallet policy encoding](../bhwi/src/ledger/wallet.rs)
-  - [PSBT serialization](../bhwi/src/ledger/psbt.rs)
+  - [Interpreter](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/ledger/mod.rs)
+  - [APDU helpers](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/ledger/apdu.rs)
+  - [Command encoders](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/ledger/command.rs)
+  - [Wallet policy encoding](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/ledger/wallet.rs)
+  - [PSBT serialization](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/ledger/psbt.rs)
   - [E2E docs](LEDGER.md)
 - Upstream references:
   - [Ledger Bitcoin app](https://github.com/LedgerHQ/app-bitcoin-new)
@@ -97,9 +97,9 @@ nix develop .#ledger -c cargo test -p bhwi-e2e-ledger -- --test-threads=1
 ## Coldcard
 
 - Local code (gated behind the `coldcard` cargo feature):
-  - [Interpreter](../bhwi/src/coldcard/mod.rs)
-  - [API request/response encoding](../bhwi/src/coldcard/api.rs)
-  - [Encryption engine](../bhwi/src/coldcard/encrypt.rs)
+  - [Interpreter](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/coldcard/mod.rs)
+  - [API request/response encoding](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/coldcard/api.rs)
+  - [Encryption engine](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/coldcard/encrypt.rs)
   - [E2E docs](COLDCARD.md)
 - Upstream references:
   - [Coldcard firmware](https://github.com/Coldcard/firmware)
@@ -119,9 +119,9 @@ nix develop .#coldcard -c cargo test -p bhwi-e2e-coldcard -- --test-threads=1
 ## Jade
 
 - Local code (gated behind the `jade` cargo feature):
-  - [Interpreter](../bhwi/src/jade/mod.rs)
-  - [CBOR RPC types](../bhwi/src/jade/api.rs)
-  - [TCP transport](../bhwi-async/src/transport/jade/tcp.rs)
+  - [Interpreter](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/jade/mod.rs)
+  - [CBOR RPC types](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/jade/api.rs)
+  - [TCP transport](https://github.com/wizardsardine/bhwi/blob/main/bhwi-async/src/transport/jade/tcp.rs)
   - [E2E docs](JADE.md)
 - Upstream references:
   - [Blockstream Jade](https://github.com/Blockstream/Jade)
@@ -144,10 +144,10 @@ nix develop .#jade -c cargo test -p bhwi-e2e-jade -- --test-threads=1
 ## Trezor
 
 - Local code (gated behind the `trezor` cargo feature):
-  - [Interpreter](../bhwi/src/trezor/interpreter.rs)
-  - [Protocol messages](../bhwi/src/trezor/api.rs)
-  - [Generated protobuf bindings](../bhwi/src/trezor/proto.rs)
-  - [Protocol v1 transport](../bhwi-async/src/transport/trezor/mod.rs)
+  - [Interpreter](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/trezor/interpreter.rs)
+  - [Protocol messages](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/trezor/api.rs)
+  - [Generated protobuf bindings](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/trezor/proto.rs)
+  - [Protocol v1 transport](https://github.com/wizardsardine/bhwi/blob/main/bhwi-async/src/transport/trezor/mod.rs)
 - Upstream references:
   - [Trezor firmware](https://github.com/trezor/trezor-firmware)
   - [Protobuf definitions](https://github.com/trezor/trezor-firmware/tree/main/common/protob)
@@ -178,9 +178,9 @@ nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1
 ## KeepKey
 
 - Local code (gated behind the `keepkey` cargo feature):
-  - [Interpreter](../bhwi/src/keepkey/interpreter.rs)
-  - [Protocol profile and messages](../bhwi/src/keepkey)
-  - [Shared protocol-v1 transport](../bhwi-async/src/transport/trezor/mod.rs)
+  - [Interpreter](https://github.com/wizardsardine/bhwi/blob/main/bhwi/src/keepkey/interpreter.rs)
+  - [Protocol profile and messages](https://github.com/wizardsardine/bhwi/tree/main/bhwi/src/keepkey)
+  - [Shared protocol-v1 transport](https://github.com/wizardsardine/bhwi/blob/main/bhwi-async/src/transport/trezor/mod.rs)
   - [Emulator and test notes](KEEPKEY.md)
 - Upstream references:
   - [KeepKey firmware](https://github.com/keepkey/keepkey-firmware) pinned to
@@ -205,7 +205,7 @@ nix develop .#trezor -c cargo test -p bhwi-e2e-trezor -- --test-threads=1
     `test/data/keepkey-googletest.patch` at the firmware's
     `deps/googletest` root, and `test/data/nanopb-deprecated-mode.patch` at
     the nanopb root. BHWI additionally applies
-    [`nix/patches/keepkey/cmake-minimum.patch`](../nix/patches/keepkey/cmake-minimum.patch)
+    [`nix/patches/keepkey/cmake-minimum.patch`](https://github.com/wizardsardine/bhwi/blob/main/nix/patches/keepkey/cmake-minimum.patch)
     at the firmware root. The emulator outputs are currently `x86_64-linux`
     only.
   - Use these commands for emulator-backed tests:

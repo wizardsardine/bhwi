@@ -61,4 +61,4 @@ glory promote mansion idle axis finger extra february uncover one trip resource 
 ```
 
 
-Then you can open [localhost:5000](localhost:5000) to use the wallet's web interface.
+Then you can open [localhost:5000](http://localhost:5000) to use the wallet's web interface.
