@@ -21,6 +21,7 @@ class BookPage(HTMLParser):
         self.chapter_depth = 0
         self.in_main = False
         self.link = None
+        self.part = None
         self.feed(path.read_text(encoding="utf-8"))
 
     def handle_starttag(self, tag, attributes):
@@ -29,6 +30,8 @@ class BookPage(HTMLParser):
             self.chapter_depth or "chapter" in attributes.get("class", "").split()
         ):
             self.chapter_depth += 1
+        if tag == "li" and "part-title" in attributes.get("class", "").split():
+            self.part = []
         if tag == "main":
             self.in_main = True
         if tag == "a":
@@ -39,6 +42,8 @@ class BookPage(HTMLParser):
     def handle_data(self, data):
         if self.link is not None:
             self.link[1].append(data)
+        if self.part is not None:
+            self.part.append(data)
         if self.in_main:
             self.body.append(data)
 
@@ -48,8 +53,11 @@ class BookPage(HTMLParser):
             link = (href, "".join(text).strip())
             self.links.append(link)
             if chapter:
-                self.navigation.append(link)
+                self.navigation.append(("link", href, link[1]))
             self.link = None
+        if tag == "li" and self.part is not None:
+            self.navigation.append(("part", "".join(self.part).strip()))
+            self.part = None
         if tag == "ol" and self.chapter_depth:
             self.chapter_depth -= 1
         if tag == "main":
@@ -57,7 +65,7 @@ class BookPage(HTMLParser):
 
 
 class BuildDocsTest(unittest.TestCase):
-    def test_rendered_discovery_and_removal(self):
+    def test_rendered_categories_discovery_and_removal(self):
         repository = Path(__file__).resolve().parents[2]
         generator = repository / "nix/scripts/build-docs.py"
         with tempfile.TemporaryDirectory() as temporary:
@@ -71,6 +79,16 @@ class BuildDocsTest(unittest.TestCase):
             )
             shared_title = "Shared [label] *title*"
             pages = {
+                "docs/HWI.md": "# HWI usage\n",
+                "docs/HWI_PARITY.md": "# HWI parity\n",
+                "docs/DEVICE_ONBOARDING.md": "# Device onboarding\n",
+                "docs/VISION.md": "# Vision\n",
+                "docs/getting-started/setup.md": "# Setup\n",
+                "docs/devices/new-vendor.md": "# New vendor\n",
+                "docs/development/LEDGER.md": "# Ledger development\n",
+                "docs/design/architecture.md": "# Architecture\n",
+                "docs/api-reference/manual.md": "# Manual API guide\n",
+                "docs/nested/devices/Setup.md": "# Nested fallback\n",
                 "docs/z.md": f"# {shared_title} ###\n\nLOWERCASE_BODY\n",
                 "docs/nested/Übersicht.md": "# Unicode guide\n\nUNICODE_BODY\n",
                 "docs/Z.md": f"# {shared_title}\n\nUPPERCASE_BODY\n",
@@ -82,6 +100,8 @@ class BuildDocsTest(unittest.TestCase):
                 "website/README.md": "# Unrelated website page\n",
                 "outside/page.md": "# Symlink-only page\n",
             }
+            for device in ("BITBOX", "COLDCARD", "JADE", "KEEPKEY", "LEDGER", "SPECTER", "TREZOR"):
+                pages[f"docs/{device}.md"] = f"# {device} guide\n"
             for path, content in pages.items():
                 destination = source / path
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -123,13 +143,35 @@ class BuildDocsTest(unittest.TestCase):
 
             book, output = render("first")
             expected_navigation = [
-                ("README.html", "Test introduction"),
-                ("docs/Z.html", shared_title),
-                ("docs/fallback.html", "fallback"),
-                ("docs/nested/Guide (USB).html", "USB guide"),
-                ("docs/nested/Übersicht.html", "Unicode guide"),
-                ("docs/z.html", shared_title),
-                ("API.html", "API reference"),
+                ("part", "Getting started"),
+                ("link", "README.html", "Test introduction"),
+                ("link", "docs/HWI.html", "HWI usage"),
+                ("link", "docs/getting-started/setup.html", "Setup"),
+                ("part", "Devices"),
+                ("link", "docs/BITBOX.html", "BITBOX guide"),
+                ("link", "docs/COLDCARD.html", "COLDCARD guide"),
+                ("link", "docs/JADE.html", "JADE guide"),
+                ("link", "docs/KEEPKEY.html", "KEEPKEY guide"),
+                ("link", "docs/LEDGER.html", "LEDGER guide"),
+                ("link", "docs/SPECTER.html", "SPECTER guide"),
+                ("link", "docs/TREZOR.html", "TREZOR guide"),
+                ("link", "docs/devices/new-vendor.html", "New vendor"),
+                ("part", "Development"),
+                ("link", "docs/DEVICE_ONBOARDING.html", "Device onboarding"),
+                ("link", "docs/HWI_PARITY.html", "HWI parity"),
+                ("link", "docs/Z.html", shared_title),
+                ("link", "docs/development/LEDGER.html", "Ledger development"),
+                ("link", "docs/fallback.html", "fallback"),
+                ("link", "docs/nested/Guide (USB).html", "USB guide"),
+                ("link", "docs/nested/devices/Setup.html", "Nested fallback"),
+                ("link", "docs/nested/Übersicht.html", "Unicode guide"),
+                ("link", "docs/z.html", shared_title),
+                ("part", "Design"),
+                ("link", "docs/VISION.html", "Vision"),
+                ("link", "docs/design/architecture.html", "Architecture"),
+                ("part", "API reference"),
+                ("link", "docs/api-reference/manual.html", "Manual API guide"),
+                ("link", "API.html", "API reference"),
             ]
             introduction = BookPage(output / "README.html")
             # mdBook 0.5 renders the shared sidebar separately from chapter pages.
@@ -155,12 +197,24 @@ class BuildDocsTest(unittest.TestCase):
             self.assertNotEqual(generate(book).returncode, 0)
 
             guide.unlink()
+            (source / "docs/VISION.md").unlink()
+            (source / "docs/design/architecture.md").unlink()
             _, updated = render("removed")
             self.assertEqual(
                 BookPage(updated / "toc.html").navigation,
-                [entry for entry in expected_navigation if entry[0] != "docs/nested/Guide (USB).html"],
+                [
+                    entry for entry in expected_navigation
+                    if entry not in (
+                        ("link", "docs/nested/Guide (USB).html", "USB guide"),
+                        ("part", "Design"),
+                        ("link", "docs/VISION.html", "Vision"),
+                        ("link", "docs/design/architecture.html", "Architecture"),
+                    )
+                ],
             )
             self.assertFalse((updated / "docs/nested/Guide (USB).html").exists())
+            self.assertFalse((updated / "docs/VISION.html").exists())
+            self.assertFalse((updated / "docs/design/architecture.html").exists())
 
             for index, character in enumerate("\r\n<>#?%\\&"):
                 invalid = source / "docs" / f"Bad{character}path.md"
@@ -175,7 +229,12 @@ class BuildDocsTest(unittest.TestCase):
             _, empty = render("empty")
             self.assertEqual(
                 BookPage(empty / "toc.html").navigation,
-                [expected_navigation[0], expected_navigation[-1]],
+                [
+                    ("part", "Getting started"),
+                    ("link", "README.html", "Test introduction"),
+                    ("part", "API reference"),
+                    ("link", "API.html", "API reference"),
+                ],
             )
 
 

@@ -8,6 +8,25 @@ import shutil
 import string
 import sys
 
+CATEGORIES = {
+    "getting-started": "Getting started",
+    "devices": "Devices",
+    "development": "Development",
+    "design": "Design",
+    "api-reference": "API reference",
+}
+LEGACY_CATEGORIES = {
+    "HWI.md": "getting-started",
+    "BITBOX.md": "devices",
+    "COLDCARD.md": "devices",
+    "JADE.md": "devices",
+    "KEEPKEY.md": "devices",
+    "LEDGER.md": "devices",
+    "SPECTER.md": "devices",
+    "TREZOR.md": "devices",
+    "VISION.md": "design",
+}
+
 
 API_REFERENCE = """# API reference
 
@@ -95,15 +114,29 @@ def build_book(source_root, book_dir):
     if docs.is_symlink():
         raise ValueError(f"Documentation directory must not be a symlink: {docs}")
     copy_guides(docs, source / "docs", guides)
-    summary = "# Summary\n\n" + summary_entry(
-        chapter_title(introduction, Path("README.md")), "README.md"
+    chapters = {category: [] for category in CATEGORIES}
+    chapters["getting-started"].append(
+        (chapter_title(introduction, Path("README.md")), "README.md")
     )
     for guide in sorted(guides, key=lambda path: path.relative_to(source).as_posix()):
-        summary += summary_entry(
-            chapter_title(guide.read_text(encoding="utf-8"), guide),
-            guide.relative_to(source).as_posix(),
+        relative = guide.relative_to(source / "docs")
+        category = relative.parts[0] if len(relative.parts) > 1 else None
+        if category not in CATEGORIES:
+            category = LEGACY_CATEGORIES.get(guide.name, "development")
+        chapters[category].append(
+            (
+                chapter_title(guide.read_text(encoding="utf-8"), guide),
+                guide.relative_to(source).as_posix(),
+            )
         )
-    summary += summary_entry("API reference", "API.md")
+    chapters["api-reference"].append(("API reference", "API.md"))
+    summary = "# Summary\n\n"
+    for category, title in CATEGORIES.items():
+        if chapters[category]:
+            summary += f"# {title}\n\n"
+            for chapter, path in chapters[category]:
+                summary += summary_entry(chapter, path)
+            summary += "\n"
     (source / "SUMMARY.md").write_text(summary, encoding="utf-8")
     (source / "API.md").write_text(API_REFERENCE, encoding="utf-8")
 

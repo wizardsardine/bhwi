@@ -148,6 +148,14 @@ Developers maintain Markdown and Rust doc comments; navigation (`SUMMARY.md`)
 and HTML are generated, not maintained by hand. The new crate overviews and
 docs.rs metadata apply to future releases, not existing published versions.
 
+The book groups chapters into Getting started, Devices, Development, Design,
+and API reference. New guides are discovered recursively under `docs/`; the
+first directory can select a category with `getting-started/`, `devices/`,
+`development/`, `design/`, or `api-reference/`. Existing HWI, device, and VISION
+guides keep their categories without moving; other guides default to Development.
+Category directories override those legacy filenames, and chapter URLs stay
+relative to their source paths.
+
 For local preview, build `nix build .#website-ghpages` and serve its combined
 output under `/bhwi/`. The Vite development app does not serve the generated
 book.
