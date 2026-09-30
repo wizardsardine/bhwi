@@ -185,7 +185,7 @@ impl From<JadeResponse> for Response {
                 version: info.jade_version,
                 networks: info.jade_networks.into(),
                 firmware: None,
-                initialized: None,
+                initialized: Some(info.jade_state != api::JadeState::Uninit),
                 label: None,
                 on_device_passphrase_entry: None,
                 needs_pin_sent: None,
