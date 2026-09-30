@@ -283,7 +283,7 @@ enum State {
     AwaitPinPromptFeatures,
     AwaitPinMatrix,
     AwaitPinResult,
-    AwaitPinFailureFeatures,
+    AwaitPinFailureFeatures(Box<TrezorError>),
     AwaitSetupFeatures(Box<SetupCtx>),
     AwaitRestoreFeatures(Box<RestoreCtx>),
     AwaitEntropyRequest([u8; 32]),
@@ -671,7 +671,7 @@ impl<P: Profile> Engine<P> {
         if msg_type == MessageType::Failure as u16 && !matches!(self.state, State::AwaitPinResult) {
             let failure: pb::Failure = api::decode(&payload)?;
             let error = failure_error(failure);
-            if matches!(error, TrezorError::ActionCancelled) {
+            if matches!(error, TrezorError::ActionCancelled(_)) {
                 return Err(error);
             }
             if let State::AwaitMultisigAddress(ctx) = &mut self.state
@@ -852,26 +852,28 @@ impl<P: Profile> Engine<P> {
                     let failure: pb::Failure = api::decode(&payload)?;
                     let needs_features = P::pin_failure_needs_features(&failure);
                     let error = failure_error(failure);
-                    if matches!(error, TrezorError::ActionCancelled) {
-                        return Err(error);
-                    }
-                    if needs_features {
-                        self.state = State::AwaitPinFailureFeatures;
+                    if needs_features && !matches!(error, TrezorError::ActionCancelled(_)) {
+                        self.state = State::AwaitPinFailureFeatures(Box::new(error));
                         return Ok(Some(EngineTransmit::Device(api::get_features())));
                     }
-                    TrezorResponse::DeviceAction(false)
+                    return Err(error);
                 } else {
                     TrezorResponse::DeviceAction(true)
                 }
             }
-            State::AwaitPinFailureFeatures => {
+            State::AwaitPinFailureFeatures(_) => {
+                let State::AwaitPinFailureFeatures(rejected) =
+                    core::mem::replace(&mut self.state, State::New)
+                else {
+                    unreachable!("state checked above")
+                };
                 let features = expect_features::<P>(
                     msg_type,
                     &payload,
                     "reading features after a rejected PIN",
                 )?;
                 check_device_pin_needed(&features)?;
-                TrezorResponse::DeviceAction(false)
+                return Err(*rejected);
             }
             State::AwaitSuccess | State::AwaitToggleSuccess | State::AwaitRecovery => {
                 let _: pb::Success = expect(
@@ -1142,11 +1144,13 @@ fn failure_error(failure: pb::Failure) -> TrezorError {
     let cancelled = pb::failure::FailureType::FailureActionCancelled as i32;
     let pin_cancelled = pb::failure::FailureType::FailurePinCancelled as i32;
     match failure.code {
-        Some(code) if code == cancelled || code == pin_cancelled => TrezorError::ActionCancelled,
+        Some(code) if code == cancelled || code == pin_cancelled => {
+            TrezorError::ActionCancelled(code)
+        }
         code => {
             let message = failure.message.unwrap_or_default();
             TrezorError::Failure(
-                code.unwrap_or(0),
+                code,
                 if message.is_empty() {
                     "device reported a failure".into()
                 } else {
@@ -2873,7 +2877,8 @@ mod tests {
             };
             assert!(matches!(
                 interp.exchange(framed(MessageType::Failure, &failure)),
-                Err(e) if e.kind() == ErrorKind::AuthenticationRefused
+                Err(e) if e.kind() == ErrorKind::UserCancelled
+                    && e.device_code() == Some(DeviceCode::Trezor(code as i32))
             ));
         }
 
@@ -2890,15 +2895,10 @@ mod tests {
         let (msg_type, _) = decode_transmit::<mgmt::GetFeatures>(transmit);
         assert_eq!(msg_type, MessageType::GetFeatures as u16);
 
-        assert!(
-            interp
-                .exchange(framed(MessageType::Features, &locked_features()))
-                .unwrap()
-                .is_none()
-        );
         assert!(matches!(
-            interp.end().unwrap(),
-            Response::DeviceAction(false)
+            interp.exchange(framed(MessageType::Features, &locked_features())),
+            Err(e) if e.kind() == ErrorKind::WrongPin
+                && e.device_code() == Some(DeviceCode::Trezor(7))
         ));
     }
 
@@ -2968,7 +2968,7 @@ mod tests {
         let Err(e) = interp.exchange(failure) else {
             panic!("expected a locked-device error");
         };
-        assert_eq!(e.kind(), ErrorKind::Rejected);
+        assert_eq!(e.kind(), ErrorKind::Locked);
         assert_eq!(
             e.message(),
             "Trezor is locked. Unlock by using 'promptpin' and then 'sendpin'."
@@ -3022,7 +3022,7 @@ mod tests {
     fn send_pin_without_context_is_rejected() {
         assert!(matches!(
             TrezorCommand::try_from(Command::SendPin(None)),
-            Err(TrezorError::Unsupported(_))
+            Err(TrezorError::MissingContext(_))
         ));
     }
 
@@ -3130,7 +3130,8 @@ mod tests {
         let reply = framed(MessageType::PublicKey, &public_key(XPUB, None));
         assert!(matches!(
             interp.exchange(reply),
-            Err(e) if e.kind() == ErrorKind::InvalidInput
+            Err(e) if e.kind() == ErrorKind::WrongNetwork
+                && e.message() == "device returned a key for the wrong network"
         ));
     }
 
@@ -3286,7 +3287,7 @@ mod tests {
                 crate::common::RestoreOptions::default(),
                 None
             )),
-            Err(e) if e.kind() == ErrorKind::Unsupported
+            Err(e) if e.kind() == ErrorKind::MissingContext
         ));
     }
 

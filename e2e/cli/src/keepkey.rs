@@ -1083,7 +1083,7 @@ fn keepkey_management_lifecycle() -> Result<()> {
     assert_failure(
         &cli,
         ["device", "send-pin", rejected_pin],
-        "device rejected the PIN",
+        "[WrongPin] Invalid PIN",
         &[rejected_pin],
     )?;
 

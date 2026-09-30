@@ -1,14 +1,22 @@
 use crate::common::{
-    Command, DeviceContext, DisplayAddress, MultisigAddressType, MultisigDisplayAddress,
+    Command, DeviceCode, DeviceContext, DisplayAddress, Error, MultisigAddressType,
+    MultisigDisplayAddress,
 };
 use crate::keepkey::{
     KeepKeyCommand, KeepKeyError, KeepKeyMultisigAddress, KeepKeyMultisigAddressType,
     ManagementContext,
 };
+use crate::trezor::TrezorError;
 use crate::trezor::interpreter::{address_n, script_type};
 
+impl From<KeepKeyError> for Error {
+    fn from(e: KeepKeyError) -> Self {
+        super::trezor::engine_error(e.0, DeviceCode::KeepKey)
+    }
+}
+
 impl TryFrom<Command> for KeepKeyCommand {
-    type Error = KeepKeyError;
+    type Error = TrezorError;
 
     fn try_from(command: Command) -> Result<Self, Self::Error> {
         Ok(match command {
@@ -32,7 +40,7 @@ impl TryFrom<Command> for KeepKeyCommand {
                 script_type: script_type(address_format, &path),
             },
             Command::DisplayAddress(DisplayAddress::ByDescriptor { .. }, _) => {
-                return Err(KeepKeyError::UnsupportedDisplayAddress(
+                return Err(TrezorError::UnsupportedDisplayAddress(
                     "descriptor address display is not yet supported",
                 ));
             }
@@ -41,7 +49,7 @@ impl TryFrom<Command> for KeepKeyCommand {
             }
             Command::SignTx(psbt, context) => {
                 if context.is_some() {
-                    return Err(KeepKeyError::Unsupported(
+                    return Err(TrezorError::Unsupported(
                         "KeepKey SignTx does not support device context",
                     ));
                 }
@@ -52,12 +60,10 @@ impl TryFrom<Command> for KeepKeyCommand {
                 message,
             },
             Command::RegisterWallet { .. } => {
-                return Err(KeepKeyError::Unsupported(
-                    "register_wallet is not supported",
-                ));
+                return Err(TrezorError::Unsupported("register_wallet is not supported"));
             }
             Command::Backup => {
-                return Err(KeepKeyError::Unsupported(
+                return Err(TrezorError::Unsupported(
                     "The Keepkey does not support creating a backup via software",
                 ));
             }
@@ -66,7 +72,7 @@ impl TryFrom<Command> for KeepKeyCommand {
                     host_entropy,
                 })) = context
                 else {
-                    return Err(KeepKeyError::Unsupported(
+                    return Err(TrezorError::MissingContext(
                         "KeepKey setup requires host entropy in the device context",
                     ));
                 };
@@ -81,15 +87,15 @@ impl TryFrom<Command> for KeepKeyCommand {
                     u2f_counter,
                 })) = context
                 else {
-                    return Err(KeepKeyError::Unsupported(
+                    return Err(TrezorError::MissingContext(
                         "KeepKey restore requires a U2F counter in the device context",
                     ));
                 };
                 let word_count = u32::try_from(options.word_count).map_err(|_| {
-                    KeepKeyError::InvalidInput("restore word count must be positive".into())
+                    TrezorError::InvalidInput("restore word count must be positive".into())
                 })?;
                 if !matches!(word_count, 12 | 18 | 24) {
-                    return Err(KeepKeyError::InvalidInput(
+                    return Err(TrezorError::InvalidInput(
                         "restore word count must be 12, 18, or 24".into(),
                     ));
                 }
@@ -104,7 +110,7 @@ impl TryFrom<Command> for KeepKeyCommand {
             Command::SendPin(context) => {
                 let Some(DeviceContext::KeepKeyManagement(ManagementContext::Pin(pin))) = context
                 else {
-                    return Err(KeepKeyError::Unsupported(
+                    return Err(TrezorError::MissingContext(
                         "KeepKey sendpin requires the PIN positions in the device context",
                     ));
                 };

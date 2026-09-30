@@ -64,7 +64,7 @@ impl TryFrom<Command> for TrezorCommand {
                     host_entropy,
                 })) = context
                 else {
-                    return Err(TrezorError::Unsupported(
+                    return Err(TrezorError::MissingContext(
                         "Trezor setup requires host entropy in the device context",
                     ));
                 };
@@ -79,7 +79,7 @@ impl TryFrom<Command> for TrezorCommand {
                     u2f_counter,
                 })) = context
                 else {
-                    return Err(TrezorError::Unsupported(
+                    return Err(TrezorError::MissingContext(
                         "Trezor restore requires a U2F counter in the device context",
                     ));
                 };
@@ -102,7 +102,7 @@ impl TryFrom<Command> for TrezorCommand {
             Command::SendPin(context) => {
                 let Some(DeviceContext::TrezorManagement(ManagementContext::Pin(pin))) = context
                 else {
-                    return Err(TrezorError::Unsupported(
+                    return Err(TrezorError::MissingContext(
                         "Trezor sendpin requires the PIN positions in the device context",
                     ));
                 };
@@ -130,41 +130,60 @@ impl From<TrezorResponse> for Response {
 
 impl From<TrezorError> for Error {
     fn from(e: TrezorError) -> Self {
-        match e {
-            TrezorError::Decode(err) => Error::new(ErrorKind::Serialization, err.to_string()),
-            TrezorError::MalformedFrame => {
-                Error::new(ErrorKind::Serialization, "malformed device message frame")
-            }
-            TrezorError::UnexpectedMessage(t, ctx) => Error::new(
-                ErrorKind::UnexpectedResponse,
-                format!("unexpected response to {ctx}: message type {t}"),
-            ),
-            TrezorError::Failure(code, msg) => {
-                Error::new(ErrorKind::Other, msg).with_device_code(DeviceCode::Trezor(code))
-            }
-            TrezorError::Locked(ctx) => Error::new(ErrorKind::Rejected, ctx),
-            TrezorError::NetworkMismatch => Error::new(
-                ErrorKind::InvalidInput,
-                "device returned a key for the wrong network",
-            ),
-            TrezorError::ActionCancelled => Error::new(ErrorKind::AuthenticationRefused, ""),
-            TrezorError::AlreadyInitialized => Error::new(
-                ErrorKind::Rejected,
-                "Device is already initialized. Use wipe first and try again",
-            ),
-            TrezorError::Unsupported(s) => Error::new(ErrorKind::Unsupported, s),
-            TrezorError::UnsupportedDisplayAddress(s) => {
-                Error::new(ErrorKind::UnsupportedDisplayAddress, s)
-            }
-            TrezorError::PassphraseTooLong => {
-                Error::new(ErrorKind::InvalidInput, "Passphrase too long")
-            }
-            TrezorError::NonNumericPin => {
-                Error::new(ErrorKind::InvalidInput, "Non-numeric PIN provided")
-            }
-            TrezorError::AlreadyUnlocked(s) => Error::new(ErrorKind::AlreadyUnlocked, s),
-            TrezorError::InvalidInput(s) => Error::new(ErrorKind::InvalidInput, s),
+        engine_error(e, DeviceCode::Trezor)
+    }
+}
+
+pub(super) fn engine_error(e: TrezorError, device_code: fn(i32) -> DeviceCode) -> Error {
+    match e {
+        TrezorError::Decode(err) => Error::new(ErrorKind::Serialization, err.to_string()),
+        TrezorError::MalformedFrame => {
+            Error::new(ErrorKind::Serialization, "malformed device message frame")
         }
+        TrezorError::UnexpectedMessage(t, ctx) => Error::new(
+            ErrorKind::UnexpectedResponse,
+            format!("unexpected response to {ctx}: message type {t}"),
+        ),
+        TrezorError::Failure(Some(code), msg) => {
+            Error::new(failure_kind(code), msg).with_device_code(device_code(code))
+        }
+        TrezorError::Failure(None, msg) => Error::new(ErrorKind::Other, msg),
+        TrezorError::Locked(ctx) => Error::new(ErrorKind::Locked, ctx),
+        TrezorError::NetworkMismatch => Error::new(
+            ErrorKind::WrongNetwork,
+            "device returned a key for the wrong network",
+        ),
+        TrezorError::ActionCancelled(code) => {
+            Error::new(ErrorKind::UserCancelled, "").with_device_code(device_code(code))
+        }
+        TrezorError::AlreadyInitialized => Error::new(
+            ErrorKind::AlreadyInitialized,
+            "Device is already initialized. Use wipe first and try again",
+        ),
+        TrezorError::Unsupported(s) => Error::new(ErrorKind::Unsupported, s),
+        TrezorError::MissingContext(s) => Error::new(ErrorKind::MissingContext, s),
+        TrezorError::UnsupportedDisplayAddress(s) => {
+            Error::new(ErrorKind::UnsupportedDisplayAddress, s)
+        }
+        TrezorError::PassphraseTooLong => {
+            Error::new(ErrorKind::InvalidInput, "Passphrase too long")
+        }
+        TrezorError::NonNumericPin => {
+            Error::new(ErrorKind::InvalidInput, "Non-numeric PIN provided")
+        }
+        TrezorError::AlreadyUnlocked(s) => Error::new(ErrorKind::AlreadyUnlocked, s),
+        TrezorError::InvalidInput(s) => Error::new(ErrorKind::InvalidInput, s),
+    }
+}
+
+fn failure_kind(code: i32) -> ErrorKind {
+    use crate::trezor::proto::common::failure::FailureType;
+    match FailureType::try_from(code) {
+        Ok(FailureType::FailurePinExpected) => ErrorKind::Locked,
+        Ok(FailureType::FailurePinInvalid) => ErrorKind::WrongPin,
+        Ok(FailureType::FailureNotInitialized) => ErrorKind::NotInitialized,
+        Ok(FailureType::FailureFirmwareError) => ErrorKind::DeviceFailure,
+        _ => ErrorKind::Other,
     }
 }
 

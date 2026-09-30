@@ -1702,7 +1702,10 @@ fn pin_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
         }
     }
     if let Some(error) = common_device_error(err)
-        && error.device_code() == Some(bhwi::common::DeviceCode::Trezor(7))
+        && matches!(
+            error.device_code(),
+            Some(bhwi::common::DeviceCode::Trezor(7) | bhwi::common::DeviceCode::KeepKey(7))
+        )
     {
         return HwiError::new(HwiErrorCode::BadArgument, hwi_message(error));
     }
@@ -1715,15 +1718,20 @@ fn send_pin_error_response(err: &(dyn std::error::Error + 'static)) -> HwiRespon
         #[cfg(feature = "trezor")]
         let action_cancelled = matches!(
             current.downcast_ref::<bhwi::trezor::TrezorError>(),
-            Some(bhwi::trezor::TrezorError::ActionCancelled)
+            Some(bhwi::trezor::TrezorError::ActionCancelled(_))
         );
         #[cfg(not(feature = "trezor"))]
         let action_cancelled = false;
         // The common KeepKey adapter converts the same protocol error before
         // the async HWI boundary sees it.
-        let converted_action_cancelled = current
-            .downcast_ref::<bhwi::common::Error>()
-            .is_some_and(|error| error.kind() == bhwi::common::ErrorKind::AuthenticationRefused);
+        let converted_action_cancelled =
+            current
+                .downcast_ref::<bhwi::common::Error>()
+                .is_some_and(|error| match error.kind() {
+                    bhwi::common::ErrorKind::AuthenticationRefused => true,
+                    bhwi::common::ErrorKind::UserCancelled => is_trezor_family_code(error),
+                    _ => false,
+                });
         if action_cancelled || converted_action_cancelled {
             return HwiResponse::Success(HwiSuccessResponse { success: false });
         }
@@ -1789,8 +1797,17 @@ async fn send_pin_device(selector: HwiSelector, pin: String) -> HwiResponse {
             return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
         }
     };
-    match device.device().send_pin(Some(context)).await {
+    send_pin_response(device.device().send_pin(Some(context)).await)
+}
+
+fn send_pin_response(result: Result<bool, bhwi_async::HWIDeviceError>) -> HwiResponse {
+    match result {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
+        // Upstream's `send_pin` returns False for any `Failure` the PIN draws,
+        // after ruling out an already unlocked device.
+        Err(err) if common_device_error(&err).is_some_and(is_trezor_family_code) => {
+            HwiResponse::Success(HwiSuccessResponse { success: false })
+        }
         Err(err) => send_pin_error_response(&err),
     }
 }
@@ -2602,12 +2619,26 @@ fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
             | ErrorKind::UnsupportedDisplayAddress => HwiErrorCode::UnsupportedCommand,
             // Device-refused input keeps upstream's bad-argument class,
             // e.g. `Coldcard Error: ...` for an unknown multisig wallet.
-            ErrorKind::InvalidInput | ErrorKind::Rejected => HwiErrorCode::BadArgument,
+            ErrorKind::InvalidInput | ErrorKind::Rejected | ErrorKind::WrongNetwork => {
+                HwiErrorCode::BadArgument
+            }
+            ErrorKind::AlreadyInitialized => HwiErrorCode::DeviceAlreadyInitialized,
+            // Upstream's `trezor_exception` lets any other device failure through as unknown.
+            kind if is_trezor_family_code(error) && kind != ErrorKind::Locked => {
+                HwiErrorCode::DeviceFailure
+            }
             _ => return device_error(err),
         };
         return HwiError::new(code, hwi_message(error));
     }
     device_error(err)
+}
+
+fn is_trezor_family_code(error: &bhwi::common::Error) -> bool {
+    matches!(
+        error.device_code(),
+        Some(bhwi::common::DeviceCode::Trezor(_) | bhwi::common::DeviceCode::KeepKey(_))
+    )
 }
 
 /// Device-aware classification. Upstream's Ledger backend uses the new
@@ -2628,6 +2659,12 @@ fn classify_device_error_for(
         && common_device_error(err).is_some_and(|error| error.device_code().is_none())
     {
         return HwiError::new(HwiErrorCode::DeviceFailure, classified.error);
+    }
+    // Upstream raises "must be wiped before setup" as UnavailableActionError.
+    if device_type == DeviceType::BitBox02
+        && classified.code == HwiErrorCode::DeviceAlreadyInitialized.code()
+    {
+        return HwiError::new(HwiErrorCode::UnsupportedCommand, classified.error);
     }
     classified
 }
@@ -4333,33 +4370,63 @@ mod tests {
     #[test]
     #[cfg(feature = "trezor")]
     fn send_pin_action_cancelled_matches_hwi_false_contract() {
-        for error in [
-            bhwi_async::HWIDeviceError::new(bhwi::trezor::TrezorError::ActionCancelled),
-            wrapped_device_error(bhwi::common::Error::new(
-                bhwi::common::ErrorKind::AuthenticationRefused,
-                "authentication refused",
-            )),
+        use bhwi::common::DeviceCode;
+        use bhwi::trezor::TrezorError;
+
+        let mut errors = vec![wrapped_device_error(bhwi::common::Error::new(
+            bhwi::common::ErrorKind::AuthenticationRefused,
+            "authentication refused",
+        ))];
+        for code in [4, 6] {
+            errors.push(bhwi_async::HWIDeviceError::new(
+                TrezorError::ActionCancelled(code),
+            ));
+        }
+        for code in [
+            DeviceCode::Trezor(4),
+            DeviceCode::Trezor(6),
+            DeviceCode::KeepKey(4),
+            DeviceCode::KeepKey(6),
         ] {
+            errors.push(wrapped_device_error(
+                bhwi::common::Error::new(bhwi::common::ErrorKind::UserCancelled, "")
+                    .with_device_code(code),
+            ));
+        }
+        for error in &errors {
             assert_eq!(
-                serde_json::to_value(send_pin_error_response(&error)).unwrap(),
+                serde_json::to_value(send_pin_error_response(error)).unwrap(),
                 serde_json::json!({ "success": false })
             );
         }
+    }
 
-        let bad_pin = wrapped_device_error(
-            bhwi::common::Error::new(bhwi::common::ErrorKind::Other, "bad pin")
-                .with_device_code(bhwi::common::DeviceCode::Trezor(7)),
-        );
-        let HwiResponse::Error(error) = send_pin_error_response(&bad_pin) else {
-            panic!("expected HWI error");
-        };
-        assert_eq!(error.code, HwiErrorCode::BadArgument.code());
-        assert_eq!(error.error, "bad pin");
+    #[test]
+    #[cfg(feature = "trezor")]
+    fn pin_paths_report_wrong_pin_for_both_brands() {
+        use bhwi::common::DeviceCode;
+
+        for code in [DeviceCode::Trezor(7), DeviceCode::KeepKey(7)] {
+            let bad_pin = wrapped_device_error(
+                bhwi::common::Error::new(bhwi::common::ErrorKind::WrongPin, "PIN invalid")
+                    .with_device_code(code),
+            );
+
+            let error = pin_error(&bad_pin);
+            assert_eq!(error.code, HwiErrorCode::BadArgument.code(), "{code:?}");
+            assert_eq!(error.error, "PIN invalid", "{code:?}");
+
+            assert_eq!(
+                serde_json::to_value(send_pin_response(Err(bad_pin))).unwrap(),
+                serde_json::json!({ "success": false }),
+                "{code:?}"
+            );
+        }
     }
 
     #[test]
     fn classify_device_error_maps_typed_common_errors() {
-        use bhwi::common::{Error as CommonError, ErrorKind};
+        use bhwi::common::{DeviceCode, Error as CommonError, ErrorKind};
 
         let classify = |kind, message| {
             classify_device_error(&wrapped_device_error(CommonError::new(kind, message)))
@@ -4394,6 +4461,12 @@ mod tests {
         let fallback = classify(ErrorKind::Serialization, "boom");
         assert_eq!(fallback.code, HwiErrorCode::DeviceConnectionError.code());
         assert!(fallback.error.contains("boom"), "{}", fallback.error);
+
+        let trezor_failure = classify_device_error(&wrapped_device_error(
+            CommonError::new(ErrorKind::Other, "messages.c:232:array overflow")
+                .with_device_code(DeviceCode::Trezor(3)),
+        ));
+        assert_eq!(trezor_failure.code, HwiErrorCode::DeviceFailure.code());
     }
 
     #[test]
@@ -4403,9 +4476,15 @@ mod tests {
         assert_eq!(locked.code, HwiErrorCode::DeviceNotReady.code());
         assert_eq!(locked.error, KEEPKEY_LOCKED);
 
+        let locked = classify_device_error(&wrapped_device_error(bhwi::common::Error::from(
+            bhwi::trezor::TrezorError::Locked(KEEPKEY_LOCKED),
+        )));
+        assert_eq!(locked.code, HwiErrorCode::DeviceNotReady.code());
+        assert_eq!(locked.error, KEEPKEY_LOCKED);
+
         let bad_pin = wrapped_device_error(
-            bhwi::common::Error::new(bhwi::common::ErrorKind::Other, "bad pin")
-                .with_device_code(bhwi::common::DeviceCode::Trezor(7)),
+            bhwi::common::Error::new(bhwi::common::ErrorKind::WrongPin, "bad pin")
+                .with_device_code(bhwi::common::DeviceCode::KeepKey(7)),
         );
         let bad_pin = pin_error(&bad_pin);
         assert_eq!(bad_pin.code, HwiErrorCode::BadArgument.code());
@@ -4455,6 +4534,15 @@ mod tests {
                 "{code}"
             );
         }
+
+        let wiped = wrapped_device_error(CommonError::new(
+            ErrorKind::AlreadyInitialized,
+            "The BitBox02 must be wiped before setup.",
+        ));
+        assert_eq!(
+            classify_device_error_for(DeviceType::BitBox02, &wiped).code,
+            HwiErrorCode::UnsupportedCommand.code()
+        );
 
         let pairing = wrapped_device_error(CommonError::new(
             ErrorKind::AuthenticationRefused,

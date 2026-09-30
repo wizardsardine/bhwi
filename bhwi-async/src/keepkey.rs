@@ -51,7 +51,7 @@ impl<T> KeepKey<T> {
 
 impl<C, T, R, E, F> crate::CommonInterface<C, T, R, E> for KeepKey<F>
 where
-    C: TryInto<KeepKeyCommand, Error = KeepKeyError>,
+    C: TryInto<KeepKeyCommand, Error = bhwi::trezor::TrezorError>,
     T: From<Vec<u8>> + From<common::HostRequest>,
     R: From<KeepKeyResponse>,
     E: From<KeepKeyError>,

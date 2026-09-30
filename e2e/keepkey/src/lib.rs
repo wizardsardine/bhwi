@@ -738,7 +738,7 @@ mod tests {
         let mut wallet = device().await;
         assert_error(
             decided(DebugButton::No, wallet.sign_tx(psbt, None)).await,
-            "authentication refused",
+            "[UserCancelled]",
         );
         let mut next = device().await;
         assert_eq!(
@@ -1165,12 +1165,11 @@ mod tests {
         lock_device(DEFAULT_MAIN_ADDR).await.unwrap();
         let mut wrong = raw_device().await;
         assert!(wrong.prompt_pin().await.unwrap());
-        assert!(
-            !wrong
-                .send_pin(Some(pin_context("1111".into())))
-                .await
-                .unwrap()
-        );
+        let rejected = wrong
+            .send_pin(Some(pin_context("1111".into())))
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.kind(), bhwi::common::ErrorKind::WrongPin);
 
         drop(wrong);
         lock_device(DEFAULT_MAIN_ADDR).await.unwrap();
