@@ -136,7 +136,7 @@ impl TryFrom<u16> for StatusWord {
             0xB008 => Ok(StatusWord::SignatureFail),
             0x9000 => Ok(StatusWord::OK),
             0xE000 => Ok(StatusWord::InterruptedExecution),
-            _ => Err(ApduError::StatusWordUnknown),
+            _ => Err(ApduError::StatusWordUnknown(value)),
         }
     }
 }
@@ -204,7 +204,7 @@ impl TryFrom<Vec<u8>> for ApduResponse {
             return Err(ApduError::ResponseTooShort);
         }
         let s = u16::from_be_bytes([res[res.len() - 2], res[res.len() - 1]]);
-        let status_word = StatusWord::try_from(s).map_err(|_| ApduError::StatusWordUnknown)?;
+        let status_word = StatusWord::try_from(s)?;
 
         Ok(ApduResponse {
             data: res[0..res.len() - 2].to_vec(),
@@ -217,8 +217,8 @@ impl TryFrom<Vec<u8>> for ApduResponse {
 #[derive(Debug, thiserror::Error)]
 pub enum ApduError {
     /// A status word not recognized by [`StatusWord`].
-    #[error("unknown status word")]
-    StatusWordUnknown,
+    #[error("unknown status word 0x{0:04x}")]
+    StatusWordUnknown(u16),
 
     /// A response missing its two-byte status word.
     #[error("response too short")]

@@ -97,6 +97,14 @@ pub enum LedgerError {
         Vec<u8>,
     ),
 
+    /// A failing status word and the operation it answered.
+    #[error("{1} failed: status {0:?} ({:#06x})", *.0 as u16)]
+    Status(StatusWord, &'static str),
+
+    /// A status word saying the Bitcoin app is not open or ready.
+    #[error("{1} failed, the Bitcoin app is not ready: status {0:?} ({:#06x})", *.0 as u16)]
+    AppNotReady(StatusWord, &'static str),
+
     /// Invalid PSBT data or yielded signing result.
     #[error("invalid psbt: {0}")]
     InvalidPsbt(
@@ -106,7 +114,7 @@ pub enum LedgerError {
 
     /// User cancellation reported by the application.
     #[error("action canceled by the user")]
-    UserCancelled,
+    UserCancelled(StatusWord),
 }
 
 /// Upstream HWI's Ledger `cancels` list: 0x6982 and 0x6985 are user
@@ -622,6 +630,13 @@ where
         let state = std::mem::take(&mut self.state);
         let (next_state, result) = match state {
             State::GetWalletAddress(GetWalletAddressStep::Fingerprint { path, display }) => {
+                if res.status_word != StatusWord::OK {
+                    return Err(LedgerError::Status(
+                        res.status_word,
+                        "display address: master fingerprint",
+                    )
+                    .into());
+                }
                 if res.data.len() < 4 {
                     return Err(LedgerError::unexpected_result(
                         res.data,
@@ -656,6 +671,11 @@ where
                 fingerprint,
                 display,
             }) => {
+                if res.status_word != StatusWord::OK {
+                    return Err(
+                        LedgerError::Status(res.status_word, "display address: xpub").into(),
+                    );
+                }
                 let xpub = Xpub::from_str(&String::from_utf8_lossy(&res.data)).map_err(|_| {
                     LedgerError::unexpected_result(res.data, "display address: xpub")
                 })?;
@@ -684,7 +704,7 @@ where
             }
             State::GetWalletAddress(GetWalletAddressStep::WalletAddress { mut store }) => {
                 if is_cancel(res.status_word) {
-                    return Err(LedgerError::UserCancelled.into());
+                    return Err(LedgerError::UserCancelled(res.status_word).into());
                 } else if res.status_word == StatusWord::InterruptedExecution {
                     if let Some(ref mut s) = store {
                         let transmit = s.execute(res.data).map_err(LedgerError::from)?;
@@ -696,9 +716,7 @@ where
                         return Err(LedgerError::Interrupted.into());
                     }
                 } else if res.status_word != StatusWord::OK {
-                    return Err(
-                        LedgerError::unexpected_result(res.data, "display address status").into(),
-                    );
+                    return Err(LedgerError::Status(res.status_word, "display address").into());
                 } else {
                     let address = String::from_utf8(res.data)
                         .map_err(|e| LedgerError::unexpected_result(vec![], e.to_string()))?;
@@ -719,17 +737,20 @@ where
                 match command {
                     LedgerCommand::GetAppInfo => {
                         if res.status_word != StatusWord::OK {
-                            return Err(LedgerError::unexpected_result(
-                                res.data,
-                                "get_version response",
-                            )
-                            .into());
+                            return Err(
+                                LedgerError::AppNotReady(res.status_word, "get version").into()
+                            );
                         }
                         let response = GetAppInfoResponse::try_from(res.data.clone())
                             .map_err(|e| LedgerError::unexpected_result(res.data, e))?;
                         (State::Finished(LedgerResponse::AppInfo(response)), None)
                     }
                     LedgerCommand::GetMasterFingerprint => {
+                        if res.status_word != StatusWord::OK {
+                            return Err(
+                                LedgerError::Status(res.status_word, "master fingerprint").into()
+                            );
+                        }
                         if res.data.len() < 4 {
                             return Err(LedgerError::unexpected_result(
                                 res.data,
@@ -766,11 +787,14 @@ where
                         };
                         return Ok(Some(transmit));
                     }
-                    LedgerCommand::GetXpub { .. } => {
+                    LedgerCommand::GetXpub { display, .. } => {
+                        if display && is_cancel(res.status_word) {
+                            return Err(LedgerError::UserCancelled(res.status_word).into());
+                        }
                         if res.status_word != StatusWord::OK {
-                            return Err(LedgerError::unexpected_result(
-                                res.data,
-                                "get extended pubkey status",
+                            return Err(LedgerError::Status(
+                                res.status_word,
+                                "get extended pubkey",
                             )
                             .into());
                         }
@@ -780,7 +804,7 @@ where
                     }
                     LedgerCommand::OpenApp(..) => {
                         if is_cancel(res.status_word) {
-                            return Err(LedgerError::UserCancelled.into());
+                            return Err(LedgerError::UserCancelled(res.status_word).into());
                         }
                         if matches!(
                             res.status_word,
@@ -788,16 +812,14 @@ where
                         ) {
                             (State::Finished(LedgerResponse::TaskDone), None)
                         } else {
-                            return Err(LedgerError::unexpected_result(
-                                res.data,
-                                "open app response",
-                            )
-                            .into());
+                            return Err(
+                                LedgerError::AppNotReady(res.status_word, "open app").into()
+                            );
                         }
                     }
                     LedgerCommand::SignMessage { .. } => match res.status_word {
                         status if is_cancel(status) => {
-                            return Err(LedgerError::UserCancelled.into());
+                            return Err(LedgerError::UserCancelled(status).into());
                         }
                         StatusWord::ClaNotSupported | StatusWord::SignatureFail => {
                             (State::Finished(LedgerResponse::TaskDone), None)
@@ -812,40 +834,32 @@ where
                                 None,
                             )
                         }
-                        _ => {
-                            return Err(LedgerError::unexpected_result(
-                                res.data,
-                                "sign message status",
-                            )
-                            .into());
+                        status => {
+                            return Err(LedgerError::Status(status, "sign message").into());
                         }
                     },
                     LedgerCommand::GetWalletAddress { .. } => {
                         if is_cancel(res.status_word) {
-                            return Err(LedgerError::UserCancelled.into());
+                            return Err(LedgerError::UserCancelled(res.status_word).into());
                         } else if res.status_word == StatusWord::OK {
                             let address = String::from_utf8(res.data).map_err(|e| {
                                 LedgerError::unexpected_result(vec![], e.to_string())
                             })?;
                             (State::Finished(LedgerResponse::Address(address)), None)
                         } else {
-                            return Err(LedgerError::unexpected_result(
-                                res.data,
-                                "display address status",
-                            )
-                            .into());
+                            return Err(
+                                LedgerError::Status(res.status_word, "display address").into()
+                            );
                         }
                     }
                     LedgerCommand::RegisterWallet { .. } => {
                         if is_cancel(res.status_word) {
-                            return Err(LedgerError::UserCancelled.into());
+                            return Err(LedgerError::UserCancelled(res.status_word).into());
                         }
                         if res.status_word != StatusWord::OK {
-                            return Err(LedgerError::unexpected_result(
-                                res.data,
-                                format!("register wallet status {:?}", res.status_word),
-                            )
-                            .into());
+                            return Err(
+                                LedgerError::Status(res.status_word, "register wallet").into()
+                            );
                         }
                         if res.data.len() < 64 {
                             return Err(LedgerError::unexpected_result(
@@ -860,7 +874,7 @@ where
                     }
                     LedgerCommand::SignPsbt { mut psbt, .. } => match res.status_word {
                         status if is_cancel(status) => {
-                            return Err(LedgerError::UserCancelled.into());
+                            return Err(LedgerError::UserCancelled(status).into());
                         }
                         StatusWord::ClaNotSupported | StatusWord::SignatureFail => {
                             (State::Finished(LedgerResponse::TaskDone), None)
@@ -872,12 +886,8 @@ where
                             }
                             (State::Finished(LedgerResponse::SignedPsbt(psbt)), None)
                         }
-                        _ => {
-                            return Err(LedgerError::unexpected_result(
-                                res.data,
-                                "sign psbt status",
-                            )
-                            .into());
+                        status => {
+                            return Err(LedgerError::Status(status, "sign psbt").into());
                         }
                     },
                 }

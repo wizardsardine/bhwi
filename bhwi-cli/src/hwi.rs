@@ -2038,6 +2038,14 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
             if device.device_type() == DeviceType::Jade && addr_type == HwiAddressType::Tap {
                 return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, "tap"));
             }
+            if device.device_type() == DeviceType::Ledger
+                && !is_standard_path(&path, addr_type, selector.network)
+            {
+                return HwiResponse::Error(HwiError::new(
+                    HwiErrorCode::BadArgument,
+                    "Ledger requires BIP 44 standard paths",
+                ));
+            }
             Ok((
                 DisplayAddress::ByPath {
                     path,
@@ -2445,6 +2453,24 @@ fn bip44_chain(network: Network) -> u32 {
     if network == Network::Bitcoin { 0 } else { 1 }
 }
 
+/// Upstream's `is_standard_path`, which its Ledger backend checks before asking the device.
+fn is_standard_path(path: &DerivationPath, addr_type: HwiAddressType, network: Network) -> bool {
+    let [purpose, coin, account, change, index] = path.as_ref() else {
+        return false;
+    };
+    account.is_hardened()
+        && index.is_normal()
+        && *purpose
+            == ChildNumber::Hardened {
+                index: bip44_purpose(addr_type),
+            }
+        && *coin
+            == ChildNumber::Hardened {
+                index: bip44_chain(network),
+            }
+        && matches!(change, ChildNumber::Normal { index: 0 | 1 })
+}
+
 fn descriptor_type_for(addr_type: HwiAddressType) -> DescriptorType {
     match addr_type {
         HwiAddressType::Legacy => DescriptorType::Pkh,
@@ -2512,6 +2538,11 @@ fn classify_anyhow_device_error(err: &anyhow::Error) -> HwiError {
     classify_device_error(source)
 }
 
+/// Upstream `ledger_bitcoin`'s `DeviceException.exc`, less 0xE000, which is not an error.
+const LEDGER_BITCOIN_STATUS_WORDS: [u16; 11] = [
+    0x6985, 0x6982, 0x6A80, 0x6A82, 0x6A86, 0x6A87, 0x6D00, 0x6E00, 0xB000, 0xB007, 0xB008,
+];
+
 fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
     let mut source = Some(err);
     while let Some(current) = source {
@@ -2525,6 +2556,18 @@ fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
         use bhwi::common::ErrorKind;
         if error.kind() == ErrorKind::InvalidInput && error.message() == "Passphrase too long" {
             return HwiError::new(HwiErrorCode::BadArgument, error.message());
+        }
+        // Upstream's `ledger_bitcoin` raises these from inside a command, past
+        // `ledger_exception`, as unknown errors. Opening the app has no upstream
+        // counterpart and a refusal keeps its own path; every other code keeps -3.
+        if let Some(bhwi::common::DeviceCode::Ledger(status)) = error.device_code()
+            && !matches!(error.kind(), ErrorKind::UserCancelled | ErrorKind::NotReady)
+        {
+            return if LEDGER_BITCOIN_STATUS_WORDS.contains(&status) {
+                HwiError::new(HwiErrorCode::DeviceFailure, hwi_message(error))
+            } else {
+                device_error(err)
+            };
         }
         let code = match error.kind() {
             ErrorKind::AuthenticationRefused | ErrorKind::UserCancelled => {
@@ -4362,6 +4405,55 @@ mod tests {
         assert_eq!(ledger.code, HwiErrorCode::DeviceFailure.code());
         let coldcard = classify_device_error_for(DeviceType::Coldcard, &err);
         assert_eq!(coldcard.code, HwiErrorCode::ActionCanceled.code());
+    }
+
+    #[test]
+    fn ledger_status_words_follow_upstream_ledger_bitcoin() {
+        use bhwi::common::{DeviceCode, Error as CommonError, ErrorKind};
+
+        let ledger = |kind, status| {
+            let err = wrapped_device_error(
+                CommonError::new(kind, format!("status {status:#06x}"))
+                    .with_device_code(DeviceCode::Ledger(status)),
+            );
+            classify_device_error_for(DeviceType::Ledger, &err).code
+        };
+        for (kind, status) in [
+            (ErrorKind::InvalidInput, 0x6A80),
+            (ErrorKind::Unsupported, 0x6A82),
+            (ErrorKind::Protocol, 0x6A86),
+            (ErrorKind::Protocol, 0x6A87),
+            (ErrorKind::Unsupported, 0x6D00),
+            (ErrorKind::Protocol, 0xB007),
+            (ErrorKind::DeviceFailure, 0xB008),
+            (ErrorKind::Rejected, 0x6985),
+            (ErrorKind::Rejected, 0x6982),
+            (ErrorKind::Other, 0xB000),
+        ] {
+            assert_eq!(
+                ledger(kind, status),
+                HwiErrorCode::DeviceFailure.code(),
+                "{status:#06x}"
+            );
+        }
+        for (kind, status) in [
+            (ErrorKind::NotReady, 0x6A80),
+            (ErrorKind::NotReady, 0x6E00),
+            (ErrorKind::Rejected, 0x5501),
+            (ErrorKind::Rejected, 0x6901),
+            (ErrorKind::Locked, 0x5515),
+            (ErrorKind::Other, 0x6FAA),
+        ] {
+            assert_eq!(
+                ledger(kind, status),
+                HwiErrorCode::DeviceConnectionError.code(),
+                "{kind:?} {status:#06x}"
+            );
+        }
+        assert_eq!(
+            ledger(ErrorKind::UserCancelled, 0x6985),
+            HwiErrorCode::DeviceFailure.code()
+        );
     }
 
     #[test]
