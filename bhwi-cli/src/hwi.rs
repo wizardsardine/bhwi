@@ -2570,6 +2570,17 @@ fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
             };
             return HwiError::new(code, hwi_message(error));
         }
+        // Upstream `jade_exception`, code for code.
+        if let Some(bhwi::common::DeviceCode::Jade(code)) = error.device_code()
+            && error.kind() != ErrorKind::UserCancelled
+        {
+            let code = match code {
+                -32602 => HwiErrorCode::BadArgument,
+                -32002 | -32003 | -32600 | -32601 | -32001 => HwiErrorCode::DeviceConnectionError,
+                _ => HwiErrorCode::DeviceFailure,
+            };
+            return HwiError::new(code, hwi_message(error));
+        }
         // Upstream's `ledger_bitcoin` raises these from inside a command, past
         // `ledger_exception`, as unknown errors. Opening the app has no upstream
         // counterpart and a refusal keeps its own path; every other code keeps -3.

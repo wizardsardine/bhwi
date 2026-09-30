@@ -219,6 +219,24 @@ impl From<JadeTransmit> for Transmit {
     }
 }
 
+fn rpc_kind(code: i32) -> ErrorKind {
+    use api::ErrorCode;
+    match code {
+        code if code == ErrorCode::UserCancelled as i32 => ErrorKind::UserCancelled,
+        code if code == ErrorCode::HwLocked as i32 => ErrorKind::Locked,
+        code if code == ErrorCode::NetworkMismatch as i32 => ErrorKind::WrongNetwork,
+        code if code == ErrorCode::UnknownMethod as i32 => ErrorKind::Unsupported,
+        code if code == ErrorCode::BadParameters as i32 => ErrorKind::InvalidInput,
+        code if code == ErrorCode::InternalError as i32 => ErrorKind::DeviceFailure,
+        code if code == ErrorCode::InvalidRequest as i32
+            || code == ErrorCode::ProtocolError as i32 =>
+        {
+            ErrorKind::Protocol
+        }
+        _ => ErrorKind::Other,
+    }
+}
+
 impl From<JadeError> for Error {
     fn from(error: JadeError) -> Self {
         match error {
@@ -226,11 +244,21 @@ impl From<JadeError> for Error {
             JadeError::NoErrorOrResult => {
                 Self::new(ErrorKind::UnexpectedResponse, "no error or result returned")
             }
-            JadeError::Rpc(error) if error.code == api::ErrorCode::UserCancelled as i32 => {
-                Self::new(ErrorKind::UserCancelled, "")
+            JadeError::Rpc(error) => {
+                let code = DeviceCode::Jade(error.code);
+                let converted = match rpc_kind(error.code) {
+                    ErrorKind::UserCancelled => {
+                        Self::new(ErrorKind::UserCancelled, "").with_device_code(code)
+                    }
+                    kind => {
+                        Self::new(kind, error.message.unwrap_or_default()).with_device_code(code)
+                    }
+                };
+                match error.data {
+                    Some(data) => converted.with_data(data),
+                    None => converted,
+                }
             }
-            JadeError::Rpc(error) => Self::new(ErrorKind::Other, error.message.unwrap_or_default())
-                .with_device_code(DeviceCode::Jade(error.code)),
             JadeError::Serialization(error) => Self::new(ErrorKind::Serialization, error),
             JadeError::UnexpectedResult(message) => Self::new(
                 ErrorKind::UnexpectedResponse,
