@@ -380,8 +380,8 @@ where
 mod tests {
     use super::*;
     use crate::common::{
-        self, Command, DeviceContext, DisplayAddress, Error, HostResponse, MultisigAddressType,
-        MultisigDisplayAddress, Recipient, Response, Transmit,
+        self, Command, DeviceContext, DisplayAddress, Error, ErrorKind, HostResponse,
+        MultisigAddressType, MultisigDisplayAddress, Recipient, Response, Transmit,
     };
     use crate::keepkey::ManagementContext;
     use crate::trezor::proto::{common as pb, management as mgmt};
@@ -499,8 +499,8 @@ mod tests {
         wrong.vendor = Some("trezor.io".into());
         assert!(matches!(
             bad.exchange(framed(api::MessageType::Features, &wrong)),
-            Err(Error::InvalidInput(message))
-                if message == "device features vendor is not KeepKey"
+            Err(e) if e.kind() == ErrorKind::InvalidInput
+                && e.message() == "device features vendor is not KeepKey"
         ));
     }
 
@@ -711,8 +711,8 @@ mod tests {
             if word == 0 {
                 assert!(matches!(
                     interp.exchange(vec![b'A']),
-                    Err(Error::InvalidInput(message))
-                        if message == "invalid recovery cipher response"
+                    Err(e) if e.kind() == ErrorKind::InvalidInput
+                        && e.message() == "invalid recovery cipher response"
                 ));
                 request = host_request(
                     interp
@@ -852,7 +852,7 @@ mod tests {
         };
         assert!(matches!(
             interp.exchange(framed(api::MessageType::Failure, &failure)),
-            Err(Error::Device(message)) if message == KEEPKEY_LOCKED
+            Err(e) if e.kind() == ErrorKind::Rejected && e.message() == KEEPKEY_LOCKED
         ));
     }
 
@@ -884,7 +884,7 @@ mod tests {
                 },
                 None,
             )),
-            Err(Error::UnsupportedDisplayAddress(_))
+            Err(e) if e.kind() == ErrorKind::UnsupportedDisplayAddress
         ));
 
         let xonly = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -919,7 +919,7 @@ mod tests {
         );
         assert!(matches!(
             input.exchange(master_public_key(0x0102_0304)),
-            Err(Error::MissingCommandInfo(_))
+            Err(e) if e.kind() == ErrorKind::Unsupported
         ));
 
         let mut change = empty_psbt(TxOut {
@@ -932,7 +932,7 @@ mod tests {
         output.start(Command::SignTx(change, None)).unwrap();
         assert!(matches!(
             output.exchange(master_public_key(0x0102_0304)),
-            Err(Error::MissingCommandInfo(_))
+            Err(e) if e.kind() == ErrorKind::Unsupported
         ));
     }
 
@@ -1091,7 +1091,7 @@ mod tests {
     fn only_sorted_fully_derived_multisig_display_is_transmitted() {
         assert!(matches!(
             Interp::default().start(bare_multisig(false)),
-            Err(Error::UnsupportedDisplayAddress(_))
+            Err(e) if e.kind() == ErrorKind::UnsupportedDisplayAddress
         ));
         assert_eq!(
             device_frame(Interp::default().start(bare_multisig(true)).unwrap()).0,
@@ -1138,7 +1138,7 @@ mod tests {
         );
         assert!(matches!(
             Interp::default().start(xpub),
-            Err(Error::UnsupportedDisplayAddress(_))
+            Err(e) if e.kind() == ErrorKind::UnsupportedDisplayAddress
         ));
     }
 
@@ -1152,7 +1152,7 @@ mod tests {
         };
         assert!(matches!(
             interp.exchange(framed(api::MessageType::Failure, &failure)),
-            Err(Error::AuthenticationRefused)
+            Err(e) if e.kind() == ErrorKind::AuthenticationRefused
         ));
     }
 

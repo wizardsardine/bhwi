@@ -1,7 +1,7 @@
 use bitcoin::address::AddressType;
 
 use crate::common::{
-    Command, DeviceContext, DisplayAddress, Error, Recipient, Response, Transmit,
+    Command, DeviceContext, DisplayAddress, Error, ErrorKind, Recipient, Response, Transmit,
     WalletRegistration,
 };
 use crate::specter::{
@@ -140,24 +140,28 @@ impl From<SpecterError> for Error {
     fn from(error: SpecterError) -> Self {
         match error {
             SpecterError::MissingContext(message) | SpecterError::UnsupportedCommand(message) => {
-                Self::MissingCommandInfo(message)
+                Self::new(ErrorKind::Unsupported, message)
             }
             SpecterError::UnsupportedDisplayAddress(message) => {
-                Self::UnsupportedDisplayAddress(message)
+                Self::new(ErrorKind::UnsupportedDisplayAddress, message)
             }
             SpecterError::InvalidInput(message)
             | SpecterError::MalformedPayload(message)
-            | SpecterError::NetworkMismatch(message) => Self::InvalidInput(message),
-            SpecterError::UserCancelled => Self::UserCancelled,
-            SpecterError::Refused(message) => Self::Device(format!("Specter-DIY: {message}")),
+            | SpecterError::NetworkMismatch(message) => Self::new(ErrorKind::InvalidInput, message),
+            SpecterError::UserCancelled => Self::new(ErrorKind::UserCancelled, ""),
+            SpecterError::Refused(message) => {
+                Self::new(ErrorKind::Rejected, format!("Specter-DIY: {message}"))
+            }
             SpecterError::MalformedFraming(message) | SpecterError::State(message) => {
-                Self::Serialization(message.into())
+                Self::new(ErrorKind::Serialization, message)
             }
             SpecterError::ResponseTooLarge => {
-                Self::Serialization("Specter response too large".into())
+                Self::new(ErrorKind::Serialization, "Specter response too large")
             }
-            SpecterError::Timeout => Self::Request("Specter request timed out"),
-            SpecterError::Disconnected => Self::Request("Specter transport disconnected"),
+            SpecterError::Timeout => Self::new(ErrorKind::Protocol, "Specter request timed out"),
+            SpecterError::Disconnected => {
+                Self::new(ErrorKind::Protocol, "Specter transport disconnected")
+            }
         }
     }
 }

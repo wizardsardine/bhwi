@@ -483,7 +483,7 @@ impl HostResponse {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the answer does not match the request,
+    /// Returns an [`ErrorKind::InvalidInput`] error if the answer does not match the request,
     /// its contents are invalid, or a recovery action is invalid at that position.
     ///
     /// # Examples
@@ -491,7 +491,7 @@ impl HostResponse {
     /// Encode synthetic keypad positions, not literal PIN digits:
     ///
     /// ```
-    /// use bhwi::common::{Error, HostRequest, HostResponse, PinMatrixRequestKind};
+    /// use bhwi::common::{ErrorKind, HostRequest, HostResponse, PinMatrixRequestKind};
     ///
     /// let request = HostRequest::PinMatrix {
     ///     kind: PinMatrixRequestKind::Current,
@@ -500,26 +500,28 @@ impl HostResponse {
     ///     .into_bytes_for(&request)
     ///     .unwrap();
     /// assert_eq!(bytes, b"123");
-    /// assert!(matches!(
-    ///     HostResponse::PinPositions(String::new()).into_bytes_for(&request),
-    ///     Err(Error::InvalidInput(_))
-    /// ));
+    /// let error = HostResponse::PinPositions(String::new())
+    ///     .into_bytes_for(&request)
+    ///     .unwrap_err();
+    /// assert_eq!(error.kind(), ErrorKind::InvalidInput);
     /// ```
     pub fn into_bytes_for(self, request: &HostRequest) -> Result<Vec<u8>, Error> {
         match (request, self) {
             (HostRequest::PinMatrix { .. }, Self::PinPositions(mut positions)) => {
                 if positions.is_empty() || !positions.bytes().all(|byte| byte.is_ascii_digit()) {
                     zeroize_string(&mut positions);
-                    return Err(Error::InvalidInput(
-                        "PIN positions must contain ASCII digits".into(),
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "PIN positions must contain ASCII digits",
                     ));
                 }
                 Ok(positions.into_bytes())
             }
             (HostRequest::RecoveryCharacter { .. }, Self::RecoveryCharacter(character)) => {
                 if !character.is_ascii_lowercase() {
-                    return Err(Error::InvalidInput(
-                        "recovery cipher response must be one lowercase ASCII character".into(),
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "recovery cipher response must be one lowercase ASCII character",
                     ));
                 }
                 Ok(vec![character as u8])
@@ -540,26 +542,30 @@ impl HostResponse {
                         b'\n'
                     }
                     Self::RecoveryDelete | Self::RecoveryNextWord | Self::RecoveryDone => {
-                        return Err(Error::InvalidInput(
-                            "recovery action is not valid at this position".into(),
+                        return Err(Error::new(
+                            ErrorKind::InvalidInput,
+                            "recovery action is not valid at this position",
                         ));
                     }
                     Self::PinPositions(mut positions) => {
                         zeroize_string(&mut positions);
-                        return Err(Error::InvalidInput(
-                            "host response does not match request".into(),
+                        return Err(Error::new(
+                            ErrorKind::InvalidInput,
+                            "host response does not match request",
                         ));
                     }
                     Self::RecoveryCharacter(_) => {
-                        return Err(Error::InvalidInput(
-                            "host response does not match request".into(),
+                        return Err(Error::new(
+                            ErrorKind::InvalidInput,
+                            "host response does not match request",
                         ));
                     }
                 };
                 Ok(vec![byte])
             }
-            _ => Err(Error::InvalidInput(
-                "host response does not match request".into(),
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "host response does not match request",
             )),
         }
     }
@@ -601,102 +607,140 @@ pub struct Transmit {
     pub encrypted: bool,
 }
 
-/// A shared command-conversion, input, or protocol-processing error.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// Session encryption could not be established or used.
-    #[error("encryption error: {0}")]
-    Encryption(
-        /// Description of the encryption failure.
-        &'static str,
-    ),
-
-    /// No device error or final result was available.
-    #[error("no error or result returned")]
-    NoErrorOrResult,
-
-    /// Required command inputs are missing or the operation is unsupported.
-    #[error("missing command info: {0}")]
-    MissingCommandInfo(
-        /// Missing input or unsupported operation.
-        &'static str,
-    ),
-
-    /// A device-specific failure.
-    #[error("{0}")]
-    Device(
-        /// Device error message.
-        String,
-    ),
-
-    /// Response data did not match the expected protocol result.
-    #[error("unexpected result for {1}: {0:x?}")]
-    UnexpectedResult(
-        /// Unexpected response bytes or diagnostic data.
-        Vec<u8>,
-        /// Description of the expected result or operation.
-        String,
-    ),
-
-    /// The device returned an RPC failure.
-    #[error("rpc error {0}: {1:?}")]
-    Rpc(
-        /// Device-provided error code.
-        i32,
-        /// Device-provided error message, when available.
-        Option<String>,
-    ),
-
-    /// A protocol value could not be encoded or decoded.
-    #[error("serialization error: {0}")]
-    Serialization(
-        /// Description of the serialization failure.
-        String,
-    ),
-
-    /// Caller input or protocol data is invalid for the operation.
-    #[error("invalid input: {0}")]
-    InvalidInput(
-        /// Description of the invalid input.
-        String,
-    ),
-
-    /// A protocol request could not be completed.
-    #[error("request error: {0}")]
-    Request(
-        /// Description of the request failure.
-        &'static str,
-    ),
-
-    /// Authentication, pairing, or confirmation was refused.
-    #[error("authentication refused")]
-    AuthenticationRefused,
-
-    /// The user canceled the operation.
-    #[error("action canceled by the user")]
+/// The kind of failure an error reports, shared by every device.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorKind {
+    /// The user declined on the device or dismissed a prompt.
     UserCancelled,
+    /// The device's login step failed without saying why.
+    AuthenticationRefused,
+    /// The host could not get an answer from the user.
+    HostUnavailable,
+    /// The device needs its PIN before it will answer.
+    Locked,
+    /// The device is reachable but not ready to run commands.
+    NotReady,
+    /// A PIN step was requested but the device is already unlocked.
+    AlreadyUnlocked,
+    /// The device has no wallet.
+    NotInitialized,
+    /// The device already has a wallet.
+    AlreadyInitialized,
+    /// The PIN was wrong.
+    WrongPin,
+    /// A key or address belongs to another network.
+    WrongNetwork,
+    /// The item being created already exists on the device.
+    Duplicate,
+    /// The device or firmware cannot run this command.
+    Unsupported,
+    /// The device cannot display this address type.
+    UnsupportedDisplayAddress,
+    /// The command needs data the caller did not supply.
+    MissingContext,
+    /// The caller's data is malformed or was rejected as invalid.
+    InvalidInput,
+    /// The device refused for a reason no other kind covers.
+    Rejected,
+    /// The device reported an internal failure.
+    DeviceFailure,
+    /// Host and device disagreed on the protocol.
+    Protocol,
+    /// A valid reply that is not the one expected.
+    UnexpectedResponse,
+    /// Bytes could not be encoded or decoded.
+    Serialization,
+    /// Channel encryption or decryption failed.
+    Encryption,
+    /// I/O with the device or a helper service failed.
+    Transport,
+    /// The device went away.
+    Disconnected,
+    /// No other kind applies.
+    Other,
+}
 
-    /// The requested address-display form is not supported.
-    #[error("unsupported display address: {0}")]
-    UnsupportedDisplayAddress(
-        /// Description of the unsupported address form.
-        String,
-    ),
+/// A device's own error code, in that vendor's numbering.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeviceCode {
+    /// A Ledger status word.
+    Ledger(u16),
+    /// A Trezor failure code.
+    Trezor(i32),
+    /// A KeepKey failure code.
+    KeepKey(i32),
+    /// A Jade RPC error code.
+    Jade(i32),
+    /// A BitBox02 error code.
+    BitBox(i32),
+}
 
-    /// PIN interaction was requested for a device that is already unlocked.
-    #[error("{0}")]
-    DeviceAlreadyUnlocked(
-        /// Description of the device's unlocked state.
-        &'static str,
-    ),
+/// A failure with its kind, the device's code and message, and any data the device sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Error {
+    kind: ErrorKind,
+    device_code: Option<DeviceCode>,
+    message: String,
+    data: Option<Vec<u8>>,
 }
 
 impl Error {
-    /// Creates an unexpected-result error with response data and operation context.
-    pub fn unexpected_result(data: Vec<u8>, context: impl Into<String>) -> Self {
-        Error::UnexpectedResult(data, context.into())
+    /// Creates an error of `kind` with `message`.
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            device_code: None,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    /// Sets the device's own error code.
+    pub fn with_device_code(mut self, code: DeviceCode) -> Self {
+        self.device_code = Some(code);
+        self
+    }
+
+    /// Sets data the device sent with the error; it is never printed.
+    pub fn with_data(mut self, data: Vec<u8>) -> Self {
+        self.data = Some(data);
+        self
+    }
+
+    /// Returns the failure kind.
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    /// Returns the device's own error code, if it sent one.
+    pub fn device_code(&self) -> Option<DeviceCode> {
+        self.device_code
+    }
+
+    /// Returns the message without the kind.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns data the device sent with the error.
+    pub fn data(&self) -> Option<&[u8]> {
+        self.data.as_deref()
     }
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.message.is_empty() {
+            write!(f, "[{:?}]", self.kind)
+        } else {
+            write!(f, "[{:?}] {}", self.kind, self.message)
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 /// The BitBox interpreter using this module's shared command and result types.
 #[cfg(feature = "bitbox")]
@@ -788,13 +832,13 @@ mod tests {
         );
         assert!(matches!(
             HostResponse::PinPositions("".into()).into_bytes_for(&pin),
-            Err(Error::InvalidInput(message))
-                if message == "PIN positions must contain ASCII digits"
+            Err(e) if e.kind() == ErrorKind::InvalidInput
+                && e.message() == "PIN positions must contain ASCII digits"
         ));
         assert!(matches!(
             HostResponse::PinPositions("１２３".into()).into_bytes_for(&pin),
-            Err(Error::InvalidInput(message))
-                if message == "PIN positions must contain ASCII digits"
+            Err(e) if e.kind() == ErrorKind::InvalidInput
+                && e.message() == "PIN positions must contain ASCII digits"
         ));
 
         let first = HostRequest::RecoveryCharacter {
@@ -809,14 +853,14 @@ mod tests {
         );
         assert!(matches!(
             HostResponse::RecoveryCharacter('A').into_bytes_for(&first),
-            Err(Error::InvalidInput(message))
-                if message
+            Err(e) if e.kind() == ErrorKind::InvalidInput
+                && e.message()
                     == "recovery cipher response must be one lowercase ASCII character"
         ));
         assert!(matches!(
             HostResponse::RecoveryDelete.into_bytes_for(&first),
-            Err(Error::InvalidInput(message))
-                if message == "recovery action is not valid at this position"
+            Err(e) if e.kind() == ErrorKind::InvalidInput
+                && e.message() == "recovery action is not valid at this position"
         ));
         for request in [
             HostRequest::RecoveryCharacter {
@@ -859,8 +903,8 @@ mod tests {
         };
         assert!(matches!(
             HostResponse::RecoveryNextWord.into_bytes_for(&too_early),
-            Err(Error::InvalidInput(message))
-                if message == "recovery action is not valid at this position"
+            Err(e) if e.kind() == ErrorKind::InvalidInput
+                && e.message() == "recovery action is not valid at this position"
         ));
 
         let last = HostRequest::RecoveryCharacter {
@@ -873,8 +917,8 @@ mod tests {
         );
         assert!(matches!(
             HostResponse::PinPositions("1".into()).into_bytes_for(&last),
-            Err(Error::InvalidInput(message))
-                if message == "host response does not match request"
+            Err(e) if e.kind() == ErrorKind::InvalidInput
+                && e.message() == "host response does not match request"
         ));
     }
 

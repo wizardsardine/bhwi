@@ -12,7 +12,7 @@ use crate::coldcard::{
     ColdcardResponse, ColdcardTransmit,
 };
 use crate::common::{
-    Command, DeviceBackup, DisplayAddress, Error, Info, MultisigAddressType,
+    Command, DeviceBackup, DisplayAddress, Error, ErrorKind, Info, MultisigAddressType,
     MultisigDisplayAddress, Recipient, Response, Transmit, WalletRegistration,
 };
 
@@ -343,16 +343,20 @@ impl From<ColdcardTransmit> for Transmit {
 impl From<ColdcardError> for Error {
     fn from(error: ColdcardError) -> Self {
         match error {
-            ColdcardError::Encryption(error) => Self::Encryption(error),
-            ColdcardError::MissingCommandInfo(error) => Self::MissingCommandInfo(error),
-            ColdcardError::Device(error) => Self::Device(format!("Coldcard Error: {error}")),
-            ColdcardError::NoErrorOrResult => Self::NoErrorOrResult,
-            ColdcardError::Serialization(error) => Self::Serialization(error),
-            ColdcardError::InvalidInput(error) => Self::InvalidInput(error),
-            ColdcardError::UserCancelled => Self::UserCancelled,
-            ColdcardError::UnexpectedResponseMessage { got, expected } => Self::unexpected_result(
-                format!("{got:?}").into_bytes(),
-                format!("coldcard unexpected response: expected {expected:?}, got {got:?}"),
+            ColdcardError::Encryption(error) => Self::new(ErrorKind::Encryption, error),
+            ColdcardError::MissingCommandInfo(error) => Self::new(ErrorKind::Unsupported, error),
+            ColdcardError::Device(error) => {
+                Self::new(ErrorKind::Rejected, format!("Coldcard Error: {error}"))
+            }
+            ColdcardError::NoErrorOrResult => {
+                Self::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+            }
+            ColdcardError::Serialization(error) => Self::new(ErrorKind::Serialization, error),
+            ColdcardError::InvalidInput(error) => Self::new(ErrorKind::InvalidInput, error),
+            ColdcardError::UserCancelled => Self::new(ErrorKind::UserCancelled, ""),
+            ColdcardError::UnexpectedResponseMessage { got, expected } => Self::new(
+                ErrorKind::UnexpectedResponse,
+                format!("unexpected response: expected {expected:?}, got {got:?}"),
             ),
         }
     }

@@ -3935,14 +3935,14 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 displayaddress_desc_args(device_type, &format!("wsh(sortedmulti(2,{extended}))")),
                 ExpectedHwiError {
                     code: -9,
-                    error: "unsupported display address: KeepKey multisig address display requires fully-derived public keys",
+                    error: "KeepKey multisig address display requires fully-derived public keys",
                 },
             ),
             DisplayAddressCase::candidate_error(
                 displayaddress_desc_args(device_type, &format!("wsh(multi(2,{derived}))")),
                 ExpectedHwiError {
                     code: -9,
-                    error: "unsupported display address: KeepKey does not support unsorted multisig address display",
+                    error: "KeepKey does not support unsorted multisig address display",
                 },
             ),
         ])

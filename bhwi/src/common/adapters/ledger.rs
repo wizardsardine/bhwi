@@ -1,5 +1,5 @@
 use crate::common::{
-    Command, DeviceContext, DisplayAddress, Error, Info, Recipient, Response, Transmit,
+    Command, DeviceContext, DisplayAddress, Error, ErrorKind, Info, Recipient, Response, Transmit,
     WalletRegistration,
 };
 use crate::ledger::apdu::ApduCommand;
@@ -126,29 +126,40 @@ impl From<LedgerResponse> for Response {
 impl From<LedgerError> for Error {
     fn from(error: LedgerError) -> Self {
         match error {
-            LedgerError::MissingCommandInfo(error) => Self::MissingCommandInfo(error),
-            LedgerError::NoErrorOrResult => Self::NoErrorOrResult,
-            LedgerError::Apdu(error) => Self::Serialization(format!("{error:?}")),
-            LedgerError::Store(error) => Self::Request(match error {
-                StoreError::EmptyInput => "Store operation failed: empty request",
-                StoreError::UnknownCommand(_) => "Store operation failed: unknown command",
-                StoreError::UnsupportedRequest(_) => "Store operation failed: unsupported request",
-                StoreError::InvalidIndexOrSize => {
-                    "Store operation failed: invalid Merkle index or size"
-                }
-                StoreError::UnknownHash => "Store operation failed: unknown hash",
-                StoreError::UnknownMerkleRoot => "Store operation failed: unknown Merkle root",
-                StoreError::UnexpectedQueue => "Store operation failed: unexpected queue state",
-            }),
-            LedgerError::Wallet(_) => Self::Request("Wallet operation failed"),
-            LedgerError::Interrupted => Self::Request("Operation interrupted"),
-            LedgerError::UnexpectedResult(data, context) => Self::unexpected_result(data, context),
-            LedgerError::UnsupportedDisplayAddress(context) => {
-                Self::UnsupportedDisplayAddress(context)
+            LedgerError::MissingCommandInfo(error) => Self::new(ErrorKind::Unsupported, error),
+            LedgerError::NoErrorOrResult => {
+                Self::new(ErrorKind::UnexpectedResponse, "no error or result returned")
             }
-            LedgerError::FailedToOpenApp(_) => Self::AuthenticationRefused,
-            LedgerError::InvalidPsbt(error) => Self::Serialization(error),
-            LedgerError::UserCancelled => Self::UserCancelled,
+            LedgerError::Apdu(error) => Self::new(ErrorKind::Serialization, error.to_string()),
+            LedgerError::Store(error) => Self::new(
+                ErrorKind::Protocol,
+                match error {
+                    StoreError::EmptyInput => "Store operation failed: empty request",
+                    StoreError::UnknownCommand(_) => "Store operation failed: unknown command",
+                    StoreError::UnsupportedRequest(_) => {
+                        "Store operation failed: unsupported request"
+                    }
+                    StoreError::InvalidIndexOrSize => {
+                        "Store operation failed: invalid Merkle index or size"
+                    }
+                    StoreError::UnknownHash => "Store operation failed: unknown hash",
+                    StoreError::UnknownMerkleRoot => "Store operation failed: unknown Merkle root",
+                    StoreError::UnexpectedQueue => "Store operation failed: unexpected queue state",
+                },
+            ),
+            LedgerError::Wallet(_) => Self::new(ErrorKind::Protocol, "Wallet operation failed"),
+            LedgerError::Interrupted => Self::new(ErrorKind::Protocol, "Operation interrupted"),
+            LedgerError::UnexpectedResult(data, context) => Self::new(
+                ErrorKind::UnexpectedResponse,
+                format!("unexpected response to {context}"),
+            )
+            .with_data(data),
+            LedgerError::UnsupportedDisplayAddress(context) => {
+                Self::new(ErrorKind::UnsupportedDisplayAddress, context)
+            }
+            LedgerError::FailedToOpenApp(_) => Self::new(ErrorKind::AuthenticationRefused, ""),
+            LedgerError::InvalidPsbt(error) => Self::new(ErrorKind::Serialization, error),
+            LedgerError::UserCancelled => Self::new(ErrorKind::UserCancelled, ""),
         }
     }
 }
@@ -173,6 +184,7 @@ mod tests {
 
     use super::*;
     use crate::Interpreter;
+    use crate::common::ErrorKind;
     use crate::common::LedgerInterpreter;
 
     const KEY: &str = "[f5acc2fd/84'/1'/0']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP";
@@ -286,7 +298,7 @@ mod tests {
                 Err(err) => err,
                 Ok(_) => panic!("expected an error"),
             };
-            assert!(matches!(err, Error::UserCancelled), "{err:?}");
+            assert_eq!(err.kind(), ErrorKind::UserCancelled, "{err:?}");
         }
     }
 
@@ -312,7 +324,7 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("expected an error"),
         };
-        assert!(matches!(err, Error::UserCancelled), "{err:?}");
+        assert_eq!(err.kind(), ErrorKind::UserCancelled, "{err:?}");
     }
 
     #[test]
@@ -353,7 +365,7 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("expected an error"),
         };
-        assert!(matches!(err, Error::UserCancelled), "{err:?}");
+        assert_eq!(err.kind(), ErrorKind::UserCancelled, "{err:?}");
     }
 
     #[test]

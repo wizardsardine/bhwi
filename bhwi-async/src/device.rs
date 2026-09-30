@@ -274,7 +274,7 @@ impl<S: DeviceSource> DeviceManager<S> {
     /// Opens candidates and runs their unlock handshake until the optional fingerprint matches.
     ///
     /// Successful Trezor or KeepKey initialization can leave the wallet PIN-locked.
-    /// A common [`bhwi::common::Error::UserCancelled`] from unlock or fingerprint
+    /// A common [`bhwi::common::ErrorKind::UserCancelled`] from unlock or fingerprint
     /// queries aborts selection. Without a fingerprint filter, any unlock failure
     /// is returned rather than silently selecting another wallet. Other failures
     /// are collected as skipped devices. Trezor and KeepKey device-side cancellations
@@ -333,7 +333,7 @@ impl<S: DeviceSource> DeviceManager<S> {
 
     /// Opens and probes candidates, caching information and initialized-wallet fingerprints.
     ///
-    /// A common [`bhwi::common::Error::UserCancelled`] from unlock or probe commands
+    /// A common [`bhwi::common::ErrorKind::UserCancelled`] from unlock or probe commands
     /// aborts the scan. Other per-device failures, including Trezor and KeepKey
     /// device-side cancellations mapped to authentication refusals, are collected
     /// as skipped devices.
@@ -442,10 +442,10 @@ pub fn no_device(skipped: Vec<SkippedDevice>) -> Result<Option<Device>, NoUsable
 pub fn is_user_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut source = Some(err);
     while let Some(current) = source {
-        if matches!(
-            current.downcast_ref::<bhwi::common::Error>(),
-            Some(bhwi::common::Error::UserCancelled)
-        ) {
+        if current
+            .downcast_ref::<bhwi::common::Error>()
+            .is_some_and(|error| error.kind() == bhwi::common::ErrorKind::UserCancelled)
+        {
             return true;
         }
         source = current.source();
@@ -484,15 +484,13 @@ pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ClassifiedDevi
     let mut source = Some(err);
     while let Some(current) = source {
         if let Some(error) = current.downcast_ref::<bhwi::common::Error>() {
-            use bhwi::common::Error as CommonError;
-            let kind = match error {
-                CommonError::UserCancelled => DeviceErrorKind::UserCancelled,
-                CommonError::MissingCommandInfo(_) | CommonError::UnsupportedDisplayAddress(_) => {
-                    DeviceErrorKind::UnsupportedCommand
-                }
-                CommonError::InvalidInput(_) | CommonError::Device(_) => {
-                    DeviceErrorKind::InvalidInput
-                }
+            use bhwi::common::ErrorKind;
+            let kind = match error.kind() {
+                ErrorKind::UserCancelled => DeviceErrorKind::UserCancelled,
+                ErrorKind::Unsupported
+                | ErrorKind::MissingContext
+                | ErrorKind::UnsupportedDisplayAddress => DeviceErrorKind::UnsupportedCommand,
+                ErrorKind::InvalidInput | ErrorKind::Rejected => DeviceErrorKind::InvalidInput,
                 _ => break,
             };
             return ClassifiedDeviceError {
@@ -1010,18 +1008,18 @@ mod tests {
     #[test]
     fn an_interpreter_error_reads_as_its_cause() {
         let wrapped: crate::Error<std::io::Error, std::io::Error> = crate::Error::Interpreter(
-            bhwi::common::Error::InvalidInput("Passphrase too long".into()),
+            bhwi::common::Error::new(bhwi::common::ErrorKind::InvalidInput, "Passphrase too long"),
         );
-        assert_eq!(wrapped.to_string(), "invalid input: Passphrase too long");
+        assert_eq!(wrapped.to_string(), "[InvalidInput] Passphrase too long");
         assert_eq!(
             std::error::Error::source(&wrapped)
                 .expect("the cause is kept")
                 .to_string(),
-            "invalid input: Passphrase too long"
+            "[InvalidInput] Passphrase too long"
         );
 
         let skipped = SkippedDevice::new(DeviceType::KeepKey, "keepkey", "udp:11044", &wrapped);
-        assert_eq!(skipped.error, "invalid input: Passphrase too long");
+        assert_eq!(skipped.error, "[InvalidInput] Passphrase too long");
         assert!(matches!(skipped.kind, DeviceErrorKind::InvalidInput));
     }
 

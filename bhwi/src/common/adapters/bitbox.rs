@@ -6,8 +6,8 @@ use crate::bitbox::policy;
 use crate::bitbox::proto as pb;
 use crate::bitbox::{BitBoxCommand, BitBoxResponse, BitBoxTransmit, ManagementContext};
 use crate::common::{
-    Command, DeviceBackup, DeviceContext, DisplayAddress, Error, Info, Recipient, Response,
-    Transmit, WalletRegistration,
+    Command, DeviceBackup, DeviceContext, DisplayAddress, Error, ErrorKind, Info, Recipient,
+    Response, Transmit, WalletRegistration,
 };
 
 impl TryFrom<Command> for BitBoxCommand {
@@ -200,15 +200,17 @@ impl From<BitBoxResponse> for Response {
 impl From<BitBoxError> for Error {
     fn from(error: BitBoxError) -> Self {
         match error {
-            BitBoxError::Device(BitBoxDeviceError::UserAbort) => Self::UserCancelled,
-            BitBoxError::NoisePairingRejected => Self::AuthenticationRefused,
+            BitBoxError::Device(BitBoxDeviceError::UserAbort) => {
+                Self::new(ErrorKind::UserCancelled, "")
+            }
+            BitBoxError::NoisePairingRejected => Self::new(ErrorKind::AuthenticationRefused, ""),
             BitBoxError::UnsupportedDisplayAddress(message) => {
-                Self::UnsupportedDisplayAddress(message.to_string())
+                Self::new(ErrorKind::UnsupportedDisplayAddress, message.to_string())
             }
             BitBoxError::ProtobufDecode(error) | BitBoxError::ProtobufEncode(error) => {
-                Self::Serialization(error)
+                Self::new(ErrorKind::Serialization, error)
             }
-            other => Self::Serialization(other.to_string()),
+            other => Self::new(ErrorKind::Serialization, other.to_string()),
         }
     }
 }
@@ -231,7 +233,7 @@ mod tests {
 
     use super::*;
     use crate::bitbox::{SetupEntropy, SetupMode};
-    use crate::common::{RestoreOptions, SetupOptions};
+    use crate::common::{ErrorKind, RestoreOptions, SetupOptions};
 
     fn simple(path: &str) -> pb::btc_script_config::SimpleType {
         simple_type_from_path(&DerivationPath::from_str(path).unwrap())
@@ -404,15 +406,15 @@ mod tests {
             BitBoxDeviceError::from_code(104),
             BitBoxDeviceError::UserAbort
         ));
-        assert!(matches!(
-            Error::from(BitBoxError::Device(BitBoxDeviceError::UserAbort)),
-            Error::UserCancelled
-        ));
+        assert_eq!(
+            Error::from(BitBoxError::Device(BitBoxDeviceError::UserAbort)).kind(),
+            ErrorKind::UserCancelled
+        );
         // Pairing rejection stays an authentication refusal.
-        assert!(matches!(
-            Error::from(BitBoxError::NoisePairingRejected),
-            Error::AuthenticationRefused
-        ));
+        assert_eq!(
+            Error::from(BitBoxError::NoisePairingRejected).kind(),
+            ErrorKind::AuthenticationRefused
+        );
     }
 
     #[test]

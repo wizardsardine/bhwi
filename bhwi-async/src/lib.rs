@@ -344,7 +344,11 @@ where
         {
             Ok(backup)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -358,7 +362,11 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -368,7 +376,11 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -382,7 +394,11 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -392,7 +408,11 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -402,7 +422,11 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -412,7 +436,11 @@ where
         {
             Ok(success)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -436,7 +464,11 @@ where
         {
             Ok(version)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -446,7 +478,11 @@ where
         {
             Ok(fg)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -460,7 +496,11 @@ where
         {
             Ok(xpub)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -480,7 +520,11 @@ where
         {
             Ok((header, signature))
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -494,7 +538,11 @@ where
         {
             Ok(addr)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -504,7 +552,7 @@ where
         policy: &str,
     ) -> Result<WalletRegistration, Self::Error> {
         let wallet_policy = WalletPolicy::from_str(policy)
-            .map_err(|e| common::Error::Serialization(e.to_string()))?;
+            .map_err(|e| common::Error::new(common::ErrorKind::Serialization, e.to_string()))?;
         if let common::Response::WalletRegistration(registration) = run_command(
             self,
             common::Command::RegisterWallet {
@@ -516,7 +564,11 @@ where
         {
             Ok(registration)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 
@@ -530,7 +582,11 @@ where
         {
             Ok(psbt)
         } else {
-            Err(common::Error::NoErrorOrResult.into())
+            Err(common::Error::new(
+                common::ErrorKind::UnexpectedResponse,
+                "no error or result returned",
+            )
+            .into())
         }
     }
 }
@@ -749,12 +805,9 @@ where
                 transmit = intpr.exchange(res)?;
             }
             common::Recipient::Host(request) => {
-                let interaction =
-                    host_interaction
-                        .as_deref_mut()
-                        .ok_or(common::Error::MissingCommandInfo(
-                            "host interaction required",
-                        ))?;
+                let interaction = host_interaction.as_deref_mut().ok_or_else(|| {
+                    common::Error::new(common::ErrorKind::Unsupported, "host interaction required")
+                })?;
                 let response = interaction.respond(request).await?;
                 transmit = intpr.exchange(response.into_bytes_for(request)?)?;
             }
@@ -1026,9 +1079,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::Interpreter(common::Error::MissingCommandInfo(
-                "host interaction required"
-            ))
+            Error::Interpreter(e) if e.kind() == common::ErrorKind::Unsupported
+                && e.message() == "host interaction required"
         ));
         assert_eq!(device.transport.calls, 1);
         assert_eq!(host_calls.get(), 0);
@@ -1050,8 +1102,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::Interpreter(common::Error::InvalidInput(message))
-                if message == "host response does not match request"
+            Error::Interpreter(e) if e.kind() == common::ErrorKind::InvalidInput
+                && e.message() == "host response does not match request"
         ));
         assert_eq!(device.transport.calls, 1);
         assert_eq!(host_calls.get(), 1);

@@ -599,7 +599,7 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
             "p2tr",
             "--display",
         ],
-        "unsupported display address: KeepKey does not support Taproot address display",
+        "[UnsupportedDisplayAddress] KeepKey does not support Taproot address display",
         &[],
     )?;
 
@@ -617,13 +617,13 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
                 .to_str()
                 .context("temporary PSBT path is not UTF-8")?,
         ],
-        "missing command info: KeepKey does not support Taproot inputs",
+        "[Unsupported] KeepKey does not support Taproot inputs",
         &[taproot_secret.as_str()],
     )?;
     assert_failure(
         &cli,
         ["address", "get", "--from-descriptor", "not-registered"],
-        "unsupported display address: descriptor address display is not yet supported",
+        "[UnsupportedDisplayAddress] descriptor address display is not yet supported",
         &[],
     )?;
 
@@ -653,14 +653,14 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
                 "--descriptor",
                 &descriptor,
             ],
-            "missing command info: register_wallet is not supported",
+            "[Unsupported] register_wallet is not supported",
             &[],
         )?;
     }
     assert_failure(
         &cli,
         ["device", "backup"],
-        "missing command info: The Keepkey does not support creating a backup via software",
+        "[Unsupported] The Keepkey does not support creating a backup via software",
         &[],
     )
 }
@@ -1063,7 +1063,7 @@ fn keepkey_management_lifecycle() -> Result<()> {
     assert_failure(
         &cli_with_passphrase(&long_passphrase),
         ["device", "list"],
-        "invalid input: Passphrase too long",
+        "[InvalidInput] Passphrase too long",
         &[long_passphrase.as_str()],
     )?;
 

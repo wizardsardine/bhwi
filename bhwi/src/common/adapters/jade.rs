@@ -3,8 +3,8 @@ use bitcoin::hashes::{Hash, sha256};
 use miniscript::descriptor::{DescriptorPublicKey, Wildcard};
 
 use crate::common::{
-    Command, DisplayAddress, Error, Info, MultisigAddressType, MultisigDisplayAddress, Recipient,
-    Response, Transmit, WalletRegistration,
+    Command, DeviceCode, DisplayAddress, Error, ErrorKind, Info, MultisigAddressType,
+    MultisigDisplayAddress, Recipient, Response, Transmit, WalletRegistration,
 };
 use crate::jade::api;
 use crate::jade::{
@@ -16,16 +16,30 @@ impl TryFrom<Command> for JadeCommand {
 
     fn try_from(command: Command) -> Result<Self, Self::Error> {
         match command {
-            Command::Setup(..) => Err(Error::MissingCommandInfo("Setup not supported by Jade")),
-            Command::Wipe => Err(Error::MissingCommandInfo("Wipe not supported by Jade")),
-            Command::Restore(..) => Err(Error::MissingCommandInfo("Restore not supported by Jade")),
-            Command::TogglePassphrase => Err(Error::MissingCommandInfo(
+            Command::Setup(..) => Err(Error::new(
+                ErrorKind::Unsupported,
+                "Setup not supported by Jade",
+            )),
+            Command::Wipe => Err(Error::new(
+                ErrorKind::Unsupported,
+                "Wipe not supported by Jade",
+            )),
+            Command::Restore(..) => Err(Error::new(
+                ErrorKind::Unsupported,
+                "Restore not supported by Jade",
+            )),
+            Command::TogglePassphrase => Err(Error::new(
+                ErrorKind::Unsupported,
                 "Toggle passphrase not supported by Jade",
             )),
-            Command::PromptPin | Command::SendPin(_) => Err(Error::MissingCommandInfo(
+            Command::PromptPin | Command::SendPin(_) => Err(Error::new(
+                ErrorKind::Unsupported,
                 "PIN entry from the host not needed by Jade",
             )),
-            Command::Backup => Err(Error::MissingCommandInfo("Backup not supported by Jade")),
+            Command::Backup => Err(Error::new(
+                ErrorKind::Unsupported,
+                "Backup not supported by Jade",
+            )),
             Command::Unlock { .. } => Ok(Self::Auth),
             Command::GetMasterFingerprint => Ok(Self::GetMasterFingerprint),
             Command::GetXpub { path, .. } => Ok(Self::GetXpub(path)),
@@ -60,7 +74,7 @@ impl TryFrom<Command> for JadeCommand {
             Command::GetVersion => Ok(Self::GetInfo),
             Command::RegisterWallet { name, policy } => {
                 let (descriptor, keys) = crate::policy::extract_parts(&policy)
-                    .map_err(|error| Error::Serialization(error.to_string()))?;
+                    .map_err(|error| Error::new(ErrorKind::Serialization, error.to_string()))?;
                 // Jade requires the explicit multipath spelling instead of the
                 // BIP-388 wallet-policy shorthand.
                 let descriptor = descriptor.replace("/**", "/<0;1>/*");
@@ -92,17 +106,22 @@ fn jade_multisig_command(address: MultisigDisplayAddress) -> Result<JadeCommand,
 
     for key in address.keys {
         let DescriptorPublicKey::XPub(key) = key else {
-            return Err(Error::InvalidInput(
-                "Jade multisig display requires extended public keys".into(),
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Jade multisig display requires extended public keys",
             ));
         };
         if key.wildcard != Wildcard::None {
-            return Err(Error::InvalidInput(
-                "Jade multisig display requires concrete key derivation paths".into(),
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Jade multisig display requires concrete key derivation paths",
             ));
         }
         let (fingerprint, origin_path) = key.origin.ok_or_else(|| {
-            Error::InvalidInput("Jade multisig display requires key origin information".into())
+            Error::new(
+                ErrorKind::InvalidInput,
+                "Jade multisig display requires key origin information",
+            )
         })?;
         let origin = origin_path.to_u32_vec();
         signer_origins.push((fingerprint.to_bytes(), origin.clone()));
@@ -144,11 +163,13 @@ fn jade_path_variant(address_format: Option<AddressType>) -> Result<&'static str
         AddressType::P2pkh => Ok("pkh(k)"),
         AddressType::P2sh => Ok("sh(wpkh(k))"),
         AddressType::P2wpkh => Ok("wpkh(k)"),
-        AddressType::P2wsh | AddressType::P2tr => Err(Error::UnsupportedDisplayAddress(
-            "Jade does not support this path address format".into(),
+        AddressType::P2wsh | AddressType::P2tr => Err(Error::new(
+            ErrorKind::UnsupportedDisplayAddress,
+            "Jade does not support this path address format",
         )),
-        _ => Err(Error::UnsupportedDisplayAddress(
-            "Jade does not support this path address format".into(),
+        _ => Err(Error::new(
+            ErrorKind::UnsupportedDisplayAddress,
+            "Jade does not support this path address format",
         )),
     }
 }
@@ -201,21 +222,25 @@ impl From<JadeTransmit> for Transmit {
 impl From<JadeError> for Error {
     fn from(error: JadeError) -> Self {
         match error {
-            JadeError::Cbor => Self::Serialization("cbor".to_string()),
-            JadeError::NoErrorOrResult => Self::NoErrorOrResult,
+            JadeError::Cbor => Self::new(ErrorKind::Serialization, "invalid CBOR reply"),
+            JadeError::NoErrorOrResult => {
+                Self::new(ErrorKind::UnexpectedResponse, "no error or result returned")
+            }
             JadeError::Rpc(error) if error.code == api::ErrorCode::UserCancelled as i32 => {
-                Self::UserCancelled
+                Self::new(ErrorKind::UserCancelled, "")
             }
-            JadeError::Rpc(error) => Self::Rpc(error.code, error.message),
-            JadeError::Serialization(error) => Self::Serialization(error),
-            JadeError::UnexpectedResult(message) => Self::unexpected_result(
-                message.clone().into_bytes(),
-                format!("jade unexpected result: {message}"),
+            JadeError::Rpc(error) => Self::new(ErrorKind::Other, error.message.unwrap_or_default())
+                .with_device_code(DeviceCode::Jade(error.code)),
+            JadeError::Serialization(error) => Self::new(ErrorKind::Serialization, error),
+            JadeError::UnexpectedResult(message) => Self::new(
+                ErrorKind::UnexpectedResponse,
+                format!("unexpected response: {message}"),
             ),
-            JadeError::HandshakeRefused => Self::AuthenticationRefused,
-            JadeError::UnsupportedDisplayAddress => {
-                Self::UnsupportedDisplayAddress("unsupported display address on Jade".into())
-            }
+            JadeError::HandshakeRefused => Self::new(ErrorKind::AuthenticationRefused, ""),
+            JadeError::UnsupportedDisplayAddress => Self::new(
+                ErrorKind::UnsupportedDisplayAddress,
+                "unsupported display address on Jade",
+            ),
         }
     }
 }
@@ -237,7 +262,7 @@ mod tests {
             None,
         ));
 
-        assert!(matches!(result, Err(Error::UnsupportedDisplayAddress(_))));
+        assert!(matches!(result, Err(e) if e.kind() == ErrorKind::UnsupportedDisplayAddress));
     }
 
     #[test]
@@ -307,7 +332,7 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("expected an error"),
         };
-        assert!(matches!(err, Error::UserCancelled), "{err:?}");
+        assert_eq!(err.kind(), ErrorKind::UserCancelled, "{err:?}");
     }
 
     #[test]
@@ -317,7 +342,7 @@ mod tests {
             message: Some("bad params".into()),
             data: None,
         }));
-        assert!(matches!(err, Error::Rpc(-32602, _)), "{err:?}");
+        assert_eq!(err.device_code(), Some(DeviceCode::Jade(-32602)), "{err:?}");
     }
 
     #[test]

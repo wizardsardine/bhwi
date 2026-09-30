@@ -866,19 +866,19 @@ mod tests {
                     None,
                 )
                 .await,
-            "unsupported display address: KeepKey does not support Taproot address display",
+            "[UnsupportedDisplayAddress] KeepKey does not support Taproot address display",
         );
         assert_error(
             device
                 .sign_tx(owned_taproot_psbt(bip86_account_xpub), None)
                 .await,
-            "missing command info: KeepKey does not support Taproot inputs",
+            "[Unsupported] KeepKey does not support Taproot inputs",
         );
         assert_error(
             device
                 .sign_tx(owned_taproot_change_psbt(bip86_account_xpub), None)
                 .await,
-            "missing command info: KeepKey does not support Taproot change outputs",
+            "[Unsupported] KeepKey does not support Taproot change outputs",
         );
 
         let fingerprint = Fingerprint::from_str(FINGERPRINT).unwrap();
@@ -908,7 +908,7 @@ mod tests {
                     None,
                 )
                 .await,
-            "unsupported display address: KeepKey does not support unsorted multisig address display",
+            "[UnsupportedDisplayAddress] KeepKey does not support unsorted multisig address display",
         );
         let xpub_multisig = DisplayAddress::ByMultisig(MultisigDisplayAddress {
             threshold: 2,
@@ -925,23 +925,26 @@ mod tests {
         });
         assert_error(
             device.display_address(xpub_multisig, None).await,
-            "unsupported display address: KeepKey multisig address display requires fully-derived public keys",
+            "[UnsupportedDisplayAddress] KeepKey multisig address display requires fully-derived public keys",
         );
         let policy = format!("wpkh([{FINGERPRINT}/84'/1'/0']{XPUB_84}/0/*)");
         assert_error(
             device.register_wallet("keepkey-e2e", &policy).await,
-            "missing command info: register_wallet is not supported",
+            "[Unsupported] register_wallet is not supported",
         );
         assert_error(
             device.backup_device().await,
-            "missing command info: The Keepkey does not support creating a backup via software",
+            "[Unsupported] The Keepkey does not support creating a backup via software",
         );
     }
 
     #[tokio::test]
     async fn exact_no_pin_and_invalid_pin_errors() {
         let mut wallet = device().await;
-        assert_error(wallet.prompt_pin().await, "This device does not need a PIN");
+        assert_error(
+            wallet.prompt_pin().await,
+            "[AlreadyUnlocked] This device does not need a PIN",
+        );
         let mut device = device().await;
         assert_error(
             device
@@ -949,7 +952,7 @@ mod tests {
                     ManagementContext::Pin(HostPin::new("1234".into()).unwrap()),
                 )))
                 .await,
-            "This device does not need a PIN",
+            "[AlreadyUnlocked] This device does not need a PIN",
         );
         let error = match HostPin::new("notnum".into()) {
             Ok(_) => panic!("non-numeric PIN unexpectedly accepted"),
@@ -1117,7 +1120,7 @@ mod tests {
         too_long.unlock(Network::Testnet).await.unwrap();
         assert_error(
             too_long.get_master_fingerprint().await,
-            "invalid input: Passphrase too long",
+            "[InvalidInput] Passphrase too long",
         );
 
         lock_device(DEFAULT_MAIN_ADDR).await.unwrap();
@@ -1141,7 +1144,7 @@ mod tests {
         assert_eq!(locked.get_info().await.unwrap().needs_pin_sent, Some(false));
         assert_error(
             locked.prompt_pin().await,
-            "The PIN has already been sent to this device",
+            "[AlreadyUnlocked] The PIN has already been sent to this device",
         );
         drop(locked);
 
