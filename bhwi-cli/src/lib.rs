@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 use std::{ops::Deref, rc::Rc};
 
 #[cfg(target_os = "linux")]

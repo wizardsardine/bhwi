@@ -1,0 +1,19 @@
+[book]
+title = "BHWI Documentation"
+language = "en"
+src = "src"
+
+[build]
+create-missing = false
+use-default-preprocessors = false
+
+[rust]
+edition = "2024"
+
+[output.html]
+site-url = "/bhwi/docs/"
+no-section-label = true
+git-repository-url = "https://github.com/wizardsardine/bhwi"
+
+[output.html.playground]
+runnable = false

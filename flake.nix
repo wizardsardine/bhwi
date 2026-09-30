@@ -218,6 +218,66 @@
               runHook postInstall
             '';
           });
+        docs-book = pkgs.runCommand "docs-book" {
+          nativeBuildInputs = [pkgs.python3 pkgs.mdbook];
+        } ''
+          python3 ${./.}/nix/scripts/build-docs.py ${./.} "$TMPDIR/book"
+          mdbook build "$TMPDIR/book" --dest-dir "$out"
+        '';
+        docs-api-native = rustPlatformWasm.buildRustPackage {
+          name = "docs-api-native";
+          src = ./.;
+          inherit cargoLock;
+          nativeBuildInputs = pkgs.lib.optionals isDarwin [pkgs.clang];
+          preBuild = ''
+            ${darwinCcEnv}
+          '';
+          buildPhase = ''
+            runHook preBuild
+            cargo doc --frozen --no-deps --lib --all-features \
+              -p bhwi -p bhwi-async -p bhwi-async-transport -p bhwi-cli
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out"
+            cp -r --no-preserve=mode,ownership target/doc/. "$out/"
+            runHook postInstall
+          '';
+          doCheck = false;
+        };
+        docs-api-wasm = rustPlatformWasm.buildRustPackage {
+          name = "docs-api-wasm";
+          src = ./.;
+          inherit cargoLock;
+          nativeBuildInputs = [
+            pkgs.llvmPackages.clang-unwrapped
+            pkgs.llvmPackages.libclang
+          ];
+          buildPhase = ''
+            runHook preBuild
+            export CC_wasm32_unknown_unknown=${pkgs.llvmPackages.clang-unwrapped}/bin/clang
+            export CFLAGS_wasm32_unknown_unknown="-I ${pkgs.llvmPackages.libclang.lib}/lib/clang/21.1.8/include/"
+            export RUSTFLAGS="--cfg=web_sys_unstable_apis"
+            export RUSTDOCFLAGS="--cfg=web_sys_unstable_apis"
+            cargo doc --frozen --no-deps --lib --all-features --target wasm32-unknown-unknown \
+              -p bhwi -p bhwi-async -p bhwi-wasm
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out"
+            cp -r --no-preserve=mode,ownership target/wasm32-unknown-unknown/doc/. "$out/"
+            runHook postInstall
+          '';
+          doCheck = false;
+        };
+        documentation = pkgs.runCommand "documentation" {} ''
+          mkdir -p "$out/api/native" "$out/api/wasm"
+          cp -r --no-preserve=mode,ownership ${docs-book}/. "$out/"
+          cp -r --no-preserve=mode,ownership ${docs-api-native}/. "$out/api/native/"
+          cp -r --no-preserve=mode,ownership ${docs-api-wasm}/. "$out/api/wasm/"
+        '';
         inputs = [
           rust
           pkgs.rust-analyzer
@@ -231,6 +291,8 @@
           pkgs.clang
           pkgs.corepack_22
           pkgs.nodejs_22
+          pkgs.python3
+          pkgs.mdbook
         ];
         emulatorInputs =
           [
@@ -941,6 +1003,7 @@
       in {
         packages =
           {
+            inherit docs-book docs-api-native docs-api-wasm documentation;
             hwi-reference = hwiReference;
             hwi-reference-bhwi = hwiReferenceBhwi;
             default = pkgs.rustPlatform.buildRustPackage {
@@ -954,7 +1017,11 @@
             cargo-vendor-check = pkgs.rustPlatform.importCargoLock cargoLock;
             npm-deps-check = websiteNpmDeps;
             website = mkWebsite {};
-            website-ghpages = mkWebsite {base = "/bhwi/";};
+            website-ghpages = pkgs.runCommand "bhwi-website-ghpages" {} ''
+              mkdir -p "$out/docs"
+              cp -r --no-preserve=mode,ownership ${mkWebsite {base = "/bhwi/";}}/. "$out/"
+              cp -r --no-preserve=mode,ownership ${documentation}/. "$out/docs/"
+            '';
           }
           // pkgs.lib.optionalAttrs (!isDarwin) {
             hwi-upstream-suite = hwiUpstreamSuite;

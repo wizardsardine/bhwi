@@ -2,7 +2,7 @@
 # Hardware wallets, can we find a common interface ?
 
 The context section is rather long and may not interest you. You can skip to
-the implementation [details section](#BHWI).
+the implementation [details section](#bhwi).
 
 There is also a btcpp talk, were bhwi concept is explained with a ugly french accent.
 
