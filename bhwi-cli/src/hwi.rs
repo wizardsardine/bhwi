@@ -1286,7 +1286,7 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
             needs_pin_sent: false,
             needs_passphrase_sent: false,
             warnings: Vec::new(),
-            error: Some(skipped.error),
+            error: Some(hwi_message(&skipped.error)),
             code: Some(HwiErrorCode::DeviceConnectionError.code()),
         });
     }

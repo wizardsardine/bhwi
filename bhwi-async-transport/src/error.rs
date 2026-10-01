@@ -1,6 +1,6 @@
 //! Native discovery and transport errors.
 
-use bhwi_async::{ErrorKind, transport::io_error_kind};
+use bhwi_async::{ErrorKind, ErrorKindOf, transport::io_error_kind};
 
 use crate::DeviceType;
 
@@ -121,5 +121,11 @@ impl NativeError {
             #[cfg(feature = "specter")]
             Self::Probe { source, .. } => source.kind().unwrap_or(ErrorKind::Other),
         }
+    }
+}
+
+impl ErrorKindOf for NativeError {
+    fn error_kind(&self) -> ErrorKind {
+        self.kind()
     }
 }

@@ -333,7 +333,23 @@ impl HWIDeviceError {
 
     /// Returns the kind set on this error, or else the first one in its source chain.
     pub fn kind(&self) -> Option<ErrorKind> {
-        self.kind
+        if self.kind.is_some() {
+            return self.kind;
+        }
+        let mut source: Option<&(dyn StdError + 'static)> = Some(self.error.as_ref());
+        while let Some(current) = source {
+            if let Some(error) = current.downcast_ref::<common::Error>() {
+                return Some(error.kind());
+            }
+            if let Some(kind) = current
+                .downcast_ref::<HWIDeviceError>()
+                .and_then(Self::kind)
+            {
+                return Some(kind);
+            }
+            source = current.source();
+        }
+        None
     }
 }
 
