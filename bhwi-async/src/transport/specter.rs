@@ -197,11 +197,13 @@ impl<S: SpecterStream> Transport for SpecterTransport<S> {
     fn error_kind(&self, error: &Self::Error) -> ErrorKind {
         match error {
             SpecterTransportError::Disconnected => ErrorKind::Disconnected,
+            SpecterTransportError::Protocol(error) => {
+                bhwi::common::Error::from(error.clone()).kind()
+            }
+            SpecterTransportError::ResponseTooLarge => ErrorKind::Serialization,
+            SpecterTransportError::Cancelled => ErrorKind::Transport,
             SpecterTransportError::Io(_)
             | SpecterTransportError::Timeout
-            | SpecterTransportError::Cancelled
-            | SpecterTransportError::Protocol(_)
-            | SpecterTransportError::ResponseTooLarge
             | SpecterTransportError::Poisoned => ErrorKind::Transport,
         }
     }
@@ -309,6 +311,18 @@ mod tests {
                 _ => panic!("unexpected transport error"),
             }
         }
+
+        let transport = transport([Err(SpecterStreamError::Timeout)]);
+        assert_eq!(
+            transport.error_kind(&SpecterTransportError::ResponseTooLarge),
+            ErrorKind::Serialization
+        );
+        assert_eq!(
+            transport.error_kind(&SpecterTransportError::Protocol(
+                SpecterError::MalformedFraming("bad frame")
+            )),
+            ErrorKind::Serialization
+        );
     }
 
     #[test]

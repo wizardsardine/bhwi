@@ -139,28 +139,27 @@ impl From<SpecterTransmit> for Transmit {
 impl From<SpecterError> for Error {
     fn from(error: SpecterError) -> Self {
         match error {
-            SpecterError::MissingContext(message) | SpecterError::UnsupportedCommand(message) => {
-                Self::new(ErrorKind::Unsupported, message)
-            }
+            SpecterError::MissingContext(message) => Self::new(ErrorKind::MissingContext, message),
+            SpecterError::UnsupportedCommand(message) => Self::new(ErrorKind::Unsupported, message),
             SpecterError::UnsupportedDisplayAddress(message) => {
                 Self::new(ErrorKind::UnsupportedDisplayAddress, message)
             }
-            SpecterError::InvalidInput(message)
-            | SpecterError::MalformedPayload(message)
-            | SpecterError::NetworkMismatch(message) => Self::new(ErrorKind::InvalidInput, message),
+            SpecterError::InvalidInput(message) => Self::new(ErrorKind::InvalidInput, message),
+            SpecterError::NetworkMismatch(message) => Self::new(ErrorKind::WrongNetwork, message),
             SpecterError::UserCancelled => Self::new(ErrorKind::UserCancelled, ""),
             SpecterError::Refused(message) => {
                 Self::new(ErrorKind::Rejected, format!("Specter-DIY: {message}"))
             }
+            SpecterError::MalformedPayload(message) => Self::new(ErrorKind::Serialization, message),
             SpecterError::MalformedFraming(message) | SpecterError::State(message) => {
                 Self::new(ErrorKind::Serialization, message)
             }
             SpecterError::ResponseTooLarge => {
                 Self::new(ErrorKind::Serialization, "Specter response too large")
             }
-            SpecterError::Timeout => Self::new(ErrorKind::Protocol, "Specter request timed out"),
+            SpecterError::Timeout => Self::new(ErrorKind::Transport, "Specter request timed out"),
             SpecterError::Disconnected => {
-                Self::new(ErrorKind::Protocol, "Specter transport disconnected")
+                Self::new(ErrorKind::Disconnected, "Specter transport disconnected")
             }
         }
     }

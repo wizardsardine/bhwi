@@ -25,7 +25,7 @@ const CRLF_LEN: usize = 2;
 pub const MAX_RESPONSE_FRAME_SIZE: usize = MAX_RESPONSE_SIZE + ACK_FRAME.len() + CRLF_LEN;
 
 /// Errors in Specter command preparation, response framing, and transport exchange.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum SpecterError {
     /// Missing device-specific command context.
     #[error("missing command context: {0}")]
