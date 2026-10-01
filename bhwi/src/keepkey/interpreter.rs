@@ -148,6 +148,8 @@ impl Profile for KeepKeyProfile {
     // messages.options: PassphraseAck.passphrase max_size:51, one byte of
     // which is the NUL terminator.
     const MAX_PASSPHRASE_BYTES: usize = 50;
+    /// `compute_address` fails, answered as Failure_Other "Can't encode address".
+    const KEY_MISMATCH_FAILURES: &'static [i32] = &[9];
     fn pin_failure_needs_features(failure: &pb::Failure) -> bool {
         failure.code == Some(pb::failure::FailureType::FailureUnexpectedMessage as i32)
     }

@@ -2134,6 +2134,11 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
         Err(error) => return HwiResponse::Error(error),
     };
 
+    let probes_multisig_paths = matches!(display, DisplayAddress::ByMultisig(_))
+        && matches!(
+            device.device_type(),
+            DeviceType::KeepKey | DeviceType::Trezor
+        );
     let approval = coldcard_emulator_approval(
         coldcard_emulator_path(&device),
         coldcard_emulator_action(ColdcardApproval::Once),
@@ -2145,8 +2150,36 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
     }
     match address {
         Ok(address) => HwiResponse::DisplayAddress(HwiDisplayAddressResponse { address }),
-        Err(err) => HwiResponse::Error(classify_device_error_for(device.device_type(), &err)),
+        Err(err) => HwiResponse::Error(multisig_probe_error(
+            probes_multisig_paths,
+            device.device_type(),
+            &err,
+        )),
     }
+}
+
+/// Upstream swallows every device failure while probing multisig paths and
+/// reports one bad argument; a refusal, a lock or a host-side error keeps its code.
+fn multisig_probe_error(
+    probes_paths: bool,
+    device_type: DeviceType,
+    err: &(dyn std::error::Error + 'static),
+) -> HwiError {
+    use bhwi::common::{DeviceCode, ErrorKind};
+    const NO_PATH: &str = "No path supplied matched device keys";
+    let failed_while_probing = common_device_error(err).is_some_and(|error| {
+        matches!(
+            error.device_code(),
+            Some(DeviceCode::Trezor(_) | DeviceCode::KeepKey(_))
+        ) && !matches!(
+            error.kind(),
+            ErrorKind::UserCancelled | ErrorKind::AuthenticationRefused | ErrorKind::Locked
+        )
+    });
+    if probes_paths && failed_while_probing {
+        return HwiError::new(HwiErrorCode::BadArgument, NO_PATH);
+    }
+    classify_device_error_for(device_type, err)
 }
 
 #[derive(Clone, Copy)]

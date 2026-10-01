@@ -351,6 +351,8 @@ pub(crate) trait Profile {
     const DEFAULT_ON_DEVICE_PASSPHRASE: bool;
 
     const MAX_PASSPHRASE_BYTES: usize;
+    /// Failure codes a multisig `GetAddress` answers when the path's key is not a cosigner.
+    const KEY_MISMATCH_FAILURES: &'static [i32];
 
     fn coin_name(network: Network) -> String;
     fn decode_features(payload: &[u8]) -> Result<DeviceFeatures, TrezorError>;
@@ -408,6 +410,8 @@ impl Profile for TrezorProfile {
     // legacy/firmware/protect.h MAX_PASSPHRASE_LEN, and core checks
     // len(passphrase.encode()) against the same 50.
     const MAX_PASSPHRASE_BYTES: usize = 50;
+    const KEY_MISMATCH_FAILURES: &'static [i32] =
+        &[pb::failure::FailureType::FailureDataError as i32];
 
     fn coin_name(network: Network) -> String {
         coin_name(network)
@@ -671,7 +675,11 @@ impl<P: Profile> Engine<P> {
         if msg_type == MessageType::Failure as u16 && !matches!(self.state, State::AwaitPinResult) {
             let failure: pb::Failure = api::decode(&payload)?;
             let error = failure_error(failure);
-            if matches!(error, TrezorError::ActionCancelled(_)) {
+            let key_mismatch = matches!(
+                &error,
+                TrezorError::Failure(Some(code), _) if P::KEY_MISMATCH_FAILURES.contains(code)
+            );
+            if !key_mismatch {
                 return Err(error);
             }
             if let State::AwaitMultisigAddress(ctx) = &mut self.state
@@ -686,11 +694,6 @@ impl<P: Profile> Engine<P> {
                 );
                 ctx.next += 1;
                 return Ok(Some(EngineTransmit::Device(bytes)));
-            }
-            if matches!(self.state, State::AwaitMultisigAddress(_)) {
-                return Err(TrezorError::InvalidInput(
-                    "No path supplied matched device keys".into(),
-                ));
             }
             return Err(error);
         }
@@ -2556,8 +2559,8 @@ mod tests {
 
     fn refuse_path(interp: &mut Interp) -> Option<btc::GetAddress> {
         let failure = pb::Failure {
-            code: Some(pb::failure::FailureType::FailureProcessError as i32),
-            message: Some("Failed to derive scriptPubKey".to_string()),
+            code: Some(pb::failure::FailureType::FailureDataError as i32),
+            message: Some("Can't encode address".to_string()),
         };
         interp
             .exchange(framed(MessageType::Failure, &failure))
@@ -2735,6 +2738,23 @@ mod tests {
     }
 
     #[test]
+    fn multisig_probe_propagates_failures_that_are_not_key_mismatches() {
+        let mut interp = Interp::default().with_network(Network::Testnet);
+        start_multisig(&mut interp, multisig_address(false));
+        assert!(refuse_path(&mut interp).is_some());
+
+        let failure = pb::Failure {
+            code: Some(pb::failure::FailureType::FailurePinExpected as i32),
+            message: Some("PIN expected".to_string()),
+        };
+        assert!(matches!(
+            interp.exchange(framed(MessageType::Failure, &failure)),
+            Err(e) if e.kind() == ErrorKind::Locked
+                && e.device_code() == Some(DeviceCode::Trezor(5))
+        ));
+    }
+
+    #[test]
     fn display_address_by_multisig_reports_when_no_path_matches() {
         let mut interp = Interp::default().with_network(Network::Testnet);
         start_multisig(&mut interp, multisig_address(false));
@@ -2742,12 +2762,13 @@ mod tests {
         assert!(refuse_path(&mut interp).is_some());
 
         let failure = pb::Failure {
-            code: Some(pb::failure::FailureType::FailureProcessError as i32),
-            message: Some("Failed to derive scriptPubKey".to_string()),
+            code: Some(pb::failure::FailureType::FailureDataError as i32),
+            message: Some("Can't encode address".to_string()),
         };
         assert!(matches!(
             interp.exchange(framed(MessageType::Failure, &failure)),
-            Err(e) if e.kind() == ErrorKind::InvalidInput
+            Err(e) if e.device_code() == Some(DeviceCode::Trezor(3))
+                && e.message() == "Can't encode address"
         ));
     }
 
