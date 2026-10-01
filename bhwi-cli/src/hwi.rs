@@ -348,7 +348,33 @@ async fn find_hwi_device(selector: &HwiSelector) -> Result<(DeviceManager, Devic
             HwiErrorCode::DeviceConnectionError,
             "Could not find device with specified fingerprint or type",
         )),
-        Err(err) => Err(classify_device_error(&err)),
+        Err(err) => Err(classify_select_error(
+            selector
+                .device_type
+                .as_deref()
+                .and_then(|raw| parse_device_type(raw).ok()),
+            &err,
+        )),
+    }
+}
+
+/// A failed selection carries the skipped devices only as a list, out of the
+/// `source()` chain; one waiting for its host-entered PIN keeps upstream's -12.
+fn classify_select_error<E: std::error::Error + 'static>(
+    device_type: Option<DeviceType>,
+    err: &bhwi_async::device::SelectError<E>,
+) -> HwiError {
+    if let bhwi_async::device::SelectError::NoUsableDevice(no_usable) = err
+        && let Some(locked) = no_usable.skipped.iter().find(|skipped| {
+            skipped.error.kind() == bhwi::common::ErrorKind::Locked
+                && skipped.error.device_code().is_none()
+        })
+    {
+        return HwiError::new(HwiErrorCode::DeviceNotReady, hwi_message(&locked.error));
+    }
+    match device_type {
+        Some(device_type) => classify_device_error_for(device_type, err),
+        None => classify_device_error(err),
     }
 }
 
@@ -1157,7 +1183,7 @@ async fn enumerate(selector: HwiSelector) -> HwiResponse {
     let scan = match manager.enumerate().await {
         Ok(scan) => scan,
         Err(err) => {
-            return HwiResponse::Error(device_error(err));
+            return HwiResponse::Error(device_error(&err));
         }
     };
     let mut response = Vec::with_capacity(scan.devices.len() + scan.skipped.len());
@@ -1645,7 +1671,13 @@ async fn device_for_pin_command(
             ));
         }
         Err(err) => {
-            return Err(classify_device_error(&err));
+            return Err(classify_select_error(
+                selector
+                    .device_type
+                    .as_deref()
+                    .and_then(|raw| parse_device_type(raw).ok()),
+                &err,
+            ));
         }
     };
     if contact_device {
@@ -1666,40 +1698,27 @@ async fn device_for_pin_command(
     Ok(device)
 }
 
-fn locked_device_error(message: &str) -> Option<HwiError> {
-    #[cfg(feature = "trezor")]
-    if message.contains(bhwi::trezor::TrezorError::LOCKED) {
-        return Some(HwiError::new(
-            HwiErrorCode::DeviceNotReady,
-            bhwi::trezor::TrezorError::LOCKED,
-        ));
-    }
-    #[cfg(feature = "keepkey")]
-    if message.contains(KEEPKEY_LOCKED) {
-        return Some(HwiError::new(HwiErrorCode::DeviceNotReady, KEEPKEY_LOCKED));
-    }
-    let _ = message;
-    None
+/// Only a Trezor or KeepKey waiting for a host-entered PIN is locked without a
+/// device code; a locked Ledger or Jade keeps upstream's -3.
+fn locked_device_error(err: &(dyn std::error::Error + 'static)) -> Option<HwiError> {
+    let error = common_device_error(err)?;
+    (error.kind() == bhwi::common::ErrorKind::Locked && error.device_code().is_none())
+        .then(|| HwiError::new(HwiErrorCode::DeviceNotReady, hwi_message(error)))
 }
 
 /// A device waiting for its PIN reports being locked rather than failing to connect.
-fn device_error(err: impl std::fmt::Display) -> HwiError {
-    let message = err.to_string();
-    locked_device_error(&message)
-        .unwrap_or_else(|| HwiError::new(HwiErrorCode::DeviceConnectionError, message))
+fn device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
+    locked_device_error(err)
+        .unwrap_or_else(|| HwiError::new(HwiErrorCode::DeviceConnectionError, hwi_error_text(err)))
 }
 
 /// Reports the bare device message rather than the wrapped transport error.
 fn pin_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
     let message = hwi_error_text(err);
-    #[cfg(any(feature = "trezor", feature = "keepkey"))]
-    for known in [
-        bhwi::trezor::TrezorError::NO_PIN_NEEDED,
-        bhwi::trezor::TrezorError::PIN_ALREADY_SENT,
-    ] {
-        if message.contains(known) {
-            return HwiError::new(HwiErrorCode::DeviceAlreadyUnlocked, known);
-        }
+    if let Some(error) = common_device_error(err)
+        && error.kind() == bhwi::common::ErrorKind::AlreadyUnlocked
+    {
+        return HwiError::new(HwiErrorCode::DeviceAlreadyUnlocked, hwi_message(error));
     }
     if let Some(error) = common_device_error(err)
         && matches!(
@@ -2594,19 +2613,12 @@ const LEDGER_BITCOIN_STATUS_WORDS: [u16; 11] = [
 ];
 
 fn classify_device_error(err: &(dyn std::error::Error + 'static)) -> HwiError {
-    let mut source = Some(err);
-    while let Some(current) = source {
-        if let Some(error) = locked_device_error(&current.to_string()) {
-            return error;
-        }
-        source = current.source();
+    if let Some(error) = locked_device_error(err) {
+        return error;
     }
 
     if let Some(error) = common_device_error(err) {
         use bhwi::common::ErrorKind;
-        if error.kind() == ErrorKind::InvalidInput && error.message() == "Passphrase too long" {
-            return HwiError::new(HwiErrorCode::BadArgument, error.message());
-        }
         // Upstream `bitbox02_exception`: 101 and 103 raise UnavailableActionError,
         // any other device code is re-raised as an unknown error. Upstream's `init()`
         // rejects an uninitialized device first, which here answers 105.
@@ -2779,11 +2791,13 @@ fn get_xpub_response(xpub: Xpub, expert: bool) -> HwiGetXpubResponse {
     }
 }
 
-fn is_uninitialized_bitbox_error(device_type: DeviceType, error: &impl std::fmt::Display) -> bool {
+fn is_uninitialized_bitbox_error(
+    device_type: DeviceType,
+    err: &(dyn std::error::Error + 'static),
+) -> bool {
     device_type == DeviceType::BitBox02
-        && error
-            .to_string()
-            .ends_with("can't call this endpoint: wrong state")
+        && common_device_error(err)
+            .is_some_and(|error| error.device_code() == Some(bhwi::common::DeviceCode::BitBox(105)))
 }
 
 fn label_for(device_type: DeviceType, label: Option<String>) -> Option<Option<String>> {
@@ -4493,7 +4507,7 @@ mod tests {
 
         let fallback = classify(ErrorKind::Serialization, "boom");
         assert_eq!(fallback.code, HwiErrorCode::DeviceConnectionError.code());
-        assert!(fallback.error.contains("boom"), "{}", fallback.error);
+        assert_eq!(fallback.error, "boom");
 
         let trezor_failure = classify_device_error(&wrapped_device_error(
             CommonError::new(ErrorKind::Other, "messages.c:232:array overflow")
@@ -4505,10 +4519,6 @@ mod tests {
     #[test]
     #[cfg(feature = "keepkey")]
     fn keepkey_locked_and_bad_pin_errors_use_python_hwi_codes() {
-        let locked = device_error(format!("transport failed: {KEEPKEY_LOCKED}"));
-        assert_eq!(locked.code, HwiErrorCode::DeviceNotReady.code());
-        assert_eq!(locked.error, KEEPKEY_LOCKED);
-
         let locked = classify_device_error(&wrapped_device_error(bhwi::common::Error::from(
             bhwi::trezor::TrezorError::Locked(KEEPKEY_LOCKED),
         )));
@@ -4588,6 +4598,47 @@ mod tests {
         assert_eq!(
             classify_device_error_for(DeviceType::KeepKey, &pairing).code,
             HwiErrorCode::ActionCanceled.code()
+        );
+
+        let refused_while_selecting: bhwi_async::device::SelectError<std::io::Error> =
+            bhwi_async::device::SelectError::Device(bhwi_async::HWIDeviceError::new(
+                CommonError::new(ErrorKind::AuthenticationRefused, "authentication refused"),
+            ));
+        assert_eq!(
+            classify_select_error(Some(DeviceType::BitBox02), &refused_while_selecting).code,
+            HwiErrorCode::DeviceFailure.code()
+        );
+    }
+
+    #[test]
+    fn a_locked_device_skipped_during_selection_keeps_the_not_ready_code() {
+        use bhwi::common::{DeviceCode, Error as CommonError, ErrorKind};
+        use bhwi_async::device::{NoUsableDevice, SelectError, SkippedDevice};
+
+        let locked = CommonError::new(ErrorKind::Locked, "Trezor is locked");
+        let other = CommonError::new(ErrorKind::Locked, "Ledger device is locked")
+            .with_device_code(DeviceCode::Ledger(0x5515));
+        let err: SelectError<std::io::Error> = SelectError::NoUsableDevice(NoUsableDevice {
+            skipped: vec![
+                SkippedDevice::new(DeviceType::Ledger, "Ledger", "hid:1", &other),
+                SkippedDevice::new(DeviceType::Trezor, "Trezor", "hid:2", &locked),
+            ],
+        });
+        let classified = classify_select_error(None, &err);
+        assert_eq!(classified.code, HwiErrorCode::DeviceNotReady.code());
+        assert_eq!(classified.error, "Trezor is locked");
+
+        let err: SelectError<std::io::Error> = SelectError::NoUsableDevice(NoUsableDevice {
+            skipped: vec![SkippedDevice::new(
+                DeviceType::Ledger,
+                "Ledger",
+                "hid:1",
+                &other,
+            )],
+        });
+        assert_eq!(
+            classify_select_error(None, &err).code,
+            HwiErrorCode::DeviceConnectionError.code()
         );
     }
 
@@ -4691,8 +4742,10 @@ mod tests {
     #[test]
     #[cfg(feature = "keepkey")]
     fn classify_anyhow_device_error_preserves_locked_descriptor_lookup() {
-        let err = anyhow::Error::new(std::io::Error::other(KEEPKEY_LOCKED))
-            .context("getting descriptor fingerprint");
+        let err = anyhow::Error::new(wrapped_device_error(bhwi::common::Error::from(
+            bhwi::trezor::TrezorError::Locked(KEEPKEY_LOCKED),
+        )))
+        .context("getting descriptor fingerprint");
         let classified = classify_anyhow_device_error(&err);
         assert_eq!(classified.code, HwiErrorCode::DeviceNotReady.code());
         assert_eq!(classified.error, KEEPKEY_LOCKED);
