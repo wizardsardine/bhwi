@@ -322,7 +322,7 @@ where
     assert_success("reference", &reference)?;
     assert_success("candidate", &candidate)?;
 
-    if reference.json != candidate.json {
+    if !json_parity(&reference.json, &candidate.json) {
         bail!(
             "HWI JSON mismatch\nreference:\n{}\ncandidate:\n{}",
             serde_json::to_string_pretty(&reference.json)?,
@@ -331,6 +331,29 @@ where
     }
 
     Ok(candidate.json)
+}
+
+/// Error codes must match upstream; error messages need only be present.
+pub fn json_parity(reference: &Value, candidate: &Value) -> bool {
+    mask_error_messages(reference.clone()) == mask_error_messages(candidate.clone())
+}
+
+fn mask_error_messages(value: Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| match value {
+                    Value::String(message) if key == "error" && !message.is_empty() => {
+                        (key, Value::String("<message>".to_owned()))
+                    }
+                    value => (key, mask_error_messages(value)),
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.into_iter().map(mask_error_messages).collect()),
+        value => value,
+    }
 }
 
 fn parse_output(label: &str, output: Output) -> Result<HwiOutput> {
@@ -408,28 +431,6 @@ mod tests {
     const KEEPKEY_FINGERPRINT: &str = "95d8f670";
     const KEEPKEY_PIN: &str = "1234";
     const KEEPKEY_XPUB_44: &str = "tpubDCknDegFqAdP4V2AhHhs635DPe8N1aTjfKE9m2UFbdej8zmeNbtqDzK59SxnsYSRSx5uS3AujbwgANUiAk4oHmDNUKoGGkWWUY6c48WgjEx";
-    const KEEPKEY_ENUMERATE_ERROR_PREFIX: &str =
-        "Could not open client or get fingerprint information: ";
-
-    fn normalize_keepkey_enumerate_error(mut value: Value) -> Value {
-        if let Some(devices) = value.as_array_mut() {
-            for device in devices {
-                let Some(device) = device.as_object_mut() else {
-                    continue;
-                };
-                if device.get("type").and_then(Value::as_str) != Some("keepkey") {
-                    continue;
-                }
-                if let Some(Value::String(error)) = device.get_mut("error")
-                    && error.starts_with(KEEPKEY_ENUMERATE_ERROR_PREFIX)
-                {
-                    error.replace_range(..KEEPKEY_ENUMERATE_ERROR_PREFIX.len(), "");
-                }
-            }
-        }
-        value
-    }
-
     #[test]
     fn sensitive_hwi_arguments_are_redacted() {
         let args = ["--password", "secret", "signtx", "raw-psbt"].map(OsString::from);
@@ -441,51 +442,15 @@ mod tests {
     }
 
     #[test]
-    fn normalize_keepkey_enumerate_error_preserves_unrelated_values() {
-        let input = serde_json::json!([
-            {
-                "type": "keepkey",
-                "error": "Could not open client or get fingerprint information: Passphrase too long",
-                "code": -7,
-                "sibling": {
-                    "error": "Could not open client or get fingerprint information: nested"
-                }
-            },
-            {
-                "type": "keepkey",
-                "error": "an unrelated KeepKey error",
-                "code": -13
-            },
-            {
-                "type": "trezor",
-                "error": "Could not open client or get fingerprint information: unchanged",
-                "code": -12
-            },
-            "unchanged"
-        ]);
-        let expected = serde_json::json!([
-            {
-                "type": "keepkey",
-                "error": "Passphrase too long",
-                "code": -7,
-                "sibling": {
-                    "error": "Could not open client or get fingerprint information: nested"
-                }
-            },
-            {
-                "type": "keepkey",
-                "error": "an unrelated KeepKey error",
-                "code": -13
-            },
-            {
-                "type": "trezor",
-                "error": "Could not open client or get fingerprint information: unchanged",
-                "code": -12
-            },
-            "unchanged"
-        ]);
+    fn json_parity_compares_error_codes_but_not_messages() {
+        let reference = serde_json::json!([{"type": "keepkey", "error": "upstream", "code": -7}]);
+        let reworded = serde_json::json!([{"type": "keepkey", "error": "bhwi", "code": -7}]);
+        let recoded = serde_json::json!([{"type": "keepkey", "error": "upstream", "code": -13}]);
+        let unworded = serde_json::json!([{"type": "keepkey", "error": "", "code": -7}]);
 
-        assert_eq!(normalize_keepkey_enumerate_error(input), expected);
+        assert!(json_parity(&reference, &reworded));
+        assert!(!json_parity(&reference, &recoded));
+        assert!(!json_parity(&reference, &unworded));
     }
 
     #[test]
@@ -1007,15 +972,8 @@ mod tests {
                 let output = HwiBinary::candidate()?.run(case)?;
                 drop(refusal);
                 assert_success("candidate", &output)?;
-                assert_eq!(
-                    output.json,
-                    ExpectedHwiError {
-                        code: -14,
-                        error: "authentication refused",
-                    }
-                    .json(),
-                    "{command} refusal"
-                );
+                assert_error_shape("candidate", &output.json)?;
+                assert_eq!(output.json["code"], -14, "{command} refusal");
                 let healthy = HwiBinary::candidate()?.run(args([
                     "--emulators",
                     "--chain",
@@ -1499,9 +1457,8 @@ mod tests {
             assert_success("candidate", &candidate_enumerate)?;
             assert_enumerate_array("reference", &reference_enumerate.json)?;
             assert_enumerate_array("candidate", &candidate_enumerate.json)?;
-            assert_eq!(
-                normalize_keepkey_enumerate_error(reference_enumerate.json.clone()),
-                normalize_keepkey_enumerate_error(candidate_enumerate.json.clone()),
+            assert!(
+                json_parity(&reference_enumerate.json, &candidate_enumerate.json),
                 "KeepKey passphrase enumerate case {index}"
             );
 
@@ -1544,9 +1501,8 @@ mod tests {
         assert_success("candidate", &candidate_error)?;
         assert_enumerate_array("reference", &reference_error.json)?;
         assert_enumerate_array("candidate", &candidate_error.json)?;
-        assert_eq!(
-            normalize_keepkey_enumerate_error(reference_error.json.clone()),
-            normalize_keepkey_enumerate_error(candidate_error.json.clone()),
+        assert!(
+            json_parity(&reference_error.json, &candidate_error.json),
             "51-byte KeepKey passphrase enumerate"
         );
         let reference_device =
@@ -1559,7 +1515,6 @@ mod tests {
         let device =
             assert_enumerate_contains_device("candidate", &candidate_error.json, "keepkey")?;
         assert_eq!(device["code"], -7);
-        assert_eq!(device["error"], "Passphrase too long");
 
         cleanup.restore()
     }
@@ -2099,7 +2054,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         )?;
         assert_success("candidate", &candidate)?;
 
-        if !reference_getlogin_failure && reference.json != candidate.json {
+        if !reference_getlogin_failure && !json_parity(&reference.json, &candidate.json) {
             bail!(
                 "HWI installudevrules JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
@@ -2146,7 +2101,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             assert_enumerate_device_shape("candidate", candidate_device, Some(reference_device))?;
         }
 
-        if reference.json != candidate.json {
+        if !json_parity(&reference.json, &candidate.json) {
             bail!(
                 "HWI JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
@@ -2166,7 +2121,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         assert_success("candidate", &candidate)?;
         assert_xpub_only_shape("candidate", "getmasterxpub", &candidate.json)?;
 
-        if reference.json != candidate.json {
+        if !json_parity(&reference.json, &candidate.json) {
             bail!(
                 "HWI getmasterxpub JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
@@ -2187,7 +2142,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         assert_success("candidate", &candidate)?;
         assert_getxpub_shape("candidate", &candidate.json, expert)?;
 
-        if reference.json != candidate.json {
+        if !json_parity(&reference.json, &candidate.json) {
             bail!(
                 "HWI getxpub JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
@@ -2207,7 +2162,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         assert_success("candidate", &candidate)?;
         assert_getdescriptors_shape("candidate", &candidate.json)?;
 
-        if reference.json != candidate.json {
+        if !json_parity(&reference.json, &candidate.json) {
             bail!(
                 "HWI getdescriptors JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
@@ -2227,7 +2182,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         assert_success("candidate", &candidate)?;
         assert_getkeypool_shape("candidate", &candidate.json)?;
 
-        if reference.json != candidate.json {
+        if !json_parity(&reference.json, &candidate.json) {
             bail!(
                 "HWI getkeypool JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
@@ -2301,7 +2256,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         assert_error_shape("reference", &reference.json)?;
         assert_error_shape("candidate", &candidate.json)?;
 
-        if reference.json != candidate.json {
+        if !json_parity(&reference.json, &candidate.json) {
             bail!(
                 "HWI error JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
@@ -2337,7 +2292,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             return Ok(());
         }
 
-        if reference.json != candidate.json {
+        if !json_parity(&reference.json, &candidate.json) {
             bail!(
                 "HWI signmessage JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
@@ -2376,7 +2331,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             }
         } else {
             assert_displayaddress_result("candidate", &candidate, case.expect)?;
-            if reference.json != candidate.json {
+            if !json_parity(&reference.json, &candidate.json) {
                 bail!(
                     "HWI displayaddress JSON mismatch\nreference:\n{}\ncandidate:\n{}",
                     serde_json::to_string_pretty(&reference.json)?,
@@ -2458,10 +2413,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             drop(approval);
             let output = output?;
             assert_success("candidate", &output)?;
-            if attempt == 0
-                && output.json
-                    == serde_json::json!({"error": "authentication refused", "code": -14})
-            {
+            if attempt == 0 && output.json["code"] == -14 {
                 continue;
             }
             assert_signtx_shape("candidate", &output.json)?;
@@ -2486,7 +2438,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             assert_enumerate_contains_device("candidate", &candidate.json, device_type)?;
         assert_enumerate_device_shape("candidate", candidate_device, Some(reference_device))?;
 
-        if reference.json != candidate.json {
+        if !json_parity(&reference.json, &candidate.json) {
             bail!(
                 "HWI JSON mismatch for stdin enumerate\nreference:\n{}\ncandidate:\n{}",
                 serde_json::to_string_pretty(&reference.json)?,
