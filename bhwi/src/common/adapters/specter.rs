@@ -146,7 +146,9 @@ impl From<SpecterError> for Error {
             }
             SpecterError::InvalidInput(message) => Self::new(ErrorKind::InvalidInput, message),
             SpecterError::NetworkMismatch(message) => Self::new(ErrorKind::WrongNetwork, message),
-            SpecterError::UserCancelled => Self::new(ErrorKind::UserCancelled, ""),
+            SpecterError::UserCancelled => {
+                Self::new(ErrorKind::UserCancelled, crate::specter::USER_CANCELLED)
+            }
             SpecterError::Refused(message) => {
                 Self::new(ErrorKind::Rejected, format!("Specter-DIY: {message}"))
             }

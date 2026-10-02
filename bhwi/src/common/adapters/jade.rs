@@ -246,14 +246,12 @@ impl From<JadeError> for Error {
             }
             JadeError::Rpc(error) => {
                 let code = DeviceCode::Jade(error.code);
-                let converted = match rpc_kind(error.code) {
-                    ErrorKind::UserCancelled => {
-                        Self::new(ErrorKind::UserCancelled, "").with_device_code(code)
-                    }
-                    kind => {
-                        Self::new(kind, error.message.unwrap_or_default()).with_device_code(code)
-                    }
-                };
+                let kind = rpc_kind(error.code);
+                let message = error
+                    .message
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or_default();
+                let converted = Self::new(kind, message).with_device_code(code);
                 match error.data {
                     Some(data) => converted.with_data(data),
                     None => converted,

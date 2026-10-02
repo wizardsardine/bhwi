@@ -736,10 +736,10 @@ mod tests {
     async fn declined_signature_leaves_the_next_session_healthy() {
         let (psbt, _) = singlesig_psbt(Wrapper::Wit);
         let mut wallet = device().await;
-        assert_error(
-            decided(DebugButton::No, wallet.sign_tx(psbt, None)).await,
-            "[UserCancelled]",
-        );
+        let declined = decided(DebugButton::No, wallet.sign_tx(psbt, None))
+            .await
+            .unwrap_err();
+        assert_eq!(declined.kind(), bhwi::common::ErrorKind::UserCancelled);
         let mut next = device().await;
         assert_eq!(
             next.get_master_fingerprint().await.unwrap().to_string(),

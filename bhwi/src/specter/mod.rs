@@ -24,6 +24,9 @@ const CRLF_LEN: usize = 2;
 /// same framing after the transport has completed its exchange.
 pub const MAX_RESPONSE_FRAME_SIZE: usize = MAX_RESPONSE_SIZE + ACK_FRAME.len() + CRLF_LEN;
 
+/// The reason Specter-DIY gives, after `error: `, when the user cancels.
+pub const USER_CANCELLED: &str = "User cancelled";
+
 /// Errors in Specter command preparation, response framing, and transport exchange.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SpecterError {
@@ -414,7 +417,7 @@ fn parse_response(
     let response = core::str::from_utf8(&response)
         .map_err(|_| SpecterError::MalformedPayload("response is not UTF-8".into()))?;
     if let Some(reason) = response.strip_prefix("error: ") {
-        if reason == "User cancelled" {
+        if reason == USER_CANCELLED {
             return Err(SpecterError::UserCancelled);
         }
         return Err(SpecterError::Refused(reason.into()));

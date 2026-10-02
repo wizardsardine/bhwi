@@ -855,7 +855,7 @@ impl<P: Profile> Engine<P> {
                     let failure: pb::Failure = api::decode(&payload)?;
                     let needs_features = P::pin_failure_needs_features(&failure);
                     let error = failure_error(failure);
-                    if needs_features && !matches!(error, TrezorError::ActionCancelled(_)) {
+                    if needs_features && !matches!(error, TrezorError::ActionCancelled(..)) {
                         self.state = State::AwaitPinFailureFeatures(Box::new(error));
                         return Ok(Some(EngineTransmit::Device(api::get_features())));
                     }
@@ -1147,9 +1147,10 @@ fn failure_error(failure: pb::Failure) -> TrezorError {
     let cancelled = pb::failure::FailureType::FailureActionCancelled as i32;
     let pin_cancelled = pb::failure::FailureType::FailurePinCancelled as i32;
     match failure.code {
-        Some(code) if code == cancelled || code == pin_cancelled => {
-            TrezorError::ActionCancelled(code)
-        }
+        Some(code) if code == cancelled || code == pin_cancelled => TrezorError::ActionCancelled(
+            code,
+            failure.message.filter(|message| !message.is_empty()),
+        ),
         code => {
             let message = failure.message.unwrap_or_default();
             TrezorError::Failure(

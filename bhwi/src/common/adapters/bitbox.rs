@@ -201,10 +201,11 @@ impl From<BitBoxError> for Error {
     fn from(error: BitBoxError) -> Self {
         let message = error.to_string();
         match error {
-            BitBoxError::Device(BitBoxDeviceError::UserAbort) => {
-                Self::new(ErrorKind::UserCancelled, "").with_device_code(DeviceCode::BitBox(104))
+            BitBoxError::Device(BitBoxDeviceError::UserAbort, text) => {
+                Self::new(ErrorKind::UserCancelled, text.unwrap_or_default())
+                    .with_device_code(DeviceCode::BitBox(104))
             }
-            BitBoxError::Device(device) => {
+            BitBoxError::Device(device, text) => {
                 let kind = match device {
                     BitBoxDeviceError::InvalidInput => ErrorKind::InvalidInput,
                     BitBoxDeviceError::Memory | BitBoxDeviceError::Generic => {
@@ -219,7 +220,8 @@ impl From<BitBoxError> for Error {
                     }
                     BitBoxDeviceError::Unknown(_) => ErrorKind::Other,
                 };
-                Self::new(kind, message).with_device_code(DeviceCode::BitBox(device.code()))
+                Self::new(kind, text.unwrap_or(message))
+                    .with_device_code(DeviceCode::BitBox(device.code()))
             }
             BitBoxError::NoisePairingRejected => Self::new(ErrorKind::AuthenticationRefused, ""),
             BitBoxError::Noise("not paired") => Self::new(ErrorKind::NotReady, message),
@@ -445,7 +447,7 @@ mod tests {
             BitBoxDeviceError::UserAbort
         ));
         assert_eq!(
-            Error::from(BitBoxError::Device(BitBoxDeviceError::UserAbort)).kind(),
+            Error::from(BitBoxError::from(BitBoxDeviceError::UserAbort)).kind(),
             ErrorKind::UserCancelled
         );
         // Pairing rejection stays an authentication refusal.

@@ -181,9 +181,9 @@ pub fn decode_response(bytes: &[u8]) -> Result<pb::response::Response, BitBoxErr
     use prost::Message;
     let response = pb::Response::decode(bytes)?;
     match response.response {
-        Some(pb::response::Response::Error(pb::Error { code, .. })) => Err(BitBoxError::Device(
-            super::error::BitBoxDeviceError::from_code(code),
-        )),
+        Some(pb::response::Response::Error(pb::Error { code, message })) => {
+            Err(BitBoxError::from_reply(code, message))
+        }
         Some(r) => Ok(r),
         None => Err(BitBoxError::UnexpectedResponse),
     }

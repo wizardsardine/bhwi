@@ -39,8 +39,8 @@ pub enum TrezorError {
     #[error("device returned a key for the wrong network")]
     NetworkMismatch,
     /// An operation refused or cancelled by the device.
-    #[error("device refused the operation")]
-    ActionCancelled(i32),
+    #[error("{}", .1.as_deref().unwrap_or("device refused the operation"))]
+    ActionCancelled(i32, Option<String>),
     /// Setup or restore attempted on an initialized device.
     #[error("device is already initialized")]
     AlreadyInitialized,

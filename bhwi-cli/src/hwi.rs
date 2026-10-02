@@ -1737,7 +1737,7 @@ fn send_pin_error_response(err: &(dyn std::error::Error + 'static)) -> HwiRespon
         #[cfg(feature = "trezor")]
         let action_cancelled = matches!(
             current.downcast_ref::<bhwi::trezor::TrezorError>(),
-            Some(bhwi::trezor::TrezorError::ActionCancelled(_))
+            Some(bhwi::trezor::TrezorError::ActionCancelled(..))
         );
         #[cfg(not(feature = "trezor"))]
         let action_cancelled = false;
@@ -4426,7 +4426,7 @@ mod tests {
         ))];
         for code in [4, 6] {
             errors.push(bhwi_async::HWIDeviceError::new(
-                TrezorError::ActionCancelled(code),
+                TrezorError::ActionCancelled(code, None),
             ));
         }
         for code in [

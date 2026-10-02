@@ -86,11 +86,11 @@ pub enum BitBoxError {
         &'static str,
     ),
     /// An error reported by the device.
-    #[error("bitbox device error: {0}")]
+    #[error("bitbox device error: {}", .1.as_deref().map_or_else(|| .0.to_string(), str::to_owned))]
     Device(
         /// Device-reported failure.
-        #[from]
         BitBoxDeviceError,
+        Option<String>,
     ),
     /// A Noise session or handshake failure.
     #[error("noise channel error: {0}")]
@@ -182,6 +182,22 @@ pub enum BitBoxError {
     /// The device disconnected.
     #[error("transport error: {0}")]
     Disconnected(String),
+}
+
+impl From<BitBoxDeviceError> for BitBoxError {
+    fn from(error: BitBoxDeviceError) -> Self {
+        BitBoxError::Device(error, None)
+    }
+}
+
+impl BitBoxError {
+    /// A protobuf `Error` reply; an empty `message` means the device sent none.
+    pub fn from_reply(code: i32, message: String) -> Self {
+        BitBoxError::Device(
+            BitBoxDeviceError::from_code(code),
+            Some(message).filter(|message| !message.is_empty()),
+        )
+    }
 }
 
 impl From<prost::DecodeError> for BitBoxError {

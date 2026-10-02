@@ -153,8 +153,9 @@ pub(super) fn engine_error(e: TrezorError, device_code: fn(i32) -> DeviceCode) -
             ErrorKind::WrongNetwork,
             "device returned a key for the wrong network",
         ),
-        TrezorError::ActionCancelled(code) => {
-            Error::new(ErrorKind::UserCancelled, "").with_device_code(device_code(code))
+        TrezorError::ActionCancelled(code, text) => {
+            Error::new(ErrorKind::UserCancelled, text.unwrap_or_default())
+                .with_device_code(device_code(code))
         }
         TrezorError::AlreadyInitialized => Error::new(
             ErrorKind::AlreadyInitialized,

@@ -689,12 +689,11 @@ impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
         let response = pb::Response::decode(decrypted.as_slice())?;
         match response.response {
             Some(pb::response::Response::Success(_)) => Ok(true),
-            Some(pb::response::Response::Error(pb::Error { code, .. })) => {
-                let error = BitBoxDeviceError::from_code(code);
-                if error == BitBoxDeviceError::Generic {
+            Some(pb::response::Response::Error(pb::Error { code, message })) => {
+                if BitBoxDeviceError::from_code(code) == BitBoxDeviceError::Generic {
                     Ok(false)
                 } else {
-                    Err(error.into())
+                    Err(BitBoxError::from_reply(code, message))
                 }
             }
             _ => Err(BitBoxError::UnexpectedResponse),
