@@ -1998,7 +1998,7 @@ pub mod sign_tx {
 }
 /// *
 /// Response: Device asks for information for signing transaction or returns the last result
-/// If request_index is set, device awaits TxAck<any> matching the request type.
+/// If request_index is set, device awaits `TxAck<any>` matching the request type.
 /// If signature_index is set, 'signature' contains signed input of signature_index's input
 /// @end
 /// @next TxAckInput
