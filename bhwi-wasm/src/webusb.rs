@@ -1,3 +1,5 @@
+//! Browser WebUSB connections using configuration one, interface zero, and endpoint one.
+
 use js_sys::Uint8Array;
 use std::cell::RefCell;
 use std::io;
@@ -13,6 +15,7 @@ const INTERFACE_NUMBER: u8 = 0;
 const ENDPOINT_NUMBER: u8 = 1;
 const REPORT_SIZE: u32 = 64;
 
+/// An open browser WebUSB connection with a close callback.
 #[wasm_bindgen]
 pub struct WebUsbDevice {
     device: UsbDevice,
@@ -20,6 +23,18 @@ pub struct WebUsbDevice {
 }
 
 impl WebUsbDevice {
+    /// Requests permission for a matching USB device and opens its interface.
+    ///
+    /// Requires a browser `Window` with WebUSB support and permission to show the
+    /// device chooser, normally from a user gesture in a secure context. Returns
+    /// `None` without a window, on cancellation, or if opening, selecting
+    /// configuration one, or claiming interface zero fails. If `on_close_cb` is
+    /// a function, disconnect events for the same vendor and product IDs call it
+    /// with no arguments.
+    ///
+    /// # Panics
+    ///
+    /// Panics if event listeners cannot be installed or a close callback throws.
     pub async fn get_webusb_device(
         vendor_id: u16,
         product_id: Option<u16>,
@@ -112,6 +127,14 @@ impl WebUsbDevice {
         }
     }
 
+    /// Reads a report of up to 64 bytes into `data` and returns the copied length.
+    ///
+    /// A smaller buffer truncates the report; no read timeout is imposed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error for failed transfers or non-success statuses,
+    /// attempting to clear a stalled endpoint before returning its error.
     pub async fn read(&mut self, data: &mut [u8]) -> io::Result<usize> {
         let result = JsFuture::from(self.device.transfer_in(ENDPOINT_NUMBER, REPORT_SIZE))
             .await
@@ -146,6 +169,15 @@ impl WebUsbDevice {
         Ok(length)
     }
 
+    /// Sends `data` to endpoint one and returns the browser's byte count.
+    ///
+    /// Unlike WebHID writes, transfer failures are returned to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error for a closed connection, a rejected or failed
+    /// transfer, or a non-success status. Attempts to clear a stalled endpoint
+    /// before returning its error.
     pub async fn write(&self, data: &[u8]) -> io::Result<usize> {
         if !self.device.opened() {
             return Err(io::Error::other("usb connection is closed"));
@@ -176,6 +208,13 @@ impl WebUsbDevice {
 
 #[wasm_bindgen]
 impl WebUsbDevice {
+    /// Schedules closing the connection and calling a function-valued close callback.
+    ///
+    /// Returns before closing finishes; close failures are logged.
+    ///
+    /// # Panics
+    ///
+    /// The scheduled task panics if the callback throws.
     #[wasm_bindgen]
     pub fn close(&mut self) {
         let close_future = JsFuture::from(self.device.close());
@@ -195,6 +234,7 @@ impl WebUsbDevice {
         });
     }
 
+    /// Returns whether the browser currently reports the connection as open.
     #[wasm_bindgen]
     pub fn valid(&self) -> bool {
         self.device.opened()

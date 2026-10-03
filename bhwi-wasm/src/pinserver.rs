@@ -1,3 +1,5 @@
+//! Browser HTTP requests for Jade PIN-server interaction.
+
 use async_trait::async_trait;
 use bhwi_async::HttpClient;
 use wasm_bindgen::JsCast;
@@ -7,6 +9,12 @@ use web_sys::{Headers, Request, RequestInit, RequestMode, Response};
 
 use crate::WasmError;
 
+/// A browser fetch client that posts binary PIN-server requests with CORS enabled.
+///
+/// The [`HttpClient`] implementation sends `application/octet-stream` bodies and
+/// returns response bytes. Fetch failures and non-success HTTP statuses return
+/// [`WasmError`]. Requests require a browser `Window` and a server permitting
+/// the browser's cross-origin request; requesting without a window panics.
 pub struct PinServer;
 
 #[async_trait(?Send)]
