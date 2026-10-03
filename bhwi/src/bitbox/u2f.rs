@@ -1,3 +1,5 @@
+//! BitBox02 message framing in 64-byte U2F-style HID reports.
+//!
 // Ported from bitbox-api-rs (`src/u2fframing.rs`),
 // Copyright 2023-2025 Shift Crypto AG. Licensed under the Apache License,
 // Version 2.0 — see BITBOX_LICENSE at the repository root.
@@ -8,8 +10,10 @@ use std::io::{self, Cursor};
 const HEADER_INIT_LEN: usize = 7;
 const HEADER_CONT_LEN: usize = 5;
 
+/// Buffer size in bytes for one initial report and 128 continuation reports.
 pub const MAX_LEN: usize = 129 * 64;
 
+/// Parses a big-endian channel identifier, command byte, and payload byte length.
 pub fn parse_header(buf: &[u8]) -> io::Result<(u32, u8, u16)> {
     if buf.len() < HEADER_INIT_LEN {
         return Err(io::Error::new(
@@ -60,6 +64,7 @@ pub struct U2fHid {
 }
 
 impl U2fHid {
+    /// Creates a codec with the fixed BitBox channel identifier and supplied command.
     pub fn new(cmd: u8) -> Self {
         Self {
             cid: generate_cid(),
@@ -81,6 +86,10 @@ impl U2fHid {
         }
     }
 
+    /// Encodes a message into HID reports and returns the encoded byte length.
+    ///
+    /// The payload length is cast to `u16`; callers must keep messages within
+    /// the protocol's report limit. Unwritten report padding is left unchanged.
     pub fn encode(&self, mut message: &[u8], mut buf: &mut [u8]) -> io::Result<usize> {
         let enc_len = Self::get_encoded_len(message.len() as u16);
         if buf.len() < enc_len {
@@ -119,6 +128,10 @@ impl U2fHid {
         Ok(enc_len)
     }
 
+    /// Decodes a message, returning `None` when complete reports have not arrived.
+    ///
+    /// Checks the initial channel and command but does not validate continuation
+    /// channel identifiers or sequence numbers.
     pub fn decode(&self, mut buf: &[u8]) -> io::Result<Option<Vec<u8>>> {
         let (cid, cmd, len) = parse_header(buf)?;
         if cid != self.cid {

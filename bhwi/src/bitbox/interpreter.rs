@@ -1,3 +1,5 @@
+//! Sans-I/O BitBox02 commands and encrypted request state machines.
+
 use std::marker::PhantomData;
 
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub};
@@ -17,37 +19,55 @@ use super::{
 };
 use super::{antiklepto, policy};
 
-/// Public BitBox02 command surface. The target network is not carried per-command;
-/// it is interpreter state (see `BitBoxInterpreter::with_network`).
+/// BitBox02 commands using the interpreter's selected network.
 #[derive(Clone, Debug)]
 pub enum BitBoxCommand {
+    /// Unlocks the device and establishes or reuses its paired Noise session.
     UnlockAndPair,
+    /// Requests firmware and initialization information.
     GetVersion,
+    /// Requests the active wallet's master fingerprint.
     GetMasterFingerprint,
+    /// Requests an extended public key.
     GetXpub {
+        /// Key derivation path.
         keypath: DerivationPath,
+        /// Whether to ask for confirmation on the device.
         display: bool,
     },
-    /// P2WPKH (bip84) address at a plain BIP-32 keypath.
+    /// Requests an address for the selected single-key script type.
     ShowSimpleAddress {
+        /// Address derivation path.
         keypath: DerivationPath,
+        /// Native SegWit, wrapped SegWit, or Taproot script type.
         simple_type: pb::btc_script_config::SimpleType,
+        /// Whether to display the address on the device.
         display: bool,
     },
-    /// Address derived from a registered miniscript policy.
+    /// Requests an address derived from a registered miniscript policy.
     ShowPolicyAddress {
+        /// Full address derivation path.
         keypath: DerivationPath,
+        /// Registered wallet policy to use.
         policy: policy::Policy,
+        /// Whether to display the address on the device.
         display: bool,
     },
+    /// Checks whether a wallet policy is registered.
     IsScriptConfigRegistered {
+        /// Wallet policy to check.
         policy: policy::Policy,
     },
+    /// Registers a wallet policy with user confirmation.
     RegisterScriptConfig {
+        /// Wallet policy to register.
         policy: policy::Policy,
+        /// User-visible policy name.
         name: String,
     },
+    /// Signs supported PSBT inputs and returns the updated PSBT.
     SignPsbt {
+        /// PSBT to sign.
         psbt: Box<Psbt>,
         /// Optional pre-computed script config with keypath. If `None`, the interpreter
         /// infers per-input from the PSBT's redeem/witness scripts (single-sig only).
@@ -56,72 +76,132 @@ pub enum BitBoxCommand {
         /// config once the device fingerprint is known (needed for multisig/miniscript).
         policy: Option<policy::Policy>,
     },
-    /// Sign a message with a single-sig key at `keypath`.
+    /// Signs a message with a single-key script configuration.
     SignMessage {
+        /// Signing key derivation path.
         keypath: DerivationPath,
+        /// Single-key script type for message signing.
         simple_type: pb::btc_script_config::SimpleType,
+        /// Message bytes to sign.
         message: Vec<u8>,
     },
-    /// Address derived from a registered policy at `change`/`index`. The account keypath is
-    /// resolved from the policy key matching the device's own fingerprint.
+    /// Requests a policy address at a receive or change index.
+    ///
+    /// Resolves the account path from the policy origin matching the device fingerprint.
     ShowDescriptorAddress {
+        /// Registered wallet policy containing the device key origin.
         policy: policy::Policy,
+        /// Whether to use the change branch rather than the receive branch.
         change: bool,
+        /// Address index within the branch.
         index: u32,
+        /// Whether to display the address on the device.
         display: bool,
     },
-    /// Initialize an unseeded BitBox02.
+    /// Initializes an unseeded BitBox02.
     Setup {
+        /// User-visible device name.
         label: String,
+        /// Creation or mnemonic-restore mode.
         mode: SetupMode,
+        /// Backup timestamp as Unix seconds.
         timestamp: u32,
+        /// Local timezone offset from UTC, in seconds.
         timezone_offset: i32,
     },
-    /// Erase wallet material from the device.
+    /// Erases wallet material from the device.
     Wipe,
-    /// Restore wallet material using the device's on-screen mnemonic flow.
+    /// Restores wallet material using the device's on-screen mnemonic flow.
     Restore {
+        /// User-visible device name.
         label: String,
+        /// Restore timestamp as Unix seconds.
         timestamp: u32,
+        /// Local timezone offset from UTC, in seconds.
         timezone_offset: i32,
     },
-    /// Toggle the device's mnemonic-passphrase setting.
+    /// Toggles the device's mnemonic-passphrase setting.
     TogglePassphrase,
-    /// Restore the device from its currently-loaded mnemonic (simulator seeding).
+    /// Starts mnemonic restore, using the simulator's fixed mnemonic in simulation.
     RestoreFromMnemonic {
+        /// Restore timestamp as Unix seconds.
         timestamp: u32,
+        /// Local timezone offset from UTC, in seconds.
         timezone_offset: i32,
     },
-    /// Start the BitBox02 mnemonic backup display flow.
+    /// Starts the BitBox02 mnemonic backup display flow.
     Backup,
 }
 
+/// A completed BitBox02 command result.
 #[derive(Debug)]
 pub enum BitBoxResponse {
+    /// Completion without a returned value.
     TaskDone,
-    DeviceAction(bool),
-    Info(BitBoxDeviceInfo),
-    MasterFingerprint(Fingerprint),
-    Xpub(Xpub),
-    Address(String),
-    IsRegistered(bool),
-    /// A policy was registered on the device. BitBox02 has no equivalent of Ledger's wallet
-    /// hmac (address display re-sends the policy), so registration carries no token.
+    /// Whether a management action succeeded.
+    DeviceAction(
+        /// Whether the action succeeded.
+        bool,
+    ),
+    /// Firmware and initialization information.
+    Info(
+        /// Reported device information.
+        BitBoxDeviceInfo,
+    ),
+    /// Master fingerprint of the active wallet.
+    MasterFingerprint(
+        /// Active wallet master fingerprint.
+        Fingerprint,
+    ),
+    /// Extended public key of the requested path.
+    Xpub(
+        /// Requested extended public key.
+        Xpub,
+    ),
+    /// Encoded Bitcoin address.
+    Address(
+        /// Encoded address text.
+        String,
+    ),
+    /// Whether the queried policy is registered.
+    IsRegistered(
+        /// Whether the policy is registered.
+        bool,
+    ),
+    /// Successful policy registration without an authentication token.
     Registered,
-    SignedPsbt(Box<Psbt>),
-    Signature(u8, bitcoin::secp256k1::ecdsa::Signature),
+    /// PSBT containing returned signatures.
+    SignedPsbt(
+        /// Updated PSBT.
+        Box<Psbt>,
+    ),
+    /// Message-signature header byte and ECDSA signature.
+    Signature(
+        /// Synthesized `31 + recovery_id` header, not normalized to the requested script type.
+        u8,
+        /// Message signature.
+        bitcoin::secp256k1::ecdsa::Signature,
+    ),
+    /// Completion of the device's backup flow, not a downloaded backup file.
     Backup,
 }
 
+/// Firmware and initialization information reported by a BitBox02.
 #[derive(Clone, Debug)]
 pub struct BitBoxDeviceInfo {
+    /// Firmware version string.
     pub version: String,
+    /// Device name reported by firmware.
     pub name: String,
+    /// Whether a wallet has been initialized.
     pub initialized: bool,
 }
 
+/// An encoded transmission to the BitBox02.
 pub struct BitBoxTransmit {
+    /// Device payload including opcode framing and any Noise encryption.
     pub payload: Vec<u8>,
+    /// Whether the payload is already encrypted; callers must not encrypt it again.
     pub encrypted: bool,
 }
 
@@ -242,6 +322,9 @@ enum EncryptedContext {
     Backup,
 }
 
+/// A sans-I/O BitBox02 interpreter borrowing persistent Noise session state.
+///
+/// Commands other than unlock and pairing require an established Noise session.
 pub struct BitBoxInterpreter<'a, C, T, R, E> {
     state: State,
     noise: &'a mut NoiseState,
@@ -250,6 +333,7 @@ pub struct BitBoxInterpreter<'a, C, T, R, E> {
 }
 
 impl<'a, C, T, R, E> BitBoxInterpreter<'a, C, T, R, E> {
+    /// Creates an interpreter using the Bitcoin mainnet network.
     pub fn new(noise: &'a mut NoiseState) -> Self {
         Self {
             state: State::New,
@@ -259,7 +343,9 @@ impl<'a, C, T, R, E> BitBoxInterpreter<'a, C, T, R, E> {
         }
     }
 
-    /// Set the network used for coin selection and xpub encoding. Defaults to mainnet.
+    /// Selects the network for coin selection and xpub encoding.
+    ///
+    /// Mainnet uses Bitcoin and xpub; every other network uses testnet and tpub.
     pub fn with_network(mut self, network: bitcoin::Network) -> Self {
         self.network = network;
         self

@@ -9,7 +9,7 @@ use bitcoin::bip32::DerivationPath;
 use super::error::BitBoxError;
 use super::proto as pb;
 
-/// Create a single-sig script config.
+/// Creates a single-key script configuration.
 pub fn make_script_config_simple(
     simple_type: pb::btc_script_config::SimpleType,
 ) -> pb::BtcScriptConfig {
@@ -20,8 +20,7 @@ pub fn make_script_config_simple(
     }
 }
 
-/// Map a `bitcoin::Network` to the BitBox02 `BtcCoin` enum. Only mainnet and testnet variants
-/// are supported; every non-mainnet network is treated as testnet (matches async-hwi behaviour).
+/// Maps mainnet to the Bitcoin coin and every other network to the testnet coin.
 pub fn coin_from_network(network: bitcoin::Network) -> pb::BtcCoin {
     if network == bitcoin::Network::Bitcoin {
         pb::BtcCoin::Btc
@@ -30,7 +29,7 @@ pub fn coin_from_network(network: bitcoin::Network) -> pb::BtcCoin {
     }
 }
 
-/// Choose the appropriate `XPubType` for the given network (mainnet vs. testnet).
+/// Returns the mainnet xpub encoding or testnet tpub encoding for any other network.
 pub fn xpub_type_from_network(network: bitcoin::Network) -> pb::btc_pub_request::XPubType {
     if network == bitcoin::Network::Bitcoin {
         pb::btc_pub_request::XPubType::Xpub
@@ -39,7 +38,7 @@ pub fn xpub_type_from_network(network: bitcoin::Network) -> pb::btc_pub_request:
     }
 }
 
-/// Build a `BtcPub` request for a raw xpub.
+/// Creates an extended-public-key request with optional device confirmation.
 pub fn xpub_request(
     coin: pb::BtcCoin,
     keypath: &DerivationPath,
@@ -54,7 +53,7 @@ pub fn xpub_request(
     })
 }
 
-/// Build a `BtcPub` request for an address display.
+/// Creates an address request with optional device display.
 pub fn address_request(
     coin: pb::BtcCoin,
     keypath: &DerivationPath,
@@ -69,34 +68,37 @@ pub fn address_request(
     })
 }
 
-/// Build a `RootFingerprint` request.
+/// Creates a master-fingerprint request.
 pub fn root_fingerprint_request() -> pb::request::Request {
     pb::request::Request::Fingerprint(pb::RootFingerprintRequest {})
 }
 
-/// Build a `DeviceInfo` request.
+/// Creates a device-information request.
 pub fn device_info_request() -> pb::request::Request {
     pb::request::Request::DeviceInfo(pb::DeviceInfoRequest {})
 }
 
-/// Build a request that asks the BitBox02 to display/export its mnemonic backup flow.
+/// Creates a request to display the mnemonic backup on the device.
 pub fn show_mnemonic_request() -> pb::request::Request {
     pb::request::Request::ShowMnemonic(pb::ShowMnemonicRequest {})
 }
 
-/// Set the user-visible device name.
+/// Creates a request to set the user-visible device name.
 pub fn set_device_name_request(name: impl Into<String>) -> pb::request::Request {
     pb::request::Request::DeviceName(pb::SetDeviceNameRequest { name: name.into() })
 }
 
-/// Initialize a new wallet using host-provided entropy.
+/// Creates a new-wallet initialization request using host-provided entropy.
 pub fn set_password_request(entropy: &[u8; 32]) -> pb::request::Request {
     pb::request::Request::SetPassword(pb::SetPasswordRequest {
         entropy: entropy.to_vec(),
     })
 }
 
-/// Create the initial SD-card backup after a new wallet has been initialized.
+/// Creates an initial SD-card backup request after wallet initialization.
+///
+/// `timestamp` is Unix time in seconds and `timezone_offset` is the UTC offset
+/// in seconds.
 pub fn create_backup_request(timestamp: u32, timezone_offset: i32) -> pb::request::Request {
     pb::request::Request::CreateBackup(pb::CreateBackupRequest {
         timestamp,
@@ -104,7 +106,10 @@ pub fn create_backup_request(timestamp: u32, timezone_offset: i32) -> pb::reques
     })
 }
 
-/// Start the on-device mnemonic restore flow.
+/// Creates an on-device mnemonic restore request.
+///
+/// `timestamp` is Unix time in seconds and `timezone_offset` is the UTC offset
+/// in seconds.
 pub fn restore_from_mnemonic_request(timestamp: u32, timezone_offset: i32) -> pb::request::Request {
     pb::request::Request::RestoreFromMnemonic(pb::RestoreFromMnemonicRequest {
         timestamp,
@@ -112,19 +117,21 @@ pub fn restore_from_mnemonic_request(timestamp: u32, timezone_offset: i32) -> pb
     })
 }
 
-/// Erase wallet material and return the device to its uninitialized state.
+/// Creates a request to erase wallet material and reset the device.
 pub fn reset_request() -> pb::request::Request {
     pb::request::Request::Reset(pb::ResetRequest {})
 }
 
-/// Enable or disable use of a mnemonic passphrase on the device.
+/// Creates a request to enable or disable mnemonic passphrase use.
 pub fn set_mnemonic_passphrase_enabled_request(enabled: bool) -> pb::request::Request {
     pb::request::Request::SetMnemonicPassphraseEnabled(pb::SetMnemonicPassphraseEnabledRequest {
         enabled,
     })
 }
 
-/// Build a nested `BtcRequest::IsScriptConfigRegistered`.
+/// Creates a script-configuration registration query.
+///
+/// An absent account path is encoded as an empty key path.
 pub fn is_script_config_registered_request(
     coin: pb::BtcCoin,
     script_config: pb::BtcScriptConfig,
@@ -143,7 +150,10 @@ pub fn is_script_config_registered_request(
     })
 }
 
-/// Build a nested `BtcRequest::RegisterScriptConfig`.
+/// Creates a script-configuration registration request.
+///
+/// An absent account path is encoded as an empty key path and an absent name
+/// as an empty string.
 pub fn register_script_config_request(
     coin: pb::BtcCoin,
     script_config: pb::BtcScriptConfig,
@@ -166,7 +176,7 @@ pub fn register_script_config_request(
     })
 }
 
-/// Decode a top-level device response, mapping known error codes.
+/// Decodes a device response, mapping error codes and rejecting an absent response.
 pub fn decode_response(bytes: &[u8]) -> Result<pb::response::Response, BitBoxError> {
     use prost::Message;
     let response = pb::Response::decode(bytes)?;

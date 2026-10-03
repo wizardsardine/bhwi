@@ -1,3 +1,5 @@
+//! KeepKey command interpretation using its device-specific protocol profile.
+
 use core::marker::PhantomData;
 
 use bitcoin::Network;
@@ -17,38 +19,77 @@ use crate::trezor::interpreter::{
 };
 use crate::trezor::proto::{bitcoin as btc, common as pb};
 
+/// A KeepKey command using the session's selected network.
 pub enum KeepKeyCommand {
-    Initialize(Option<Network>),
+    /// Initializes a session, optionally replacing its selected network.
+    Initialize(
+        /// Replacement session network, or `None` to retain the current network.
+        Option<Network>,
+    ),
+    /// Requests device features without starting a new session.
     GetFeatures,
+    /// Requests the active wallet's master fingerprint.
     GetMasterFingerprint,
+    /// Requests an extended public key.
     GetXpub {
+        /// BIP-32 child numbers with the hardened bit encoded.
         address_n: Vec<u32>,
+        /// Whether to ask for confirmation on the device.
         display: bool,
     },
+    /// Requests an address for a path and script type.
     GetAddress {
+        /// BIP-32 child numbers with the hardened bit encoded.
         address_n: Vec<u32>,
+        /// Whether to display the address on the device.
         display: bool,
+        /// Script type selected for the address.
         script_type: btc::InputScriptType,
     },
-    GetMultisigAddress(TrezorMultisigAddress),
+    /// Displays a concrete multisig address.
+    GetMultisigAddress(
+        /// Concrete multisig display settings.
+        TrezorMultisigAddress,
+    ),
+    /// Signs a message using the device's legacy single-key signing format.
     SignMessage {
+        /// Signing path as BIP-32 child numbers.
         address_n: Vec<u32>,
+        /// Message bytes to sign.
         message: Vec<u8>,
     },
-    SignTx(Box<Psbt>),
+    /// Signs supported non-Taproot PSBT inputs and returns the updated PSBT.
+    SignTx(
+        /// PSBT to sign.
+        Box<Psbt>,
+    ),
+    /// Erases wallet material from the device.
     Wipe,
+    /// Toggles passphrase protection based on current device features.
     TogglePassphrase,
+    /// Initializes an unseeded device using caller-provided entropy.
     Setup {
+        /// User-visible device label, if supplied.
         label: Option<String>,
+        /// Caller-generated entropy mixed with device entropy.
         host_entropy: [u8; 32],
     },
+    /// Starts character-cipher mnemonic recovery.
     Restore {
+        /// User-visible device label, if supplied.
         label: Option<String>,
+        /// Number of mnemonic words.
         word_count: u32,
+        /// Initial U2F counter.
         u2f_counter: u32,
     },
+    /// Starts a PIN prompt and leaves the device awaiting scrambled positions.
     PromptPin,
-    SendPin(crate::trezor::HostPin),
+    /// Supplies scrambled keypad positions for a pending PIN request.
+    SendPin(
+        /// Scrambled keypad positions, not literal PIN digits.
+        crate::trezor::HostPin,
+    ),
 }
 
 impl From<KeepKeyCommand> for EngineCommand {
@@ -271,6 +312,7 @@ fn validate_keepkey_psbt(psbt: &Psbt, master_fp: Fingerprint) -> Result<(), Trez
     Ok(())
 }
 
+/// A sans-I/O KeepKey interpreter, defaulting to mainnet and host passphrase entry.
 pub struct KeepKeyInterpreter<C, T, R, E> {
     engine: Engine<KeepKeyProfile>,
     _marker: PhantomData<(C, T, R, E)>,
@@ -286,11 +328,15 @@ impl<C, T, R, E> Default for KeepKeyInterpreter<C, T, R, E> {
 }
 
 impl<C, T, R, E> KeepKeyInterpreter<C, T, R, E> {
+    /// Selects the session network; every non-mainnet network uses the `Testnet` coin.
     pub fn with_network(mut self, network: Network) -> Self {
         self.engine = self.engine.with_network(network);
         self
     }
 
+    /// Sets the normalized host passphrase, or clears it with `None`.
+    ///
+    /// Host passphrases are limited to 50 normalized UTF-8 bytes, not characters.
     pub fn with_passphrase(mut self, passphrase: Option<HostPassphrase>) -> Self {
         self.engine = self.engine.with_passphrase(passphrase);
         self

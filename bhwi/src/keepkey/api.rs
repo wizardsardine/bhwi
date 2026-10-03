@@ -1,3 +1,5 @@
+//! KeepKey-specific protobuf request builders and wire message identifiers.
+
 use prost::Message;
 
 use crate::keepkey::proto;
@@ -5,39 +7,71 @@ use crate::trezor::proto::bitcoin as btc;
 
 pub use crate::trezor::api::{frame, parse_frame};
 
+/// Wire identifiers used by the KeepKey protocol profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum MessageType {
+    /// Session initialization request.
     Initialize = 0,
+    /// Successful operation response.
     Success = 2,
+    /// Device failure response.
     Failure = 3,
+    /// Wallet erasure request.
     WipeDevice = 5,
+    /// Extended-public-key request.
     GetPublicKey = 11,
+    /// Extended-public-key response.
     PublicKey = 12,
+    /// New-wallet initialization request.
     ResetDevice = 14,
+    /// Transaction-signing request.
     SignTx = 15,
+    /// Device-features response.
     Features = 17,
+    /// Device request for scrambled PIN positions.
     PinMatrixRequest = 18,
+    /// Host response containing scrambled PIN positions.
     PinMatrixAck = 19,
+    /// Cancellation request.
     Cancel = 20,
+    /// Device request for transaction data.
     TxRequest = 21,
+    /// Host response containing transaction data.
     TxAck = 22,
+    /// Device-settings update request.
     ApplySettings = 25,
+    /// Device request to acknowledge a confirmation prompt.
     ButtonRequest = 26,
+    /// Host acknowledgement of a confirmation prompt.
     ButtonAck = 27,
+    /// Address request.
     GetAddress = 29,
+    /// Address response.
     Address = 30,
+    /// Device request for host entropy.
     EntropyRequest = 35,
+    /// Host entropy response.
     EntropyAck = 36,
+    /// Message-signing request.
     SignMessage = 38,
+    /// Message-signature response.
     MessageSignature = 40,
+    /// Device request for host passphrase entry.
     PassphraseRequest = 41,
+    /// Host passphrase response.
     PassphraseAck = 42,
+    /// Character-cipher mnemonic recovery request.
     RecoveryDevice = 45,
+    /// Device-features request.
     GetFeatures = 55,
+    /// Device request for a recovery character.
     CharacterRequest = 80,
+    /// Host recovery character or editing action.
     CharacterAck = 81,
+    /// Debug-link state request.
     DebugLinkGetState = 101,
+    /// Debug-link state response.
     DebugLinkState = 102,
 }
 
@@ -45,22 +79,27 @@ fn encode<M: Message>(message_type: MessageType, message: &M) -> Vec<u8> {
     frame(message_type as u16, &message.encode_to_vec())
 }
 
+/// Decodes a protobuf payload without its frame header.
 pub fn decode<M: Message + Default>(payload: &[u8]) -> Result<M, crate::trezor::TrezorError> {
     M::decode(payload).map_err(crate::trezor::TrezorError::Decode)
 }
 
+/// Encodes a session-initialization request.
 pub fn initialize() -> Vec<u8> {
     crate::trezor::api::initialize()
 }
 
+/// Encodes a device-features request.
 pub fn get_features() -> Vec<u8> {
     crate::trezor::api::get_features()
 }
 
+/// Encodes a wallet-erasure request.
 pub fn wipe_device() -> Vec<u8> {
     crate::trezor::api::wipe_device()
 }
 
+/// Encodes 128-bit wallet initialization with PIN protection and an optional label.
 pub fn reset_device(passphrase_protection: bool, label: Option<String>) -> Vec<u8> {
     encode(
         MessageType::ResetDevice,
@@ -78,6 +117,7 @@ pub fn reset_device(passphrase_protection: bool, label: Option<String>) -> Vec<u
     )
 }
 
+/// Encodes character-cipher recovery with PIN protection and initial U2F counter.
 pub fn recovery_device(
     word_count: u32,
     passphrase_protection: bool,
@@ -101,22 +141,27 @@ pub fn recovery_device(
     )
 }
 
+/// Encodes caller-supplied entropy for a pending device entropy request.
 pub fn entropy_ack(entropy: &[u8]) -> Vec<u8> {
     crate::trezor::api::entropy_ack(entropy)
 }
 
+/// Encodes a passphrase-protection settings update.
 pub fn apply_settings(use_passphrase: bool) -> Vec<u8> {
     crate::trezor::api::apply_settings(use_passphrase)
 }
 
+/// Encodes cancellation of the pending device operation.
 pub fn cancel() -> Vec<u8> {
     crate::trezor::api::cancel()
 }
 
+/// Encodes acknowledgement of a device confirmation prompt.
 pub fn button_ack() -> Vec<u8> {
     crate::trezor::api::button_ack()
 }
 
+/// Encodes host passphrase text without normalization or length validation.
 pub fn passphrase_ack_from_host(passphrase: &str) -> Vec<u8> {
     #[derive(Clone, PartialEq, prost::Message)]
     struct PassphraseAck {
@@ -132,10 +177,12 @@ pub fn passphrase_ack_from_host(passphrase: &str) -> Vec<u8> {
     )
 }
 
+/// Encodes scrambled keypad positions without validating them.
 pub fn pin_matrix_ack(positions: &str) -> Vec<u8> {
     crate::trezor::api::pin_matrix_ack(positions)
 }
 
+/// Encodes an extended-key request using BIP-32 child numbers and the selected coin.
 pub fn get_public_key(address_n: Vec<u32>, show_display: bool, coin_name: String) -> Vec<u8> {
     encode(
         MessageType::GetPublicKey,
@@ -150,6 +197,7 @@ pub fn get_public_key(address_n: Vec<u32>, show_display: bool, coin_name: String
     )
 }
 
+/// Encodes transaction-signing metadata with consensus version and lock time.
 pub fn sign_tx(
     inputs_count: u32,
     outputs_count: u32,
@@ -160,10 +208,12 @@ pub fn sign_tx(
     crate::trezor::api::sign_tx(inputs_count, outputs_count, version, lock_time, coin_name)
 }
 
+/// Encodes transaction data requested during signing.
 pub fn tx_ack(tx: btc::tx_ack::TransactionType) -> Vec<u8> {
     crate::trezor::api::tx_ack(tx)
 }
 
+/// Encodes legacy single-key message signing with a BIP-32 path and message bytes.
 pub fn sign_message(address_n: Vec<u32>, message: Vec<u8>, coin_name: String) -> Vec<u8> {
     #[derive(Clone, PartialEq, prost::Message)]
     struct SignMessage {
@@ -188,6 +238,7 @@ pub fn sign_message(address_n: Vec<u32>, message: Vec<u8>, coin_name: String) ->
     )
 }
 
+/// Encodes address retrieval or display, optionally supplying a multisig script.
 pub fn get_address(
     address_n: Vec<u32>,
     show_display: bool,
@@ -198,6 +249,10 @@ pub fn get_address(
     crate::trezor::api::get_address(address_n, show_display, script_type, coin_name, multisig)
 }
 
+/// Encodes a recovery character, mapping backspace to deletion and newline to completion.
+///
+/// Other bytes become a one-character string; this builder does not validate
+/// lowercase ASCII or the recovery cursor position.
 pub fn character_ack(value: u8) -> Vec<u8> {
     let message = match value {
         0x08 => proto::CharacterAck {
@@ -216,6 +271,7 @@ pub fn character_ack(value: u8) -> Vec<u8> {
     encode(MessageType::CharacterAck, &message)
 }
 
+/// Encodes a debug-link state request for firmware exposing that interface.
 pub fn debug_link_get_state() -> Vec<u8> {
     encode(MessageType::DebugLinkGetState, &proto::DebugLinkGetState {})
 }

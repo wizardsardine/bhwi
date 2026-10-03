@@ -1,5 +1,5 @@
-/// APDU commands  for the Bitcoin application.
-///
+//! APDU request builders for the Ledger Bitcoin application.
+//!
 use bitcoin::{
     Network,
     bip32::{ChildNumber, DerivationPath},
@@ -13,6 +13,7 @@ use super::{
 };
 
 // https://github.com/LedgerHQ/ledger-live/blob/5a0a1aa5dc183116839851b79bceb6704f1de4b9/libs/ledger-live-common/src/hw/openApp.ts#L3
+/// Creates an application-open request, using `Bitcoin Test` for every non-mainnet network.
 pub fn open_app(network: Network) -> ApduCommand {
     ApduCommand {
         cla: 0xe0,
@@ -106,7 +107,9 @@ pub fn get_wallet_address(
     })
 }
 
-/// Creates the APDU command required to sign a psbt.
+/// Creates a PSBT-signing request from Merkle commitments and a wallet policy.
+///
+/// An absent registration HMAC is encoded as 32 zero bytes.
 pub fn sign_psbt(
     global_mapping_commitment: &[u8],
     inputs_number: usize,
@@ -132,7 +135,7 @@ pub fn sign_psbt(
     })
 }
 
-/// Creates the APDU Command to sign a message.
+/// Creates a message-signing request using the message byte length and Merkle root.
 pub fn sign_message(
     message_length: usize,
     message_commitment_root: &[u8; 32],
@@ -157,7 +160,7 @@ pub fn sign_message(
     }
 }
 
-/// Creates the APDU command to CONTINUE.
+/// Creates a continuation request carrying the response to a delegated command.
 pub fn continue_interrupted(data: Vec<u8>) -> ApduCommand {
     ApduCommand {
         cla: apdu::Cla::Framework as u8,

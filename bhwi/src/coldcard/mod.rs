@@ -1,3 +1,5 @@
+//! Coldcard commands, file transfers, and AES-CTR session state.
+
 pub mod api;
 pub mod encrypt;
 
@@ -14,46 +16,71 @@ use crate::Interpreter;
 use crate::coldcard::api::response::ResponseMessage;
 use crate::device::DeviceId;
 
+/// Default Unix socket path of the Coldcard simulator.
 pub const DEFAULT_CKCC_SOCKET: &str = "/tmp/ckcc-simulator.sock";
+/// Coldcard USB identifiers and default emulator socket.
 pub const COLDCARD_DEVICE_ID: DeviceId = DeviceId::new(0xd13e)
     .with_pid(0xcc10)
     .with_emulator_path(DEFAULT_CKCC_SOCKET);
 
+/// Errors in Coldcard command preparation and response handling.
 #[derive(Debug, thiserror::Error)]
 pub enum ColdcardError {
-    /// Encryption error
+    /// A key agreement or encryption-state failure.
     #[error("encryption error: {0}")]
-    Encryption(&'static str),
+    Encryption(
+        /// Key-agreement or state failure description.
+        &'static str,
+    ),
 
+    /// Missing command context or an unsupported common operation.
     #[error("missing command info: {0}")]
-    MissingCommandInfo(&'static str),
+    MissingCommandInfo(
+        /// Missing context or unsupported-operation description.
+        &'static str,
+    ),
 
+    /// An error reported by the device.
     #[error("Coldcard Error: {0}")]
-    Device(String),
+    Device(
+        /// Device-reported error text.
+        String,
+    ),
 
+    /// An operation ended without a result.
     #[error("no error or result returned")]
     NoErrorOrResult,
 
-    /// Serialization error
+    /// Encoding or decoding failure.
     #[error("serialization error: {0}")]
-    Serialization(String),
+    Serialization(
+        /// Encoding or decoding failure description.
+        String,
+    ),
 
+    /// Invalid command input.
     #[error("invalid input: {0}")]
-    InvalidInput(String),
+    InvalidInput(
+        /// Invalid-input description.
+        String,
+    ),
 
-    /// User refused the action on the device (`refu` frame)
+    /// An action refused on the device.
     #[error("action canceled by the user")]
     UserCancelled,
 
-    /// Unexpected response message from device
+    /// A response tag incompatible with the current operation.
     #[error("unexpected response message: got {got:?}, expected {expected:?}")]
     UnexpectedResponseMessage {
+        /// Response tag received from the device.
         got: ResponseMessage,
+        /// Accepted response tags.
         expected: Vec<ResponseMessage>,
     },
 }
 
 impl ColdcardError {
+    /// Creates an error describing the received and accepted response tags.
     pub fn unexpected_response_message(
         got: ResponseMessage,
         expected: &[ResponseMessage],
@@ -65,71 +92,148 @@ impl ColdcardError {
     }
 }
 
+/// A Coldcard command interpreted without transport I/O.
 pub enum ColdcardCommand {
+    /// Requests key agreement; the device must already be unlocked.
+    ///
+    /// Returns [`ColdcardResponse::MyPub`] without initializing the cipher streams.
+    /// Call [`encrypt::Engine::ready`] with its `encryption_key` before issuing
+    /// encrypted commands.
     StartEncryption,
+    /// Creates and downloads an encrypted device backup.
     Backup,
+    /// Requests firmware version and device model.
     GetVersion,
+    /// Requests the active wallet's master fingerprint.
     GetMasterFingerprint,
-    GetXpub(DerivationPath),
+    /// Requests an extended public key at the given derivation path.
+    GetXpub(
+        /// Key derivation path.
+        DerivationPath,
+    ),
+    /// Signs a message using the P2WPKH message-signing format.
     SignMessage {
+        /// Message bytes to sign.
         message: Vec<u8>,
+        /// Signing key derivation path.
         path: DerivationPath,
     },
+    /// Displays a single-key address.
     ShowAddress {
+        /// Address derivation path.
         path: DerivationPath,
+        /// Coldcard address-format bitmask.
         addr_fmt: u32,
     },
+    /// Displays a sorted multisig address.
     ShowP2shAddress {
+        /// Concrete multisig keys and script format.
         address: ColdcardMultisigDisplayAddress,
     },
+    /// Displays an address from a previously registered descriptor.
     MiniscriptAddress {
+        /// Registered descriptor name.
         name: String,
+        /// Whether to use the change branch.
         change: bool,
+        /// Address index within the branch.
         index: u32,
     },
+    /// Uploads, signs, and downloads a PSBT.
     SignPsbt {
+        /// PSBT to sign.
         psbt: Psbt,
     },
+    /// Uploads a wallet enrollment payload and leaves confirmation to the user.
     RegisterWallet {
+        /// Encoded Coldcard enrollment file bytes.
         payload: Vec<u8>,
     },
 }
 
+/// Concrete sorted multisig keys used to display a Coldcard address.
 pub struct ColdcardMultisigDisplayAddress {
+    /// Number of required signatures.
     pub threshold: u8,
+    /// Coldcard multisig address-format bitmask.
     pub address_format: u32,
+    /// Keys in script order; the interpreter does not sort them.
     pub keys: Vec<ColdcardMultisigDisplayKey>,
 }
 
+/// A concrete multisig key and its master-key origin.
 pub struct ColdcardMultisigDisplayKey {
+    /// Master fingerprint.
     pub fingerprint: Fingerprint,
+    /// Full derivation path of the concrete key.
     pub path: DerivationPath,
+    /// Derived public key.
     pub public_key: PublicKey,
 }
 
+/// A Coldcard command result.
 pub enum ColdcardResponse {
+    /// Successful acknowledgement without a returned value.
     Ok,
+    /// An operation still awaiting completion or user approval.
     Busy,
+    /// Firmware version and device model.
     Version {
+        /// Firmware version string.
         version: String,
+        /// Model string reported by the device.
         device_model: String,
     },
-    MasterFingerprint(Fingerprint),
-    Xpub(Xpub),
+    /// Master fingerprint of the active wallet.
+    MasterFingerprint(
+        /// Active wallet master fingerprint.
+        Fingerprint,
+    ),
+    /// Extended public key of the requested path.
+    Xpub(
+        /// Requested extended public key.
+        Xpub,
+    ),
+    /// Session key-agreement response and optional wallet identity.
     MyPub {
+        /// Uncompressed secp256k1 public key without its SEC1 prefix.
         encryption_key: [u8; 64],
+        /// Master fingerprint reported in the key-agreement response.
         xpub_fingerprint: Fingerprint,
+        /// Master extended public key, if included and available in the response.
         xpub: Option<Xpub>,
     },
-    Signature(u8, Signature),
-    Address(String),
-    Backup(Vec<u8>),
-    SignedPsbt(Psbt),
+    /// Message-signature header byte and ECDSA signature.
+    Signature(
+        /// Device-returned compact signature header.
+        u8,
+        /// Message signature.
+        Signature,
+    ),
+    /// Encoded Bitcoin address.
+    Address(
+        /// Encoded address text.
+        String,
+    ),
+    /// Downloaded encrypted backup file bytes.
+    Backup(
+        /// Encrypted backup file bytes.
+        Vec<u8>,
+    ),
+    /// PSBT containing returned signatures.
+    SignedPsbt(
+        /// Updated PSBT.
+        Psbt,
+    ),
+    /// Enrollment uploaded, with on-device confirmation still pending.
     WalletRegistrationPending,
 }
 
+/// An encoded Coldcard transmission.
 pub struct ColdcardTransmit {
+    /// Device payload, already encrypted when indicated.
     pub payload: Vec<u8>,
+    /// Whether the payload is already encrypted; callers must not encrypt it again.
     pub encrypted: bool,
 }
 
@@ -172,6 +276,7 @@ enum FileDownloadResponse {
     SignedPsbt,
 }
 
+/// A sans-I/O Coldcard interpreter borrowing persistent encryption state.
 pub struct ColdcardInterpreter<'a, C, T, R, E> {
     state: State,
     encryption: &'a mut encrypt::Engine,
@@ -179,6 +284,7 @@ pub struct ColdcardInterpreter<'a, C, T, R, E> {
 }
 
 impl<'a, C, T, R, E> ColdcardInterpreter<'a, C, T, R, E> {
+    /// Creates an interpreter using the caller's encryption engine.
     pub fn new(encryption: &'a mut encrypt::Engine) -> Self {
         Self {
             state: State::New,
