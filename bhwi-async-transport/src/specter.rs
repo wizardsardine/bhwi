@@ -1,3 +1,5 @@
+//! Native Specter-DIY serial discovery and simulator TCP sessions.
+
 use std::{
     io,
     net::SocketAddr,
@@ -29,16 +31,19 @@ use crate::{
 
 /// Specter-DIY's MicroPython USB vendor identifier.
 pub const SPECTER_USB_VID: u16 = 0xf055;
+/// The Specter-DIY serial baud rate, in bits per second.
 pub const SPECTER_BAUD_RATE: u32 = 115_200;
+/// The default Specter-DIY simulator endpoint with its `tcp:` discovery prefix.
 pub const DEFAULT_SPECTER_SIMULATOR_ADDRESS: &str = "tcp:127.0.0.1:8789";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A Specter-DIY session using a native serial port.
 pub type SpecterSerialDevice = Specter<SpecterTransport<SerialSpecterStream>>;
+/// A Specter-DIY simulator session using TCP.
 pub type SpecterTcpDevice = Specter<SpecterTransport<TcpSpecterStream>>;
 
-/// A serial stream whose reads honor the deadline supplied by the generic
-/// Specter transport.
+/// A serial stream whose reads honor the Specter transport's deadline.
 pub struct SerialSpecterStream {
     stream: SerialStream,
 }
@@ -51,8 +56,7 @@ impl SerialSpecterStream {
     }
 }
 
-/// A simulator TCP stream whose reads honor the deadline supplied by the
-/// generic Specter transport.
+/// A simulator TCP stream whose reads honor the Specter transport's deadline.
 pub struct TcpSpecterStream {
     stream: TcpStream,
 }
@@ -126,6 +130,12 @@ macro_rules! impl_specter_stream {
 impl_specter_stream!(SerialSpecterStream);
 impl_specter_stream!(TcpSpecterStream);
 
+/// The native Specter-DIY enumerator for MicroPython serial ports and TCP paths.
+///
+/// Broad discovery can briefly connect to the default simulator. An explicit
+/// TCP path bypasses serial discovery and is listed without a connection probe.
+/// Opening requests a fingerprint to distinguish Specter-DIY from other
+/// MicroPython devices and can fail with [`NativeError::Probe`].
 pub struct SpecterDevice;
 
 impl SpecterDevice {

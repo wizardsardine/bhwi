@@ -1,3 +1,5 @@
+//! Native KeepKey HID, USB, and UDP emulator discovery.
+
 use async_hid::Device as HidDevice;
 use async_hid::HidBackend;
 use async_trait::async_trait;
@@ -18,14 +20,20 @@ use crate::{
 };
 use crate::{NativeError, NativeResult};
 
-// KeepKey reuses the Trezor V1 wire format.
+/// A KeepKey session using native HID and Trezor V1 framing.
 pub type KeepKeyHidDevice = KeepKey<TrezorTransport<HidChannel>>;
+/// A KeepKey session using native `nusb` USB transfers and Trezor V1 framing.
 pub type KeepKeyWebUsbDevice = KeepKey<TrezorTransport<WebUsbChannel>>;
+/// A KeepKey emulator session using UDP and Trezor V1 framing.
 pub type KeepKeyEmulatorDevice = KeepKey<TrezorTransport<EmulatorClient>>;
 
 const MODEL: &str = "keepkey";
 const SIMULATOR_MODEL: &str = "keepkey_simulator";
 
+/// The native KeepKey enumerator for HID, USB, and UDP emulator interfaces.
+///
+/// Listing pings the emulator when requested. Opened sessions use the selector's
+/// network and passphrase and install an optional host-interaction handler.
 pub struct KeepKeyDevice;
 
 impl KeepKeyDevice {

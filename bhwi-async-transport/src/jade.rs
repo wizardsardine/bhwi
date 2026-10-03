@@ -1,3 +1,5 @@
+//! Native Jade serial sessions, QEMU connections, and PIN-server HTTP I/O.
+
 use std::sync::Arc;
 
 use crate::NativeResult;
@@ -24,21 +26,29 @@ use crate::{
     NativeError, PairingCodePrompt,
 };
 
+/// A Jade serial session with native PIN-server HTTP support.
 pub type JadeSerialDevice = Jade<SerialTransport, PinServerClient>;
+/// A Jade QEMU session over TCP with native PIN-server HTTP support.
 pub type JadeQemuDevice = Jade<TcpTransport<TcpClient>, PinServerClient>;
 
+/// The Jade serial baud rate, in bits per second.
 pub const DEFAULT_JADE_BAUD_RATE: u32 = 115200;
+/// The default Jade QEMU endpoint, including the `tcp:` discovery prefix.
 pub const DEFAULT_JADE_QEMU_ADDRESS: &str = "tcp:127.0.0.1:30121";
 
 fn jade_tcp_addr(path: &str) -> &str {
     path.strip_prefix("tcp:").unwrap_or(path)
 }
 
+/// A native serial transport for Jade CBOR requests and responses.
 pub struct SerialTransport {
     stream: Arc<Mutex<SerialStream>>,
 }
 
 impl SerialTransport {
+    /// Opens `port_name` at [`DEFAULT_JADE_BAUD_RATE`].
+    ///
+    /// Clears RTS and DTR to avoid rebooting the device.
     pub fn new(port_name: &str) -> Result<Self, tokio_serial::Error> {
         let mut transport =
             tokio_serial::new(port_name, DEFAULT_JADE_BAUD_RATE).open_native_async()?;
@@ -73,6 +83,10 @@ impl CborStream for SerialTransport {
     }
 }
 
+/// The native Jade enumerator for USB serial ports and the QEMU endpoint.
+///
+/// Listing can briefly connect to QEMU. Opened sessions use the selector's
+/// network and [`PinServerClient`] for PIN-server requests.
 pub struct JadeDevice;
 
 impl JadeDevice {
@@ -185,11 +199,16 @@ impl DeviceEnumerator for JadeDevice {
     }
 }
 
+/// A `reqwest` HTTP client for Jade PIN-server requests.
+///
+/// Requests are POSTed with a JSON content type. Response bodies are returned
+/// without rejecting HTTP error status codes.
 pub struct PinServerClient {
     inner: Client,
 }
 
 impl PinServerClient {
+    /// Creates a PIN-server client with the default `reqwest` configuration.
     pub fn new() -> Self {
         Self {
             inner: Client::new(),
@@ -221,11 +240,13 @@ impl HttpClient for PinServerClient {
     }
 }
 
+/// A TCP stream adapter for Jade CBOR framing.
 pub struct TcpClient {
     stream: TcpStream,
 }
 
 impl TcpClient {
+    /// Creates an adapter from an already-connected TCP stream.
     pub fn new(stream: TcpStream) -> Self {
         Self { stream }
     }

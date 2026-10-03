@@ -1,3 +1,7 @@
+//! Native USB interrupt transfers for WebUSB-capable device interfaces.
+//!
+//! This backend uses `nusb` and OS device permissions, not browser WebUSB.
+
 use std::io;
 use std::time::Duration;
 
@@ -13,12 +17,20 @@ const ENDPOINT_IN: u8 = 0x81;
 const PACKET_SIZE: usize = 64;
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// A native `nusb` channel for a device's USB interrupt endpoints.
+///
+/// Reads receive 64-byte packets and copy at most the caller's buffer length,
+/// discarding any remaining bytes in that packet.
 pub struct WebUsbChannel {
     out: Mutex<Endpoint<Interrupt, Out>>,
     ep_in: Endpoint<Interrupt, In>,
 }
 
 impl WebUsbChannel {
+    /// Opens interface 0 with interrupt endpoints `0x01` and `0x81`.
+    ///
+    /// The interface is claimed and pending input packets are drained before
+    /// returning. Opening requires OS permission to access the USB device.
     pub async fn open(info: &nusb::DeviceInfo) -> io::Result<Self> {
         let device = info.open().await.map_err(io::Error::other)?;
         let interface = device

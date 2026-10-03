@@ -1,3 +1,5 @@
+//! Native Coldcard HID discovery and Unix emulator connections.
+
 use crate::{NativeError, NativeResult};
 use async_hid::Device as HidDevice;
 use async_hid::HidBackend;
@@ -19,8 +21,13 @@ use crate::{
     hid::{HidChannel, find_hid, hid_path},
 };
 
+/// A Coldcard session using native HID reports.
 pub type ColdcardHidDevice = Coldcard<ColdcardTransportHID<HidChannel>>;
 
+/// The native Coldcard enumerator for HID devices and emulator socket paths.
+///
+/// Emulator listing checks that the socket path exists, not that it answers.
+/// Opening emulator candidates is supported only on Unix.
 pub struct ColdcardDevice;
 
 impl ColdcardDevice {
@@ -124,6 +131,8 @@ impl DeviceEnumerator for ColdcardDevice {
 
 #[cfg(unix)]
 pub mod emulator {
+    //! Coldcard emulator sessions over Unix datagram sockets.
+
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -138,8 +147,12 @@ pub mod emulator {
 
     static CLIENT_SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+    /// A Coldcard session using the emulator's Unix datagram socket.
     pub type ColdcardSocketDevice = Coldcard<ColdcardTransportHID<EmulatorClient>>;
 
+    /// A shared Unix datagram channel for the Coldcard emulator.
+    ///
+    /// Clones use the same socket. The local socket file is not removed on drop.
     #[derive(Clone)]
     pub struct EmulatorClient {
         /// the ckcc simulator socket (used for ckcc cli too)
@@ -147,6 +160,9 @@ pub mod emulator {
     }
 
     impl EmulatorClient {
+        /// Binds a client socket in `/tmp` and connects it to `socket_path`.
+        ///
+        /// The client filename contains the process ID and a per-process counter.
         pub async fn new(socket_path: &str) -> std::io::Result<Self> {
             let socket_id = CLIENT_SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
             let client_socket = format!(

@@ -1,3 +1,5 @@
+//! Bundled Linux udev rules and system installation helpers.
+
 use std::{
     env,
     error::Error,
@@ -11,32 +13,58 @@ use std::os::unix::fs::PermissionsExt;
 
 use crate::DeviceType;
 
+/// The bundled rule files to install, independent of compiled device support.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum UdevRuleSelection {
+    /// All bundled rules, including legacy Digital Bitbox and BitBox02 rules.
     All,
-    Devices(Vec<DeviceType>),
+    /// Rules explicitly associated with the selected device types.
+    ///
+    /// Bundled BitBox rules have no device-type association and require
+    /// [`Self::All`]. Types without associated rules contribute no files.
+    Devices(
+        /// The device types whose associated rules are selected.
+        Vec<DeviceType>,
+    ),
 }
 
+/// A filesystem, environment, or system-command failure during rule installation.
 #[derive(Debug)]
 pub enum UdevInstallError {
+    /// Writing a rule file or setting its permissions failed.
     Io {
+        /// The filesystem operation that failed.
         action: &'static str,
+        /// The rule-file path.
         path: PathBuf,
+        /// The underlying filesystem error.
         source: io::Error,
     },
+    /// A required system command could not be started.
     CommandSpawn {
+        /// The program that could not be started.
         program: String,
+        /// The underlying process-spawn error.
         source: io::Error,
     },
+    /// A system command returned an unsuccessful status.
     CommandFailed {
+        /// The program that failed.
         program: String,
+        /// The arguments passed to the program.
         args: Vec<String>,
+        /// The exit code, or `None` if the process ended without one.
         code: Option<i32>,
     },
+    /// No nonempty user name was found in `SUDO_USER`, `USER`, or `LOGNAME`.
     MissingUser,
 }
 
 impl UdevInstallError {
+    /// Returns whether elevated privileges may resolve this error.
+    ///
+    /// This is a hint: permission-denied I/O errors and all unsuccessful command
+    /// statuses return `true`, even if privileges were not the cause.
     pub fn needs_root(&self) -> bool {
         match self {
             Self::Io { source, .. } => source.kind() == io::ErrorKind::PermissionDenied,
@@ -84,6 +112,20 @@ impl Error for UdevInstallError {
     }
 }
 
+/// Installs selected rules and updates udev and the user's device-access group.
+///
+/// `location` must be an existing directory. Selected files are created or
+/// overwritten with mode `0o644`. The function then runs `udevadm trigger`,
+/// `udevadm control --reload-rules`, `groupadd plugdev` (accepting an existing
+/// group), and `usermod -aG plugdev USER`, even if no rule files were selected.
+/// The user name is the first nonempty value of `SUDO_USER`, `USER`, or `LOGNAME`.
+/// Installation generally requires elevated privileges.
+///
+/// # Errors
+///
+/// Returns an error if the user cannot be determined or a filesystem operation
+/// or system command fails. Earlier file writes and system changes are not
+/// rolled back, so installation can be partial.
 pub fn install_udev_rules(
     location: &Path,
     selection: UdevRuleSelection,
@@ -93,6 +135,7 @@ pub fn install_udev_rules(
     install_udev_rules_with_runner(location, &selection, &mut runner, &user)
 }
 
+/// Returns the filenames selected from the bundled rules without performing I/O.
 pub fn udev_rule_names(selection: &UdevRuleSelection) -> Vec<&'static str> {
     rules_for_selection(selection)
         .into_iter()
