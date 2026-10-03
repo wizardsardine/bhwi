@@ -1,3 +1,5 @@
+//! Device-backed address retrieval with stdout output.
+
 use anyhow::Result;
 use async_trait::async_trait;
 #[cfg(feature = "ledger")]
@@ -12,26 +14,51 @@ use crate::DeviceManager;
 
 use crate::select_device;
 
+/// An address request from a derivation path or a named wallet policy.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum AddressTarget {
+    /// An address derived directly from a BIP32 path.
     Path {
+        /// The BIP32 derivation path to parse.
         path: String,
+        /// Whether to request display on the device, where supported.
         display: bool,
+        /// The address encoding, or the backend's default when absent.
         address_format: Option<AddressType>,
     },
+    /// An address derived from a wallet policy at a branch and index.
+    ///
+    /// BitBox02 and Specter require `wallet_descriptor`. Ledger accepts an HMAC
+    /// and policy together or neither; missing required context is then reported
+    /// by the backend. Coldcard and Jade resolve the policy by name on-device.
+    /// Trezor and KeepKey do not support this named-policy mode.
     Descriptor {
+        /// The child address index.
         index: u32,
+        /// Whether to select the internal change branch.
         change: bool,
+        /// Whether to request display on the device, where supported.
         display: bool,
+        /// The registered wallet name, also used when constructing a Ledger policy.
         descriptor_name: String,
+        /// A Ledger registration HMAC as 64 hexadecimal characters, if supplied.
         hmac: Option<String>,
+        /// The wallet policy required by BitBox02 and Specter, or paired with a Ledger HMAC.
         wallet_descriptor: Option<WalletPolicy>,
     },
 }
 
+/// An asynchronous CLI helper that prints a device-derived address.
+///
+/// Returned futures need not be `Send`.
 #[async_trait(?Send)]
 pub trait AddressOutput {
+    /// Retrieves an address and prints it to stdout.
+    ///
+    /// The [`DeviceManager`] implementation selects a device, may warn on stderr,
+    /// and produces no address output if none is found. Returns selection,
+    /// parsing, context, or device errors rather than an address value.
     async fn get_address(&self, target: AddressTarget) -> Result<()>;
 }
 

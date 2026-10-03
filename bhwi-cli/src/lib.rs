@@ -1,3 +1,13 @@
+//! Native command-line device selection, output helpers, and Python HWI compatibility.
+//!
+//! Address and descriptor helpers print to stdout; [`hwi::process_request`] returns
+//! a serializable response. Selection warnings and device-interaction prompts use stderr.
+//! On Unix, `hwi`'s `--stdinpass` password prompt uses the controlling terminal when
+//! available, falling back to a stderr prompt and stdin input if password reading fails.
+//!
+//! Native discovery types and shared selection helpers are reexported here;
+//! Linux builds also reexport udev-rule installation through `udev`.
+
 use std::{ops::Deref, rc::Rc};
 
 #[cfg(target_os = "linux")]
@@ -11,6 +21,8 @@ use bitcoin::{Network, bip32::Fingerprint};
 use clap::ValueEnum;
 use serde::{Serialize, Serializer};
 
+/// A native device manager with CLI pairing and host-interaction prompts.
+///
 /// Remembers whether `-p` was given, since the selector only keeps the password
 /// when Trezor or KeepKey is built in.
 pub struct DeviceManager {
@@ -27,11 +39,12 @@ impl Deref for DeviceManager {
 }
 
 impl DeviceManager {
+    /// Returns whether a password argument was supplied, including an empty one.
     pub fn password_given(&self) -> bool {
         self.password_given
     }
 
-    /// BitBox02 only takes a passphrase entered on the device.
+    /// Rejects a supplied host password for BitBox02, which requires on-device entry.
     pub fn refuse_password(&self, device_type: DeviceType) -> Result<(), SelectError<NativeError>> {
         #[cfg(feature = "bitbox")]
         if self.password_given && device_type == DeviceType::BitBox02 {
@@ -42,7 +55,13 @@ impl DeviceManager {
     }
 }
 
-/// `Device` carries no serde of its own so each frontend keeps its own output format.
+/// The `bhwi` frontend's serializable view of cached device metadata.
+///
+/// Conversion from [`Device`] performs no I/O. The device family uses the
+/// `device_type` key, unlike [`hwi::HwiEnumeratedDevice`]'s `type` key.
+/// Uncached info is omitted and an uncached fingerprint is `null`. Absent labels
+/// are omitted; missing firmware is `null`, except Specter omits firmware and
+/// version keys altogether.
 #[derive(Serialize)]
 pub struct DeviceJson<'a> {
     name: &'a str,
@@ -104,11 +123,17 @@ where
     ser.serialize_str(device_type.as_str())
 }
 
+/// Creates a native manager with stderr pairing prompts and CLI host interaction.
+///
+/// `password_given` records whether a password argument was supplied, even if empty.
 pub fn device_manager(selector: DeviceSelector, password_given: bool) -> DeviceManager {
     manager_over(NativeSource::default(), selector, password_given)
 }
 
-/// Python HWI has no Specter-DIY compatibility contract.
+/// Creates a CLI manager that excludes Specter-DIY from broad HWI discovery.
+///
+/// Python HWI has no Specter-DIY compatibility contract. The exclusion does not
+/// prevent explicitly selecting a Specter device.
 pub fn python_hwi_device_manager(selector: DeviceSelector, password_given: bool) -> DeviceManager {
     manager_over(
         NativeSource::excluding([DeviceType::Specter]),
@@ -134,6 +159,7 @@ fn manager_over(
     }
 }
 
+/// Prints a skipped-device warning to stderr.
 pub fn warn_skipped(entry: &SkippedDevice) {
     eprintln!(
         "Warning: skipping {} at {}: {}",
@@ -141,7 +167,12 @@ pub fn warn_skipped(entry: &SkippedDevice) {
     );
 }
 
-/// Adds a network warning, so the `hwi` binary deliberately does not use this.
+/// Selects a device and prints skipped-device and network-mismatch warnings to stderr.
+///
+/// Returns `None` when no device and no skipped candidate are found. If selection
+/// finds only skipped candidates, returns the first candidate's error. A network
+/// mismatch warns rather than rejecting the device; querying the network may
+/// perform I/O. The `hwi` frontend deliberately does not use this warning path.
 pub async fn select_device(manager: &DeviceManager) -> anyhow::Result<Option<Device>> {
     let (device, skipped) = manager.select().await?;
     let Some(mut device) = device else {
@@ -172,23 +203,33 @@ pub mod host;
 pub mod hwi;
 pub mod management;
 
+/// An output format for CLI tables and descriptor records.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
+    /// Human-readable tabular output.
     Pretty,
+    /// Serialized JSON output.
     Json,
 }
 
-/// The orphan rule stops us deriving `ValueEnum` on `bhwi-async`'s `DeviceType`.
+/// A device-family argument accepted by Clap, independent of compiled device support.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum DeviceTypeArg {
+    /// A BitBox02, accepted as `bitbox02` or `bit-box02`.
     #[value(name = "bitbox02", alias = "bit-box02")]
     BitBox02,
+    /// A Coldcard.
     Coldcard,
+    /// A Blockstream Jade.
     Jade,
+    /// A KeepKey, accepted as `keepkey` or `keep-key`.
     #[value(name = "keepkey", alias = "keep-key")]
     KeepKey,
+    /// A Ledger.
     Ledger,
+    /// A Specter-DIY.
     Specter,
+    /// A Trezor.
     Trezor,
 }
 

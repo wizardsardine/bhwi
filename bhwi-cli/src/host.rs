@@ -1,3 +1,5 @@
+//! Interactive KeepKey PIN-position and recovery-character input.
+
 use std::{
     cell::Cell,
     io::{self, IsTerminal, Write},
@@ -10,9 +12,15 @@ use bhwi_async::{HostInteraction, device::HostInteractionFactory};
 
 use crate::hwi::PIN_MATRIX_DESCRIPTION;
 
-/// A KeepKey asks for PIN positions, a passphrase or recovery characters while
-/// a command is still running, so the answerer is attached before the device is
-/// boxed.
+/// Creates host-interaction handlers that prompt on stderr and read stdin.
+///
+/// Terminal input is hidden. PIN responses are nonempty ASCII-digit strings of
+/// scrambled keypad positions, not literal PIN digits. Recovery accepts lowercase
+/// ASCII letters and `space`, `backspace`, or `done`. Only syntactically
+/// unrecognized input is requested again; recovery actions invalid at the current
+/// position propagate an error instead. End-of-input cancels the operation.
+/// Attach the factory before boxing a KeepKey device so commands can answer host
+/// requests while running.
 pub fn cli_host_interaction() -> HostInteractionFactory {
     Rc::new(|| Box::new(CliHostInteraction))
 }
