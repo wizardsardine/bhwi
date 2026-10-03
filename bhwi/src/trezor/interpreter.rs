@@ -1,3 +1,5 @@
+//! Trezor command interpretation and passphrase session options.
+
 use core::marker::PhantomData;
 use core::str::FromStr;
 
@@ -16,38 +18,77 @@ use crate::trezor::error::TrezorError;
 use crate::trezor::proto::{bitcoin as btc, common as pb, management as mgmt};
 use zeroize::Zeroize;
 
+/// A Trezor command using the session's selected network.
 pub enum TrezorCommand {
-    Initialize(Option<Network>),
+    /// Initializes a session, optionally replacing its selected network.
+    Initialize(
+        /// Replacement session network, or `None` to retain the current network.
+        Option<Network>,
+    ),
+    /// Requests device features without starting a new session.
     GetFeatures,
+    /// Requests the active wallet's master fingerprint.
     GetMasterFingerprint,
+    /// Requests an extended public key.
     GetXpub {
+        /// BIP-32 child numbers with the hardened bit encoded.
         address_n: Vec<u32>,
+        /// Whether to ask for confirmation on the device.
         display: bool,
     },
+    /// Requests an address for a path and script type.
     GetAddress {
+        /// BIP-32 child numbers with the hardened bit encoded.
         address_n: Vec<u32>,
+        /// Whether to display the address on the device.
         display: bool,
+        /// Script type selected for the address.
         script_type: btc::InputScriptType,
     },
-    GetMultisigAddress(TrezorMultisigAddress),
+    /// Displays a concrete multisig address.
+    GetMultisigAddress(
+        /// Concrete multisig display settings.
+        TrezorMultisigAddress,
+    ),
+    /// Signs a message using the device's legacy single-key signing format.
     SignMessage {
+        /// Signing path as BIP-32 child numbers.
         address_n: Vec<u32>,
+        /// Message bytes to sign.
         message: Vec<u8>,
     },
-    SignTx(Box<Psbt>),
+    /// Signs supported PSBT inputs and returns the updated PSBT.
+    SignTx(
+        /// PSBT to sign.
+        Box<Psbt>,
+    ),
+    /// Erases wallet material from the device.
     Wipe,
+    /// Toggles passphrase protection based on current device features.
     TogglePassphrase,
+    /// Initializes an unseeded device using caller-provided entropy.
     Setup {
+        /// User-visible device label, if supplied.
         label: Option<String>,
+        /// Caller-generated entropy mixed with device entropy.
         host_entropy: [u8; 32],
     },
+    /// Starts mnemonic recovery on an unseeded device.
     Restore {
+        /// User-visible device label, if supplied.
         label: Option<String>,
+        /// Number of mnemonic words.
         word_count: u32,
+        /// Initial U2F counter.
         u2f_counter: u32,
     },
+    /// Starts a PIN prompt and leaves the device awaiting scrambled positions.
     PromptPin,
-    SendPin(crate::trezor::HostPin),
+    /// Supplies scrambled keypad positions for a pending PIN request.
+    SendPin(
+        /// Scrambled keypad positions, not literal PIN digits.
+        crate::trezor::HostPin,
+    ),
 }
 
 pub(crate) enum EngineCommand {
@@ -132,39 +173,90 @@ impl From<TrezorCommand> for EngineCommand {
 /// m/44'/1'/0', the key asked for to raise the keypad. The reply is never read.
 const PIN_PROMPT_PATH: [u32; 3] = [0x8000_002c, 0x8000_0001, 0x8000_0000];
 
+/// Concrete multisig keys and display settings shared by Trezor and KeepKey.
 pub struct TrezorMultisigAddress {
+    /// Number of required signatures.
     pub threshold: u8,
+    /// Legacy, wrapped SegWit, or native SegWit script type.
     pub address_type: TrezorMultisigAddressType,
+    /// Whether to sort derived public keys before constructing the script.
     pub sorted: bool,
+    /// Concrete descriptor keys with no wildcard or unresolved multipath.
     pub keys: Vec<DescriptorPublicKey>,
 }
 
+/// Supported Trezor and KeepKey multisig address formats.
 #[derive(Clone, Copy, Debug)]
 pub enum TrezorMultisigAddressType {
+    /// Legacy P2SH.
     Legacy,
+    /// Wrapped SegWit P2SH-P2WSH.
     ShWit,
+    /// Native SegWit P2WSH.
     Wit,
 }
 
+/// A Trezor or KeepKey command result.
 pub enum TrezorResponse {
-    DeviceAction(bool),
-    SignedPsbt(Box<Psbt>),
-    Info(TrezorDeviceInfo),
-    MasterFingerprint(Fingerprint),
-    Xpub(Xpub),
-    Address(String),
-    Signature(u8, bitcoin::secp256k1::ecdsa::Signature),
+    /// The outcome of a device action or PIN prompt.
+    ///
+    /// For [`TrezorCommand::PromptPin`] and KeepKey passphrase toggling, `true`
+    /// can mean that PIN entry was requested, not that the underlying action completed.
+    DeviceAction(
+        /// Whether the request was accepted or completed.
+        bool,
+    ),
+    /// PSBT containing returned signatures.
+    SignedPsbt(
+        /// Updated PSBT.
+        Box<Psbt>,
+    ),
+    /// Device information and session network.
+    Info(
+        /// Device features and session network.
+        TrezorDeviceInfo,
+    ),
+    /// Master fingerprint of the active wallet.
+    MasterFingerprint(
+        /// Active wallet master fingerprint.
+        Fingerprint,
+    ),
+    /// Extended public key of the requested path.
+    Xpub(
+        /// Requested extended public key.
+        Xpub,
+    ),
+    /// Encoded Bitcoin address.
+    Address(
+        /// Encoded address text.
+        String,
+    ),
+    /// Message-signature header byte and ECDSA signature.
+    Signature(
+        /// Device-returned compact signature header.
+        u8,
+        /// Message signature.
+        bitcoin::secp256k1::ecdsa::Signature,
+    ),
 }
 
+/// Device features and the network selected for the host session.
 pub struct TrezorDeviceInfo {
+    /// Firmware version string.
     pub version: String,
     /// The network the session was opened for; Features does not report one.
     pub network: Network,
+    /// Model or firmware variant, if reported.
     pub model: Option<String>,
+    /// Whether a wallet is initialized, or `None` when unreported.
     pub initialized: Option<bool>,
+    /// User-visible device label, if reported.
     pub label: Option<String>,
+    /// Whether device features advertise on-device passphrase entry.
     pub on_device_passphrase_entry: bool,
+    /// Whether PIN protection is enabled and the device is not unlocked.
     pub needs_pin_sent: bool,
+    /// Whether passphrase protection is enabled according to device features.
     pub passphrase_protection: bool,
 }
 
@@ -909,6 +1001,7 @@ impl<P: Profile> Engine<P> {
     }
 }
 
+/// A sans-I/O Trezor interpreter, defaulting to mainnet and on-device passphrase entry.
 pub struct TrezorInterpreter<C, T, R, E> {
     engine: Engine<TrezorProfile>,
     _marker: PhantomData<(C, T, R, E)>,
@@ -924,11 +1017,18 @@ impl<C, T, R, E> Default for TrezorInterpreter<C, T, R, E> {
 }
 
 impl<C, T, R, E> TrezorInterpreter<C, T, R, E> {
+    /// Selects the session network used for coin selection and returned information.
+    ///
+    /// Bitcoin uses `Bitcoin`, regtest uses `Regtest`, and other networks use `Testnet`.
     pub fn with_network(mut self, network: Network) -> Self {
         self.engine = self.engine.with_network(network);
         self
     }
 
+    /// Sets the normalized host passphrase, or clears it with `None`.
+    ///
+    /// Host entry must be selected separately. When firmware requests host entry,
+    /// passphrases longer than 50 normalized UTF-8 bytes cancel the operation.
     pub fn with_passphrase(
         mut self,
         passphrase: Option<crate::passphrase::HostPassphrase>,
@@ -937,6 +1037,9 @@ impl<C, T, R, E> TrezorInterpreter<C, T, R, E> {
         self
     }
 
+    /// Selects on-device passphrase entry when true, or host entry when false.
+    ///
+    /// On-device entry is the default.
     pub fn with_on_device_passphrase(mut self, on_device: bool) -> Self {
         self.engine = self.engine.with_on_device_passphrase(on_device);
         self

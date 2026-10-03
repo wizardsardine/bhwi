@@ -1,3 +1,5 @@
+//! Native BitBox02 HID discovery and simulator connections.
+
 use std::{io, sync::Arc, time::Duration};
 
 use crate::{NativeError, NativeResult};
@@ -29,6 +31,10 @@ use crate::{
     hid::{HidChannel, find_hid, hid_path},
 };
 
+/// The native BitBox02 enumerator for firmware HID interfaces and TCP simulators.
+///
+/// Listing can briefly connect to the simulator. Hardware opening installs the
+/// optional pairing-code prompt; simulator pairing is automatically confirmed.
 pub struct BitBoxDevice;
 
 impl BitBoxDevice {
@@ -161,12 +167,15 @@ impl DeviceEnumerator for BitBoxDevice {
     }
 }
 
-/// A `Channel` over a raw TCP connection to the BitBox02 simulator.
+/// A raw TCP [`Channel`] for the BitBox02 simulator.
+///
+/// Reads fill the supplied buffer, with a ten-second timeout per read.
 pub struct BitBoxTcpChannel {
     stream: Arc<Mutex<TcpStream>>,
 }
 
 impl BitBoxTcpChannel {
+    /// Creates a channel from an already-connected simulator TCP stream.
     pub fn new(stream: TcpStream) -> Self {
         Self {
             stream: Arc::new(Mutex::new(stream)),

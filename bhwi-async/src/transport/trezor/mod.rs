@@ -9,20 +9,36 @@ const MAGIC: [u8; 2] = *b"##";
 // Well above any device-to-host V1 message; a Trezor One has 192 KB of SRAM in total.
 const MAX_PAYLOAD_LEN: usize = 64 * 1024;
 
+/// A Trezor-compatible report-framing or channel failure.
 #[derive(Debug, thiserror::Error)]
 pub enum TrezorTransportError {
+    /// A short report, invalid header, or oversized declared frame.
     #[error("communication error: {0}")]
-    Comm(&'static str),
+    Comm(
+        /// The framing failure description.
+        &'static str,
+    ),
 
+    /// A channel I/O failure.
     #[error("IO error")]
-    Io(#[from] std::io::Error),
+    Io(
+        /// The channel error.
+        #[from]
+        std::io::Error,
+    ),
 }
 
+/// Trezor and KeepKey version-1 frames over 64-byte reports.
+///
+/// Splits already-encoded frames into 63-byte chunks. Responses retain the
+/// message header, omit report padding, and reject declared payloads above
+/// 64 KiB. Channel implementations supply timeouts; this adapter adds none.
 pub struct TrezorTransport<C> {
     channel: C,
 }
 
 impl<C> TrezorTransport<C> {
+    /// Creates a framing adapter without contacting the device.
     pub fn new(channel: C) -> Self {
         Self { channel }
     }

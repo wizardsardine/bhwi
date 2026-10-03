@@ -1,3 +1,5 @@
+//! Host preimages and Merkle commitments for Ledger delegated commands.
+
 use core::convert::TryFrom;
 use core::fmt::Debug;
 
@@ -8,19 +10,7 @@ use bitcoin::{
 
 use super::{apdu::ClientCommandCode, merkle::MerkleTree};
 
-/// This struct keeps has methods to keep track of:
-///   - known preimages
-///   - known Merkle trees from lists of elements
-///
-/// Moreover, it containes the state that is relevant for the interpreted client side commands:
-///   - a queue of bytes that contains any bytes that could not fit in a response from the
-///     GET_PREIMAGE client command (when a preimage is too long to fit in a single message) or the
-///     GET_MERKLE_LEAF_PROOF command (which returns a Merkle proof, which might be too long to fit
-///     in a single message). The data in the queue is returned in one (or more) successive
-///     GET_MORE_ELEMENTS commands from the hardware wallet.
-///
-/// Finally, it keeps track of the yielded values (that is, the values sent from the hardware
-/// wallet with a YIELD client command).
+/// Known preimages, Merkle trees, queued response fragments, and device-yielded values.
 #[derive(Default)]
 pub struct DelegatedStore {
     yielded: Vec<Vec<u8>>,
@@ -30,6 +20,7 @@ pub struct DelegatedStore {
 }
 
 impl DelegatedStore {
+    /// Creates an empty delegated store.
     pub fn new() -> Self {
         Self::default()
     }
@@ -44,14 +35,10 @@ impl DelegatedStore {
         self.known_preimages.push((hash, element));
     }
 
-    /// Adds a known Merkleized list.
-    /// Builds the Merkle tree of `elements`, and adds it to the Merkle trees known to the client
-    /// (mapped by Merkle root `mt_root`).
-    /// Moreover, adds all the leafs (after adding the b'\0' prefix) to the list of known preimages.
-    /// If `el` is one of `elements`, the client must respond with b'\0' + `el` when a GET_PREIMAGE
-    /// client command is sent with `sha256(b'\0' + el)`.
-    /// Moreover, the commands GET_MERKLE_LEAF_INDEX and GET_MERKLE_LEAF_PROOF must correctly answer
-    /// queries relative to the Merkle whose root is `mt_root`.
+    /// Registers a Merkleized list and returns its root.
+    ///
+    /// Each element is also stored as a preimage prefixed with a zero byte,
+    /// allowing the device to request leaves, indices, and proofs.
     pub fn add_known_list(&mut self, elements: &[impl AsRef<[u8]>]) -> [u8; 32] {
         let mut leaves = Vec::with_capacity(elements.len());
         for element in elements {
@@ -69,10 +56,7 @@ impl DelegatedStore {
         root_hash
     }
 
-    /// Adds the Merkle trees of keys, and the Merkle tree of values (ordered by key)
-    /// of a mapping of bytes to bytes.
-    /// Adds the Merkle tree of the list of keys, and the Merkle tree of the list of corresponding
-    /// values, with the same semantics as the `add_known_list` applied separately to the two lists.
+    /// Registers key and value Merkle trees after sorting the mapping by key.
     pub fn add_known_mapping(&mut self, mapping: &[(Vec<u8>, Vec<u8>)]) {
         let mut sorted: Vec<&(Vec<u8>, Vec<u8>)> = mapping.iter().collect();
         sorted.sort_by(|(k1, _), (k2, _)| k1.as_slice().cmp(k2));
@@ -87,8 +71,7 @@ impl DelegatedStore {
         self.add_known_list(&values);
     }
 
-    // Interprets the client command requested by the hardware wallet, returns the appropriate
-    // response to transmit back and updates interpreter internal states.
+    /// Answers a delegated device command, updating queued fragments or yielded values.
     pub fn execute(&mut self, command: Vec<u8>) -> Result<Vec<u8>, StoreError> {
         if command.is_empty() {
             return Err(StoreError::EmptyInput);
@@ -294,26 +277,40 @@ pub fn get_merkleized_map_commitment(mapping: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> 
     commitment
 }
 
+/// Errors while answering Ledger delegated commands.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// A request without a command byte.
     #[error("empty input")]
     EmptyInput,
 
+    /// An unrecognized delegated command byte.
     #[error("unknown command: {0}")]
-    UnknownCommand(u8),
+    UnknownCommand(
+        /// Unrecognized delegated command byte.
+        u8,
+    ),
 
+    /// A malformed or unsupported delegated request for a recognized command.
     #[error("unsupported request: {0}")]
-    UnsupportedRequest(u8),
+    UnsupportedRequest(
+        /// Recognized delegated command byte, such as `0x40` or `0x41`.
+        u8,
+    ),
 
+    /// Invalid Merkle index, list size, or request size.
     #[error("invalid index or size")]
     InvalidIndexOrSize,
 
+    /// A hash whose preimage is not registered.
     #[error("unknown hash")]
     UnknownHash,
 
+    /// A Merkle root not registered in the store.
     #[error("unknown merkle root")]
     UnknownMerkleRoot,
 
+    /// A queued fragment state incompatible with the request.
     #[error("unexpected queue state")]
     UnexpectedQueue,
 }

@@ -29,6 +29,10 @@ commands and devices where parity is claimed.
   one leg per model, selecting `hwi-upstream-trezor` for Trezor One and
   `hwi-upstream-trezor-t` for Model T.
 
+A `signtx` success-shape mismatch reports the actual response keys, numeric
+error code, and only signing-error messages in an exact static allowlist.
+Payload values and unknown exception text remain redacted.
+
 ## Exit status contract
 
 The `hwi` binary matches pinned Python HWI 3.2.0 process status

@@ -1,3 +1,11 @@
+//! Browser hardware-wallet access through WebHID, WebUSB, and WebSerial.
+//!
+//! [`Client`] exposes JavaScript bindings; [`HWI`] adapts asynchronous wallet
+//! operations to JavaScript errors. Browser operations require a `Window` and
+//! the relevant `navigator` API, with device permission obtained through a
+//! chooser, normally from a user gesture in a secure context. Native builds do
+//! not supply a browser environment.
+
 pub mod ledger;
 pub mod pinserver;
 pub mod webhid;
@@ -38,6 +46,14 @@ use wasm_bindgen::prelude::*;
 use webhid::WebHidDevice;
 use webserial::WebSerialDevice;
 
+/// Initializes console logging and the browser panic hook.
+///
+/// Invalid log levels fall back to `Info`.
+///
+/// # Panics
+///
+/// Panics if the console logger cannot be initialized, including repeated
+/// initialization after a logger has already been installed.
 #[wasm_bindgen]
 pub fn initialize_logging(level: &str) {
     console_error_panic_hook::set_once();
@@ -62,29 +78,60 @@ fn wallet_registration_js(registration: WalletRegistration) -> Result<JsValue, J
     Ok(result.into())
 }
 
+/// Browser-facing wallet operations with JavaScript errors.
+///
+/// The blanket implementation adapts [`bhwi_async::HWI`] and reports its errors
+/// as JavaScript strings. Support and required [`DeviceContext`] values vary
+/// by backend; unsupported operations and missing context return errors.
+/// Futures need not be `Send`, and the trait does not select an async runtime.
 #[async_trait(?Send)]
 pub trait HWI {
+    /// Runs the backend's unlock operation for a parsed Bitcoin network.
+    ///
+    /// This may require on-device interaction and does not necessarily change
+    /// a network configured when the client was constructed.
     async fn unlock(&mut self, network: &str) -> Result<(), JsValue>;
+    /// Returns the current wallet's master fingerprint as a hexadecimal string.
+    ///
+    /// The name abbreviates master fingerprint, not manufacturer.
     async fn get_mfg(&mut self) -> Result<String, JsValue>;
+    /// Derives an extended public key at `path`, optionally requesting on-device display.
     async fn get_xpub(&mut self, path: &str, display: bool) -> Result<String, JsValue>;
+    /// Returns an address, requesting display and using any backend-required context.
+    ///
+    /// Descriptor display requires a BitBox, Ledger, or Specter policy context
+    /// on those backends and is unsupported by Trezor and KeepKey.
     async fn display_address(
         &mut self,
         address: DisplayAddress,
         context: Option<DeviceContext>,
     ) -> Result<String, JsValue>;
+    /// Registers a named wallet policy, possibly leaving user confirmation pending.
+    ///
+    /// Trezor and KeepKey do not support wallet registration.
     async fn register_wallet(
         &mut self,
         name: &str,
         policy: &str,
     ) -> Result<WalletRegistration, JsValue>;
+    /// Signs a PSBT and returns the updated PSBT using any required policy context.
+    ///
+    /// Ledger requires a [`DeviceContext::Ledger`] even without an HMAC.
     async fn sign_tx(
         &mut self,
         psbt: Psbt,
         context: Option<DeviceContext>,
     ) -> Result<Psbt, JsValue>;
+    /// Signs the UTF-8 message at `path` and returns a base64-encoded signature.
+    ///
+    /// The 65-byte payload contains the backend's header followed by its compact
+    /// ECDSA signature; the header is not normalized as in the CLI.
     async fn sign_message(&mut self, message: &str, path: &str) -> Result<String, JsValue>;
+    /// Returns the JavaScript information object described by [`Client::get_info`].
     async fn get_info(&mut self) -> Result<JsValue, JsValue>;
+    /// Requests a PIN prompt and returns whether it was accepted.
     async fn prompt_pin(&mut self) -> Result<bool, JsValue>;
+    /// Submits scrambled PIN keypad positions in a Trezor or KeepKey management context.
     async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, JsValue>;
 }
 
@@ -200,17 +247,54 @@ impl<T: AsyncHWI> HWI for T {
     }
 }
 
+/// A connected wallet backend using a browser transport.
 #[allow(clippy::large_enum_variant)]
 pub enum Device {
-    Ledger(Ledger<LedgerTransportHID<webhid::WebHidDevice>>),
-    Coldcard(Coldcard<ColdcardTransportHID<webhid::WebHidDevice>>),
-    Jade(Jade<WebSerialDevice, PinServer>),
-    Specter(Specter<SpecterTransport<WebSerialDevice>>),
-    BitBox(BitBox<BitBoxTransportHID<webhid::WebHidDevice>>),
-    TrezorOne(Trezor<TrezorTransport<webhid::WebHidDevice>>),
-    TrezorT(Trezor<TrezorTransport<webusb::WebUsbDevice>>),
-    KeepKeyHid(KeepKey<TrezorTransport<webhid::WebHidDevice>>),
-    KeepKeyWebUsb(KeepKey<TrezorTransport<webusb::WebUsbDevice>>),
+    /// A Ledger connection over WebHID.
+    Ledger(
+        /// The Ledger client and its HID framing transport.
+        Ledger<LedgerTransportHID<webhid::WebHidDevice>>,
+    ),
+    /// A Coldcard connection over WebHID.
+    Coldcard(
+        /// The Coldcard client and its HID framing transport.
+        Coldcard<ColdcardTransportHID<webhid::WebHidDevice>>,
+    ),
+    /// A Jade connection over WebSerial with browser PIN-server requests.
+    Jade(
+        /// The Jade client, serial port, and PIN-server client.
+        Jade<WebSerialDevice, PinServer>,
+    ),
+    /// A Specter-DIY connection over WebSerial.
+    Specter(
+        /// The Specter-DIY client and its serial framing transport.
+        Specter<SpecterTransport<WebSerialDevice>>,
+    ),
+    /// A BitBox02 connection over WebHID.
+    BitBox(
+        /// The BitBox02 client and its HID framing transport.
+        BitBox<BitBoxTransportHID<webhid::WebHidDevice>>,
+    ),
+    /// A Trezor One connection over WebHID.
+    TrezorOne(
+        /// The Trezor client and its HID framing transport.
+        Trezor<TrezorTransport<webhid::WebHidDevice>>,
+    ),
+    /// A Trezor connection over WebUSB.
+    TrezorT(
+        /// The Trezor client and its USB framing transport.
+        Trezor<TrezorTransport<webusb::WebUsbDevice>>,
+    ),
+    /// A KeepKey connection over WebHID.
+    KeepKeyHid(
+        /// The KeepKey client and its HID framing transport.
+        KeepKey<TrezorTransport<webhid::WebHidDevice>>,
+    ),
+    /// A KeepKey connection over WebUSB.
+    KeepKeyWebUsb(
+        /// The KeepKey client and its USB framing transport.
+        KeepKey<TrezorTransport<webusb::WebUsbDevice>>,
+    ),
 }
 
 impl<'a> AsRef<dyn HWI + 'a> for Device {
@@ -245,6 +329,18 @@ impl<'a> AsMut<dyn HWI + 'a> for Device {
     }
 }
 
+/// A JavaScript-facing client holding at most one connected wallet.
+///
+/// Connection methods show a browser permission chooser and install a backend;
+/// they do not unlock it. Call [`unlock`](Self::unlock) before operations that
+/// require an unlocked session. A successful connection replaces the current
+/// backend without explicitly closing it. A function-valued `on_close_cb` is
+/// called with no arguments on the transport's disconnect events or after an
+/// explicit close.
+///
+/// Operations return JavaScript string errors when no device is connected or
+/// when the backend fails. Operation support, network selection, and required
+/// policy data are device-specific.
 #[derive(Default)]
 #[wasm_bindgen]
 pub struct Client {
@@ -253,11 +349,15 @@ pub struct Client {
 
 #[wasm_bindgen]
 impl Client {
+    /// Creates a client without a connected device.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Client {
         Client { device: None }
     }
 
+    /// Requests a Coldcard WebHID connection without starting its encrypted session.
+    ///
+    /// Use [`unlock`](Self::unlock) to establish the session.
     #[wasm_bindgen]
     pub async fn connect_coldcard(&mut self, on_close_cb: JsValue) -> Result<(), JsValue> {
         let device = WebHidDevice::get_webhid_device(
@@ -277,6 +377,11 @@ impl Client {
         Ok(())
     }
 
+    /// Requests a BitBox02 WebHID connection configured for `network`.
+    ///
+    /// Pairing occurs during [`unlock`](Self::unlock), not connection. A
+    /// function-valued `on_pairing_code_cb` receives the pairing-code string
+    /// synchronously while unlock waits for on-device confirmation.
     #[wasm_bindgen]
     pub async fn connect_bitbox(
         &mut self,
@@ -306,6 +411,9 @@ impl Client {
         Ok(())
     }
 
+    /// Requests a Ledger WebHID connection without opening a Bitcoin app.
+    ///
+    /// Use [`unlock`](Self::unlock) to request the app for the desired network.
     #[wasm_bindgen]
     pub async fn connect_ledger(&mut self, on_close_cb: JsValue) -> Result<(), JsValue> {
         let device = WebHidDevice::get_webhid_device(
@@ -321,6 +429,12 @@ impl Client {
         Ok(())
     }
 
+    /// Requests a Trezor One WebHID connection configured for `network`.
+    ///
+    /// The optional host `passphrase` is NFKD-normalized and used when the
+    /// session selects host entry; `None` then means an empty passphrase.
+    /// Trezor defaults to on-device entry and limits host entry to 50 normalized
+    /// UTF-8 bytes, not characters.
     #[wasm_bindgen]
     pub async fn connect_trezor_one(
         &mut self,
@@ -346,6 +460,10 @@ impl Client {
         Ok(())
     }
 
+    /// Requests a Trezor WebUSB connection configured for `network`.
+    ///
+    /// Passphrase entry defaults to the device; if the session selects host
+    /// entry, this client supplies an empty passphrase.
     #[wasm_bindgen]
     pub async fn connect_trezor_t(
         &mut self,
@@ -366,6 +484,11 @@ impl Client {
         Ok(())
     }
 
+    /// Requests a KeepKey WebHID connection configured for `network`.
+    ///
+    /// KeepKey defaults to host passphrase entry. The optional `passphrase` is
+    /// NFKD-normalized; `None` means empty. Host entry is limited to 50 normalized
+    /// UTF-8 bytes, not characters.
     #[wasm_bindgen]
     pub async fn connect_keepkey_hid(
         &mut self,
@@ -391,6 +514,11 @@ impl Client {
         Ok(())
     }
 
+    /// Requests a KeepKey WebUSB connection configured for `network`.
+    ///
+    /// KeepKey defaults to host passphrase entry. The optional `passphrase` is
+    /// NFKD-normalized; `None` means empty. Host entry is limited to 50 normalized
+    /// UTF-8 bytes, not characters.
     #[wasm_bindgen]
     pub async fn connect_keepkey_webusb(
         &mut self,
@@ -414,6 +542,9 @@ impl Client {
         Ok(())
     }
 
+    /// Requests a Jade WebSerial connection at 115200 bits per second for `network`.
+    ///
+    /// Unlock may use browser fetch requests to Jade's PIN server.
     #[wasm_bindgen]
     pub async fn connect_jade(
         &mut self,
@@ -428,6 +559,10 @@ impl Client {
         Ok(())
     }
 
+    /// Requests a Specter-DIY WebSerial connection at 115200 bits per second.
+    ///
+    /// `network` validates network-bearing responses; it does not change the
+    /// network selected on the device.
     #[wasm_bindgen]
     pub async fn connect_specter(
         &mut self,
@@ -446,6 +581,10 @@ impl Client {
         Ok(())
     }
 
+    /// Removes a connected Specter-DIY backend and schedules closing its serial port.
+    ///
+    /// Other backends are left connected. Returns before the browser finishes
+    /// closing the port.
     #[wasm_bindgen]
     pub fn disconnect_specter(&mut self) {
         if !matches!(&self.device, Some(Device::Specter(_))) {
@@ -458,6 +597,10 @@ impl Client {
         serial.close();
     }
 
+    /// Runs the connected backend's unlock operation for a parsed Bitcoin network.
+    ///
+    /// This may wait for on-device interaction or pairing. For backends whose
+    /// network is set during connection, it does not change that configuration.
     #[wasm_bindgen]
     pub async fn unlock(&mut self, network: &str) -> Result<(), JsValue> {
         match &mut self.device {
@@ -466,6 +609,7 @@ impl Client {
         }
     }
 
+    /// Returns the current wallet's master fingerprint as eight hexadecimal digits.
     #[wasm_bindgen]
     pub async fn get_master_fingerprint(&mut self) -> Result<String, JsValue> {
         match &mut self.device {
@@ -474,6 +618,9 @@ impl Client {
         }
     }
 
+    /// Requests a Trezor or KeepKey PIN prompt and returns whether it was accepted.
+    ///
+    /// Backends that do not need host PIN entry return an unsupported-operation error.
     #[wasm_bindgen]
     pub async fn prompt_pin(&mut self) -> Result<bool, JsValue> {
         match &mut self.device {
@@ -482,6 +629,11 @@ impl Client {
         }
     }
 
+    /// Sends scrambled PIN keypad positions to Trezor or KeepKey.
+    ///
+    /// `positions` identifies positions in the keypad displayed on the device,
+    /// not literal PIN digits. Validation requires nonempty ASCII digits but
+    /// does not check a 1–9 range. Other backends reject host PIN entry.
     #[wasm_bindgen]
     pub async fn send_pin(&mut self, positions: &str) -> Result<bool, JsValue> {
         let device = self
@@ -506,6 +658,13 @@ impl Client {
         device.as_mut().send_pin(context).await
     }
 
+    /// Returns a JavaScript object containing device information.
+    ///
+    /// The keys are `version` (string), `networks` (array of strings), `firmware`
+    /// (string or `null`), and `needsPinSent` (boolean). Networks map Bitcoin
+    /// mainnet to `"bitcoin"` and every other network to `"testnet"`. Unreported
+    /// PIN status becomes `false`. Specter-DIY has no information command and
+    /// returns an unsupported-operation error.
     #[wasm_bindgen]
     pub async fn get_info(&mut self) -> Result<JsValue, JsValue> {
         match &mut self.device {
@@ -514,6 +673,10 @@ impl Client {
         }
     }
 
+    /// Derives an extended public key at `path`, optionally requesting on-device display.
+    ///
+    /// Returns the encoded extended-public-key string. Display support varies
+    /// by backend; Specter-DIY rejects `display = true`.
     #[wasm_bindgen]
     pub async fn get_extended_pubkey(
         &mut self,
@@ -526,6 +689,13 @@ impl Client {
         }
     }
 
+    /// Registers a named wallet policy and returns its JavaScript status object.
+    ///
+    /// The object has `status` equal to `"complete"` or
+    /// `"pending_user_confirmation"`, and `hmac` equal to a hexadecimal token
+    /// string or `null`. A completed registration may have no token; pending
+    /// confirmation always has `hmac: null`. Trezor and KeepKey do not support
+    /// registration.
     #[wasm_bindgen]
     pub async fn register_wallet(&mut self, name: &str, policy: &str) -> Result<JsValue, JsValue> {
         let registration = match &mut self.device {
@@ -535,6 +705,12 @@ impl Client {
         wallet_registration_js(registration)
     }
 
+    /// Returns an address at `path`, optionally requesting on-device display.
+    ///
+    /// `address_format` accepts `"legacy"`, `"nested-segwit"`,
+    /// `"native-segwit"`, or `"taproot"`. Omitting it uses the backend's default;
+    /// supported formats and honoring `display` vary by backend. Specter-DIY
+    /// requires `display = true` and does not support Taproot path display.
     #[wasm_bindgen]
     pub async fn display_address_by_path(
         &mut self,
@@ -566,6 +742,15 @@ impl Client {
         }
     }
 
+    /// Returns a named wallet's address at `index` on its receive or change branch.
+    ///
+    /// BitBox02 and Specter-DIY require `wallet_descriptor`; Specter-DIY also
+    /// requires `display = true`. Ledger requires both `wallet_descriptor` and
+    /// `wallet_hmac_hex`, with the HMAC encoding 32 bytes as 64 hexadecimal
+    /// characters. Supplying neither leaves Ledger without its required
+    /// context and returns an error. Coldcard and Jade resolve the wallet by
+    /// `descriptor_name` on-device and ignore those optional arguments.
+    /// Trezor and KeepKey do not support descriptor address display.
     #[wasm_bindgen]
     pub async fn display_address_by_descriptor(
         &mut self,
@@ -638,6 +823,15 @@ impl Client {
         }
     }
 
+    /// Signs a base64-encoded PSBT and returns the updated PSBT in base64.
+    ///
+    /// Leading and trailing whitespace in `psbt` is ignored. Ledger requires
+    /// `policy_name` and `wallet_descriptor` together, even for a standard
+    /// policy without an HMAC. Its optional `wallet_hmac_hex` must encode 32
+    /// bytes as 64 hexadecimal characters and cannot be supplied without the
+    /// policy. BitBox02 accepts `wallet_descriptor` for policy-based signing
+    /// and otherwise infers single-signature inputs from the PSBT; it ignores
+    /// the other policy arguments. Other backends ignore all three arguments.
     #[wasm_bindgen]
     pub async fn sign_psbt(
         &mut self,
@@ -707,6 +901,10 @@ impl Client {
         }
     }
 
+    /// Signs the UTF-8 message at `path` and returns a base64-encoded signature.
+    ///
+    /// The 65-byte payload contains the backend's header followed by its compact
+    /// ECDSA signature. Unlike the CLI, this method does not normalize the header.
     #[wasm_bindgen]
     pub async fn sign_message(&mut self, message: &str, path: &str) -> Result<String, JsValue> {
         match &mut self.device {
@@ -716,6 +914,10 @@ impl Client {
     }
 }
 
+/// A browser error represented as a string.
+///
+/// Conversion from [`JsValue`] preserves a string value or uses its debug
+/// representation for non-string values.
 #[derive(Debug, thiserror::Error)]
 #[error("WASM error: {0}")]
 pub struct WasmError(String);

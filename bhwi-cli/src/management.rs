@@ -1,3 +1,7 @@
+//! Management contexts built from local entropy, time, and PIN-position input.
+//!
+//! These helpers prepare host data; they do not perform device I/O.
+
 #[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 use anyhow::Context;
 use anyhow::Result;
@@ -8,6 +12,11 @@ use bhwi::common::DeviceContext;
 use chrono::Local;
 use rand_core::{OsRng, RngCore};
 
+/// Creates Trezor setup context with 32 bytes of OS-generated entropy.
+///
+/// # Panics
+///
+/// Panics if the operating system cannot supply random entropy.
 #[cfg(feature = "trezor")]
 pub fn trezor_setup_context() -> DeviceContext {
     let mut host_entropy = [0; 32];
@@ -15,6 +24,13 @@ pub fn trezor_setup_context() -> DeviceContext {
     bhwi_async::management::trezor_setup_context(host_entropy)
 }
 
+/// Creates Trezor PIN context from nonempty ASCII-digit keypad positions.
+///
+/// Positions are not literal PIN digits; no 1–9 range check is performed.
+///
+/// # Errors
+///
+/// Returns an error for empty input or non-ASCII digits.
 #[cfg(feature = "trezor")]
 pub fn trezor_pin_context(positions: String) -> Result<DeviceContext> {
     Ok(bhwi_async::management::trezor_pin_context_from_positions(
@@ -22,12 +38,22 @@ pub fn trezor_pin_context(positions: String) -> Result<DeviceContext> {
     )?)
 }
 
+/// Creates Trezor recovery context using the current Unix time as its U2F counter.
+///
+/// # Errors
+///
+/// Returns an error if the timestamp does not fit in `u32`.
 #[cfg(feature = "trezor")]
 pub fn trezor_restore_context() -> Result<DeviceContext> {
     let u2f_counter = u2f_counter_from(Local::now().timestamp())?;
     Ok(bhwi_async::management::trezor_restore_context(u2f_counter))
 }
 
+/// Creates KeepKey setup context with 32 bytes of OS-generated entropy.
+///
+/// # Panics
+///
+/// Panics if the operating system cannot supply random entropy.
 #[cfg(feature = "keepkey")]
 pub fn keepkey_setup_context() -> DeviceContext {
     let mut host_entropy = [0; 32];
@@ -35,6 +61,13 @@ pub fn keepkey_setup_context() -> DeviceContext {
     bhwi_async::management::keepkey_setup_context(host_entropy)
 }
 
+/// Creates KeepKey PIN context from nonempty ASCII-digit keypad positions.
+///
+/// Positions are not literal PIN digits; no 1–9 range check is performed.
+///
+/// # Errors
+///
+/// Returns an error for empty input or non-ASCII digits.
 #[cfg(feature = "keepkey")]
 pub fn keepkey_pin_context(positions: String) -> Result<DeviceContext> {
     Ok(bhwi_async::management::keepkey_pin_context_from_positions(
@@ -42,6 +75,11 @@ pub fn keepkey_pin_context(positions: String) -> Result<DeviceContext> {
     )?)
 }
 
+/// Creates KeepKey recovery context using the current Unix time as its U2F counter.
+///
+/// # Errors
+///
+/// Returns an error if the timestamp does not fit in `u32`.
 #[cfg(feature = "keepkey")]
 pub fn keepkey_restore_context() -> Result<DeviceContext> {
     let u2f_counter = u2f_counter_from(Local::now().timestamp())?;
@@ -53,6 +91,18 @@ fn u2f_counter_from(timestamp: i64) -> Result<u32> {
     u32::try_from(timestamp).context("current timestamp does not fit in u32")
 }
 
+/// Creates BitBox02 setup context with the current Unix time and local UTC offset.
+///
+/// Both time values are in seconds. Emulators use mnemonic restoration; physical
+/// devices use new-wallet setup with 32 bytes of OS-generated entropy.
+///
+/// # Errors
+///
+/// Returns an error if the timestamp does not fit in `u32`.
+///
+/// # Panics
+///
+/// Panics if a physical device is selected and the operating system cannot supply entropy.
 #[cfg(feature = "bitbox")]
 pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
@@ -72,6 +122,13 @@ pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     ))
 }
 
+/// Creates BitBox02 mnemonic-restoration context with the current time and UTC offset.
+///
+/// Both time values are in seconds.
+///
+/// # Errors
+///
+/// Returns an error if the Unix timestamp does not fit in `u32`.
 #[cfg(feature = "bitbox")]
 pub fn bitbox_restore_context() -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;

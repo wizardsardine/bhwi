@@ -5,11 +5,14 @@ use bhwi::{
     ledger::{LedgerCommand, LedgerError, LedgerInterpreter, LedgerResponse, apdu::ApduCommand},
 };
 
+/// An asynchronous client for the Ledger Bitcoin application.
 pub struct Ledger<T> {
+    /// The transport used for device exchanges.
     pub transport: T,
 }
 
 impl<T> Ledger<T> {
+    /// Creates a client without contacting or unlocking the device.
     pub fn new(transport: T) -> Self {
         Self { transport }
     }
@@ -48,6 +51,9 @@ impl<T> crate::OnUnlock for Ledger<T> {
     }
 }
 
+/// An unused HTTP client whose [`HttpClient::request`] implementation always panics.
+///
+/// Ledger commands do not use HTTP; this is not a fallback HTTP implementation.
 pub struct DummyClient;
 #[async_trait(?Send)]
 impl HttpClient for DummyClient {

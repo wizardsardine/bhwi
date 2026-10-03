@@ -1,3 +1,11 @@
+//! Python HWI-compatible argument parsing, device operations, and JSON responses.
+//!
+//! [`parse_args`] and [`process_request`] return values without printing a
+//! response. [`run_cli`] handles command-line streams and prints responses to
+//! stdout; device prompts, help text, and usage text go to stderr. On Unix,
+//! `--stdinpass` prompts for the password on the controlling terminal when available,
+//! falling back to a stderr prompt and stdin input if terminal password reading fails.
+
 use bhwi::bitcoin::psbt::Psbt;
 #[cfg(feature = "keepkey")]
 use bhwi::keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED};
@@ -52,6 +60,10 @@ use crate::{
 
 type HwiResult<T> = std::result::Result<T, HwiError>;
 
+/// The Clap parser for Python HWI-compatible global options and subcommands.
+///
+/// Use [`parse_args`] to obtain an executable [`HwiRequest`], or [`run_cli`] for
+/// stdin handling and compatible stdout, stderr, and exit-status behavior.
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about = "Python HWI compatible interface")]
 pub struct HwiCli {
@@ -81,96 +93,147 @@ pub struct HwiCli {
     stdinpass: bool,
 }
 
+/// Subcommands accepted by the Python HWI-compatible argument parser.
 #[derive(Debug, Clone, Subcommand)]
 pub enum HwiCliCommand {
+    /// Enumerates devices and their readiness or connection errors.
     Enumerate,
+    /// Retrieves the account extended public key for an address type.
     Getmasterxpub {
+        /// The address type used to select the BIP44-style purpose.
         #[arg(long = "addr-type", value_enum, default_value = "wit")]
         addr_type: HwiAddressType,
+        /// The account number, defaulting to zero.
         #[arg(long, default_value_t = 0)]
         account: u32,
     },
+    /// Signs a base64-encoded PSBT.
     Signtx {
+        /// The base64-encoded PSBT to sign.
         psbt: String,
     },
+    /// Signs a UTF-8 message with a key at a derivation path.
     Signmessage {
+        /// The message text to sign.
         message: String,
+        /// The BIP32 derivation path of the signing key.
         path: String,
     },
+    /// Displays an address selected by exactly one path or descriptor.
     #[command(group(
         ArgGroup::new("address_target")
             .required(true)
             .args(["path", "desc"])
     ))]
     Displayaddress {
+        /// The BIP32 derivation path, mutually exclusive with `desc`.
         #[arg(long, conflicts_with = "desc")]
         path: Option<String>,
+        /// The output descriptor, mutually exclusive with `path`.
         #[arg(long, conflicts_with = "path")]
         desc: Option<String>,
+        /// The address type for a path request; ignored for a descriptor request.
         #[arg(long = "addr-type", value_enum, default_value = "wit")]
         addr_type: HwiAddressType,
     },
+    /// Retrieves an extended public key at a BIP32 path.
     Getxpub {
+        /// The derivation path of the extended public key.
         path: String,
     },
+    /// Retrieves receive and change descriptors for an account.
     Getdescriptors {
+        /// The account number, defaulting to zero.
         #[arg(long, default_value_t = 0)]
         account: u32,
     },
+    /// Retrieves ranged descriptors for Bitcoin Core keypool import.
     Getkeypool {
+        /// The inclusive first child index.
         start: u32,
+        /// The inclusive last child index.
         end: u32,
+        /// A compatibility flag; keypool import is enabled unless `nokeypool` is set.
         #[arg(long, action = ArgAction::SetTrue, conflicts_with = "nokeypool")]
         keypool: bool,
+        /// Whether to disable keypool and active flags in the returned records.
         #[arg(long, action = ArgAction::SetTrue)]
         nokeypool: bool,
+        /// Whether to return only change descriptors; otherwise both branches are used without `path`.
         #[arg(long, action = ArgAction::SetTrue)]
         internal: bool,
+        /// The address type, defaulting to native SegWit and mutually exclusive with `all`.
         #[arg(long = "addr-type", value_enum, conflicts_with = "all")]
         addr_type: Option<HwiAddressType>,
+        /// Whether to return every address type supported by the selected device.
         #[arg(long, action = ArgAction::SetTrue)]
         all: bool,
+        /// The account number, ignored when `path` is supplied.
         #[arg(long, default_value_t = 0)]
         account: u32,
+        /// An explicit derivation path starting with `m/` and ending in `/*`.
         #[arg(long)]
         path: Option<String>,
     },
+    /// Initializes a supported device in interactive mode.
     Setup {
+        /// The requested device label.
         #[arg(long, short = 'l', default_value = "")]
         label: String,
+        /// A compatibility option rejected when nonempty for BitBox02 and unused by Trezor and KeepKey.
         #[arg(long = "backup_passphrase", short = 'b', default_value = "")]
         backup_passphrase: String,
     },
+    /// Erases a supported device's wallet.
     Wipe,
+    /// Restores a supported device from a mnemonic in interactive mode.
     Restore {
+        /// The requested mnemonic word count.
         #[arg(long = "word_count", short = 'w', default_value_t = 24)]
         word_count: i32,
+        /// The requested device label.
         #[arg(long, short = 'l', default_value = "")]
         label: String,
     },
+    /// Requests a BitBox02 mnemonic display or a Coldcard backup file.
     Backup {
+        /// A compatibility label, required to be empty for BitBox02 and unused by Coldcard.
         #[arg(long, short = 'l', default_value = "")]
         label: String,
+        /// A compatibility backup password, required to be empty for BitBox02 and unused by Coldcard.
         #[arg(long = "backup_passphrase", short = 'b', default_value = "")]
         backup_passphrase: String,
     },
+    /// Prompts a supported device to request host-entered PIN positions.
     Promptpin,
+    /// Sends scrambled keypad positions to a device waiting for a PIN.
     Sendpin {
+        /// A nonempty ASCII-digit position string, not literal PIN digits.
         pin: String,
     },
+    /// Toggles passphrase protection on a supported device.
     Togglepassphrase,
+    /// Installs all device udev rules and updates permissions on Linux.
     #[cfg(target_os = "linux")]
     Installudevrules {
+        /// The directory in which to write the udev rules.
         #[arg(long, default_value = "/etc/udev/rules.d/")]
         location: PathBuf,
     },
+    /// Captures an unrecognized subcommand for compatibility error handling.
     #[command(external_subcommand)]
-    External(Vec<OsString>),
+    External(
+        /// The unrecognized command name followed by its arguments.
+        Vec<OsString>,
+    ),
 }
 
+/// A device selector and an operation ready for [`process_request`].
 #[derive(Debug, Clone)]
 pub struct HwiRequest {
+    /// The network, device, and host-passphrase selection.
     pub selector: HwiSelector,
+    /// The requested operation.
     pub command: HwiCommand,
 }
 
@@ -179,13 +242,20 @@ pub struct HwiRequest {
 /// failure (`-3`), or `-4` only when `get_client` is reached via `-d`.
 #[derive(Debug, Clone)]
 pub struct HwiSelector {
+    /// The Bitcoin network used for device operations and account paths.
     pub network: Network,
+    /// The master fingerprint to match after opening a device, if supplied.
     pub fingerprint: Option<Fingerprint>,
+    /// The raw HWI device-family or model name, resolved during device lookup.
     pub device_type: Option<String>,
+    /// An explicit native transport path, if supplied.
     pub device_path: Option<String>,
+    /// Whether discovery should include emulators.
     pub include_emulators: bool,
+    /// The normalized host passphrase for Trezor or KeepKey, if supplied.
     #[cfg(any(feature = "trezor", feature = "keepkey"))]
     pub passphrase: Option<HostPassphrase>,
+    /// Whether a password argument was supplied, including an empty password.
     pub password_given: bool,
 }
 
@@ -282,135 +352,247 @@ async fn find_hwi_device(selector: &HwiSelector) -> Result<(DeviceManager, Devic
     }
 }
 
+/// An executable Python HWI-compatible operation.
+///
+/// Device support varies; unsupported operations return an [`HwiError`] in
+/// [`HwiResponse::Error`] rather than succeeding without performing the operation.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum HwiCommand {
+    /// Enumerates devices, including per-device errors and readiness information.
     Enumerate,
+    /// Retrieves the extended public key for an account and address type.
     GetMasterXpub {
+        /// The address type used to select the account's derivation purpose.
         addr_type: HwiAddressType,
+        /// The BIP44-style account number.
         account: u32,
     },
+    /// Signs a PSBT, preparing Ledger policy contexts when required.
     SignTx {
+        /// The base64-encoded PSBT.
         psbt: String,
     },
+    /// Signs a UTF-8 message at a BIP32 derivation path.
     SignMessage {
+        /// The message text.
         message: String,
+        /// The derivation path of the signing key.
         path: String,
     },
-    DisplayAddress(HwiDisplayAddressRequest),
+    /// Retrieves an address and requests display on the device.
+    DisplayAddress(
+        /// The path or descriptor identifying the address.
+        HwiDisplayAddressRequest,
+    ),
+    /// Retrieves an extended public key at a BIP32 path.
     GetXpub {
+        /// The derivation path of the extended public key.
         path: String,
+        /// Whether to include the decoded extended-key fields in the response.
         expert: bool,
     },
+    /// Retrieves receive and change descriptors for supported address types.
     GetDescriptors {
+        /// The BIP44-style account number.
         account: u32,
     },
+    /// Retrieves ranged Bitcoin Core descriptor-import records.
     GetKeypool {
+        /// The inclusive first child index.
         start: u32,
+        /// The inclusive last child index, which must not precede `start`.
         end: u32,
+        /// Whether to select only change; otherwise both branches are returned without `path`.
         internal: bool,
+        /// The value for both `keypool` and `active` in the returned records.
         keypool: bool,
+        /// The BIP44-style account number, ignored when `path` is supplied.
         account: u32,
+        /// The address type to use unless `all` is true.
         addr_type: HwiAddressType,
+        /// Whether to return every address type supported by the selected device.
         all: bool,
+        /// An optional derivation path starting with `m/` and ending in `/*`.
         path: Option<String>,
     },
+    /// Requests a BitBox02 mnemonic display or writes a Coldcard backup to a local file.
     Backup {
+        /// A compatibility label, required to be empty for BitBox02 and unused by Coldcard.
         label: String,
+        /// A compatibility password, required to be empty for BitBox02 and unused by Coldcard.
         backup_passphrase: String,
     },
+    /// Initializes a BitBox02, Trezor, or KeepKey.
     Setup {
+        /// Whether interactive setup is allowed; false is rejected.
         interactive: bool,
+        /// The requested device label.
         label: String,
+        /// A compatibility option rejected when nonempty for BitBox02 and unused by Trezor and KeepKey.
         backup_passphrase: String,
     },
+    /// Erases a supported device's wallet.
     Wipe,
+    /// Restores a BitBox02, Trezor, or KeepKey from a mnemonic.
     Restore {
+        /// Whether interactive recovery is allowed; false is rejected.
         interactive: bool,
+        /// The requested mnemonic word count.
         word_count: i32,
+        /// The requested device label.
         label: String,
     },
+    /// Toggles passphrase protection on a supported device.
     TogglePassphrase,
+    /// Requests PIN entry and prints keypad instructions to stderr.
     PromptPin,
+    /// Sends scrambled keypad positions to a supported device waiting for a PIN.
     SendPin {
+        /// A nonempty ASCII-digit position string, with no 1–9 range check.
         pin: String,
     },
-    UnsupportedDeviceAction(HwiUnsupportedDeviceAction),
+    /// Produces a device-specific unsupported-action error after selecting a device.
+    UnsupportedDeviceAction(
+        /// The management action used to choose the error message.
+        HwiUnsupportedDeviceAction,
+    ),
+    /// Installs all udev rules, updates the USB group, and reloads rules on Linux.
     #[cfg(target_os = "linux")]
     InstallUdevRules {
+        /// The directory in which to write the udev rules.
         location: PathBuf,
     },
-    Unsupported(String),
+    /// Reports an unsupported HWI command without selecting a device.
+    Unsupported(
+        /// The unrecognized command name.
+        String,
+    ),
 }
 
+/// A management action used to choose a device-specific unsupported-command error.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum HwiUnsupportedDeviceAction {
+    /// A setup request.
     Setup {
+        /// Whether interactive setup was requested.
         interactive: bool,
+        /// The requested device label.
         label: String,
+        /// The supplied compatibility backup password.
         backup_passphrase: String,
     },
+    /// A wallet-erasure request.
     Wipe,
+    /// A mnemonic-recovery request.
     Restore {
+        /// Whether interactive recovery was requested.
         interactive: bool,
+        /// The requested mnemonic word count.
         word_count: i32,
+        /// The requested device label.
         label: String,
     },
+    /// A backup request.
     Backup {
+        /// The supplied compatibility label.
         label: String,
+        /// The supplied compatibility backup password.
         backup_passphrase: String,
     },
+    /// A request for host-entered PIN positions.
     PromptPin,
+    /// A request to submit PIN positions.
     SendPin {
+        /// The scrambled keypad positions, not literal PIN digits.
         pin: String,
     },
+    /// A passphrase-protection toggle request.
     TogglePassphrase,
 }
 
+/// A path or descriptor identifying an address to display on a device.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum HwiDisplayAddressRequest {
+    /// An address selected by a BIP32 derivation path and address type.
     Path {
+        /// The BIP32 derivation path to parse.
         path: String,
+        /// The address encoding to request.
         addr_type: HwiAddressType,
     },
+    /// An address selected by an output descriptor.
+    ///
+    /// Supported single-key descriptors are converted to path requests.
+    /// Supported multisig descriptors use backend-specific requests; Ledger
+    /// policy preparation may prompt for registration.
     Descriptor {
+        /// The output descriptor to parse.
         descriptor: String,
     },
 }
 
+/// An HWI address type used for derivation purposes and output descriptors.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum HwiAddressType {
+    /// Legacy P2PKH, named `legacy`.
     #[value(name = "legacy")]
     Legacy,
+    /// P2SH-wrapped P2WPKH, named `sh_wit`.
     #[value(name = "sh_wit")]
     ShWit,
+    /// Native SegWit P2WPKH, named `wit`.
     #[value(name = "wit")]
     Wit,
+    /// Taproot P2TR, named `tap`.
     #[value(name = "tap")]
     Tap,
 }
 
+/// A Python HWI-compatible JSON error object.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct HwiError {
+    /// The human-readable error message, serialized under `error`.
     pub error: String,
+    /// The negative HWI compatibility code, not a process exit status.
     pub code: i32,
 }
 
+/// Error categories mapped to Python HWI's negative integer codes.
+///
+/// Classification depends on the operation and backend. For example, Ledger
+/// signing or address-display cancellation is reported as device failure
+/// (`-13`), whereas other backends use action cancellation (`-14`).
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HwiErrorCode {
+    /// Neither a device type nor a fingerprint was supplied (`-1`).
     NoDeviceType,
+    /// Required arguments are missing or command-line usage is invalid (`-2`).
     MissingArguments,
+    /// An explicitly addressed device type is unknown (`-4`).
     UnknownDevice,
+    /// An argument or device-refused input is invalid (`-7`).
     BadArgument,
+    /// The command, requested mode, or device operation is unsupported (`-9`).
     UnsupportedCommand,
+    /// A device operation failed (`-13`).
     DeviceFailure,
+    /// Device selection, connection, or an unclassified device operation failed (`-3`).
     DeviceConnectionError,
+    /// Installing udev rules requires root privileges (`-16`).
     NeedToBeRoot,
+    /// Setup was requested for an initialized device (`-10`).
     DeviceAlreadyInitialized,
+    /// PIN entry was requested for an unlocked device (`-11`).
     DeviceAlreadyUnlocked,
+    /// A device requires a PIN or passphrase before it can proceed (`-12`).
     DeviceNotReady,
+    /// The device has no initialized wallet (`-18`).
     DeviceNotInitialized,
+    /// Command-line help was requested (`-17`).
     HelpText,
+    /// The user canceled or refused an operation (`-14`).
     ActionCanceled,
+    /// The supplied PSBT cannot be parsed (`-5`).
     InvalidTx,
 }
 
@@ -445,105 +627,205 @@ impl HwiError {
     }
 }
 
+/// A device record in the Python HWI enumeration response.
+///
+/// Optional fields are omitted when absent, except `label`: its outer `None`
+/// omits the key and `Some(None)` writes JSON `null`. Enumeration includes the
+/// label key for Coldcard, KeepKey, Ledger, and Trezor; other families and
+/// candidates that could not be opened omit it.
+/// Unreported PIN and passphrase requirements are represented as false.
 #[derive(Debug, Serialize)]
 pub struct HwiEnumeratedDevice {
+    /// The device-family name, serialized under the JSON key `type`.
     #[serde(rename = "type")]
     pub device_type: String,
+    /// The HWI-compatible model name, including emulator model names.
     pub model: String,
+    /// The HWI-compatible native transport path.
     pub path: String,
+    /// The optional label, with an outer option controlling key omission.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<Option<String>>,
+    /// The master fingerprint as a hexadecimal string, omitted when unavailable.
     #[serde(
         default,
         serialize_with = "option_fingerprint",
         skip_serializing_if = "Option::is_none"
     )]
     pub fingerprint: Option<Fingerprint>,
+    /// Whether the device reports that host PIN positions are required.
     pub needs_pin_sent: bool,
+    /// The reported host-passphrase requirement, cleared after retrieving the fingerprint.
     pub needs_passphrase_sent: bool,
+    /// Warning groups, omitted from JSON when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Vec<String>>,
+    /// A per-device error message, omitted when no error occurred.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The per-device HWI error code, omitted when no error occurred.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<i32>,
 }
 
+/// An untagged Python HWI-compatible JSON response.
+///
+/// Serialization writes the contained object or array directly, without an enum
+/// name or discriminator. [`HwiEnumeratedDevice`] uses `type` for its device family,
+/// not as a response-variant tag.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum HwiResponse {
-    Enumerate(Vec<HwiEnumeratedDevice>),
-    GetXpub(HwiGetXpubResponse),
-    GetDescriptors(HwiGetDescriptorsResponse),
-    GetKeypool(Vec<HwiGetKeypoolEntry>),
-    SignTx(HwiSignTxResponse),
-    SignMessage(HwiSignMessageResponse),
-    DisplayAddress(HwiDisplayAddressResponse),
-    Success(HwiSuccessResponse),
-    Error(HwiError),
+    /// Device enumeration records, serialized as an array.
+    Enumerate(
+        /// The discovered devices and per-device errors.
+        Vec<HwiEnumeratedDevice>,
+    ),
+    /// An extended public key response.
+    GetXpub(
+        /// The extended key and any expert-mode fields.
+        HwiGetXpubResponse,
+    ),
+    /// Receive and change output descriptors.
+    GetDescriptors(
+        /// The account's descriptor lists.
+        HwiGetDescriptorsResponse,
+    ),
+    /// Bitcoin Core descriptor-import records, serialized as an array.
+    GetKeypool(
+        /// The ranged keypool records.
+        Vec<HwiGetKeypoolEntry>,
+    ),
+    /// A PSBT signing result.
+    SignTx(
+        /// The resulting PSBT and whether its serialization changed.
+        HwiSignTxResponse,
+    ),
+    /// A message-signing result.
+    SignMessage(
+        /// The encoded message signature.
+        HwiSignMessageResponse,
+    ),
+    /// A device-displayed address.
+    DisplayAddress(
+        /// The returned Bitcoin address.
+        HwiDisplayAddressResponse,
+    ),
+    /// A management-operation result.
+    Success(
+        /// The operation's reported success flag.
+        HwiSuccessResponse,
+    ),
+    /// An operation or argument error.
+    Error(
+        /// The error message and HWI compatibility code.
+        HwiError,
+    ),
 }
 
+/// A management operation's success response.
 #[derive(Debug, Serialize)]
 pub struct HwiSuccessResponse {
+    /// Whether the device operation reported success.
     pub success: bool,
 }
 
+/// A PSBT signing response.
 #[derive(Debug, Serialize)]
 pub struct HwiSignTxResponse {
+    /// The resulting PSBT encoded as base64.
     pub psbt: String,
+    /// Whether signing changed the serialized PSBT, not whether all inputs are signed.
     pub signed: bool,
 }
 
+/// A Bitcoin message-signing response.
 #[derive(Debug, Serialize)]
 pub struct HwiSignMessageResponse {
+    /// The base64-encoded compact signature with its HWI-normalized header.
     pub signature: String,
 }
 
+/// The address returned after a device-display request.
 #[derive(Debug, Serialize)]
 pub struct HwiDisplayAddressResponse {
+    /// The Bitcoin address string.
     pub address: String,
 }
 
+/// An extended public key and optional expert-mode details.
+///
+/// Responses produced by this module omit every field except `xpub` unless
+/// expert mode is requested.
 #[derive(Debug, Serialize)]
 pub struct HwiGetXpubResponse {
+    /// The Base58Check-encoded extended public key.
     pub xpub: String,
+    /// Whether the extended key uses test-network versions; present only in expert mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub testnet: Option<bool>,
+    /// Whether this is a private key; always false in generated expert responses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private: Option<bool>,
+    /// The key's BIP32 derivation depth; present only in expert mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depth: Option<u8>,
+    /// The parent fingerprint as hexadecimal; present only in expert mode.
     #[serde(
         default,
         serialize_with = "option_fingerprint",
         skip_serializing_if = "Option::is_none"
     )]
     pub parent_fingerprint: Option<Fingerprint>,
+    /// The child number with its hardened bit, if any; present only in expert mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_num: Option<u32>,
+    /// The 32-byte chain code as hexadecimal; present only in expert mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chaincode: Option<String>,
+    /// The compressed public key as hexadecimal; present only in expert mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pubkey: Option<String>,
 }
 
+/// Receive and change descriptors for a device account.
 #[derive(Debug, Serialize)]
 pub struct HwiGetDescriptorsResponse {
+    /// Ranged receive descriptors with checksums and `h`-notation hardened paths.
     pub receive: Vec<String>,
+    /// Ranged change descriptors with checksums and `h`-notation hardened paths.
     pub internal: Vec<String>,
 }
 
+/// A ranged descriptor-import record for Bitcoin Core.
 #[derive(Debug, Serialize)]
 pub struct HwiGetKeypoolEntry {
+    /// The wildcard descriptor with checksum and `h`-notation hardened paths.
     pub desc: String,
+    /// The inclusive first and last child indices; `desc` remains ranged.
     pub range: [u32; 2],
+    /// The import timestamp marker, set to `"now"` in generated responses.
     pub timestamp: &'static str,
+    /// Whether this describes the internal change branch.
     pub internal: bool,
+    /// Whether to add the descriptor to the keypool.
     pub keypool: bool,
+    /// Whether to activate the descriptor, matching `keypool` in generated responses.
     pub active: bool,
+    /// Whether the import is watch-only, always true in generated responses.
     pub watchonly: bool,
 }
 
+/// Parses command-line arguments, including the program name, into an HWI request.
+///
+/// Performs no device I/O, stdin reading, or response printing. Use [`run_cli`]
+/// for `--stdin`, password prompting, and compatible help and usage handling.
+///
+/// # Errors
+///
+/// Returns [`HwiError`] with code `-7` for Clap parsing failures, including help
+/// requests, or the conversion error for invalid global options such as a
+/// network name (`-2`). Raw device types are resolved later during processing.
 pub fn parse_args<I, T>(args: I) -> HwiResult<HwiRequest>
 where
     I: IntoIterator<Item = T>,
@@ -554,6 +836,17 @@ where
     request_from_cli(cli)
 }
 
+/// Executes an HWI request and returns its serializable response.
+///
+/// Does not print the response, but device operations may perform I/O and emit
+/// prompts on stderr. Backup files are written to the current directory as
+/// `backup-YYYYMMDD-HHMM.7z`; udev installation also changes system permissions.
+///
+/// Device lookup generally precedes operation-argument validation. Commands
+/// requiring a device report `-1` without a type or fingerprint. Unknown types
+/// report `-4` with an explicit path and no fingerprint, otherwise `-3`;
+/// enumeration ignores unknown type filters. Keypool bounds and some unsupported
+/// address modes are checked before device lookup.
 pub async fn process_request(request: HwiRequest) -> HwiResponse {
     match request.command {
         HwiCommand::Enumerate => enumerate(request.selector).await,
@@ -622,6 +915,14 @@ pub async fn process_request(request: HwiRequest) -> HwiResponse {
     }
 }
 
+/// Runs the Python HWI-compatible CLI and returns its process exit status.
+///
+/// `args` includes the program name. With `--stdin`, whitespace-separated
+/// arguments are appended from input lines until an empty line or EOF.
+/// Responses are printed as untagged JSON to stdout, except version output.
+/// Help prints a `-17` JSON error to stdout and help text to stderr. Usage errors
+/// print a `-2` JSON error and usage text, and return status 2; help, version,
+/// successful operations, and runtime error responses return status 0.
 pub async fn run_cli<I, T>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = T>,
@@ -1301,11 +1602,13 @@ async fn toggle_passphrase_device(selector: HwiSelector) -> HwiResponse {
     }
 }
 
+/// Instructions for mapping scrambled device PIN positions to the host numeric keypad.
 pub const PIN_MATRIX_DESCRIPTION: &str =
     "Use the numeric keypad to describe number positions. The layout is:
     7 8 9
     4 5 6
     1 2 3";
+/// Instructions for submitting PIN keypad positions through the `sendpin` command.
 pub const SEND_PIN_INSTRUCTION: &str = "Use 'sendpin' to provide the number positions for the PIN as displayed on your device's screen";
 
 async fn device_for_pin_command(

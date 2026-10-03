@@ -12,8 +12,7 @@ use miniscript::{Descriptor, Translator};
 
 use crate::Interpreter;
 
-/// Maximum accepted final response size. This is deliberately large enough for
-/// firmware PSBT replies while preventing an unbounded browser or serial buffer.
+/// Maximum accepted final response payload size in bytes.
 pub const MAX_RESPONSE_SIZE: usize = 4 * 1024 * 1024;
 
 const ACK_FRAME: &[u8] = b"ACK\r\n";
@@ -25,67 +24,130 @@ const CRLF_LEN: usize = 2;
 /// same framing after the transport has completed its exchange.
 pub const MAX_RESPONSE_FRAME_SIZE: usize = MAX_RESPONSE_SIZE + ACK_FRAME.len() + CRLF_LEN;
 
+/// Errors in Specter command preparation, response framing, and transport exchange.
 #[derive(Debug, thiserror::Error)]
 pub enum SpecterError {
+    /// Missing device-specific command context.
     #[error("missing command context: {0}")]
-    MissingContext(&'static str),
+    MissingContext(
+        /// Missing-context description.
+        &'static str,
+    ),
+    /// An operation unsupported by the text protocol.
     #[error("unsupported command: {0}")]
-    UnsupportedCommand(&'static str),
+    UnsupportedCommand(
+        /// Unsupported-operation description.
+        &'static str,
+    ),
+    /// An unsupported address-display request.
     #[error("unsupported display address: {0}")]
-    UnsupportedDisplayAddress(String),
+    UnsupportedDisplayAddress(
+        /// Unsupported-display description.
+        String,
+    ),
+    /// Invalid command input.
     #[error("invalid input: {0}")]
-    InvalidInput(String),
+    InvalidInput(
+        /// Invalid-input description.
+        String,
+    ),
+    /// Invalid acknowledgement or response delimiters.
     #[error("malformed Specter framing: {0}")]
-    MalformedFraming(&'static str),
+    MalformedFraming(
+        /// Framing failure description.
+        &'static str,
+    ),
+    /// A response exceeding the configured byte limit.
     #[error("Specter response is too large")]
     ResponseTooLarge,
+    /// A response payload that cannot be decoded or merged.
     #[error("malformed Specter payload: {0}")]
-    MalformedPayload(String),
+    MalformedPayload(
+        /// Payload failure description.
+        String,
+    ),
+    /// A request refused by firmware, with its message.
     #[error("Specter refused the request: {0}")]
-    Refused(String),
+    Refused(
+        /// Device-reported refusal message.
+        String,
+    ),
+    /// User cancellation reported by firmware.
     #[error("Specter request was cancelled by the user")]
     UserCancelled,
+    /// A returned key or address inconsistent with the selected network.
     #[error("Specter network mismatch: {0}")]
-    NetworkMismatch(String),
+    NetworkMismatch(
+        /// Network mismatch description.
+        String,
+    ),
+    /// A transport exchange deadline expired.
     #[error("Specter request timed out")]
     Timeout,
+    /// The transport disconnected during an exchange.
     #[error("Specter transport disconnected")]
     Disconnected,
+    /// An interpreter operation invoked in the wrong state.
     #[error("unexpected interpreter state: {0}")]
-    State(&'static str),
+    State(
+        /// Invalid-state description.
+        &'static str,
+    ),
 }
 
 /// Command expressed in Specter-DIY protocol terms.
 pub enum SpecterCommand {
+    /// Requests the active wallet's master fingerprint.
     Fingerprint,
+    /// Requests an undisplayed extended public key.
     Xpub {
+        /// Key derivation path.
         path: DerivationPath,
     },
+    /// Signs a PSBT and merges supported signing additions.
     SignPsbt {
+        /// PSBT to sign.
         psbt: Psbt,
     },
+    /// Signs a message with the key at a derivation path.
     SignMessage {
+        /// Signing key derivation path.
         path: DerivationPath,
+        /// Message bytes to sign.
         message: Vec<u8>,
     },
+    /// Registers a named wallet policy on the device.
     RegisterWallet {
+        /// User-visible wallet name.
         name: String,
+        /// Descriptor policy to register.
         policy: WalletPolicy,
     },
+    /// Displays an address on the device; undisplayed retrieval is unsupported.
     ShowAddress {
+        /// Script family of the requested address.
         script_type: SpecterAddressType,
+        /// Rooted BIP-32 path or fingerprint-prefixed key origin.
         derivation: String,
+        /// Concrete script bytes for script-hash formats, absent for single-key formats.
         script: Option<Vec<u8>>,
     },
 }
 
+/// Address script families supported by the Specter text protocol.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpecterAddressType {
+    /// Legacy P2PKH.
     Pkh,
+    /// Wrapped SegWit P2SH-P2WPKH.
     ShWpkh,
+    /// Native SegWit P2WPKH.
     Wpkh,
+    /// Legacy P2SH.
     Sh,
+    /// Wrapped SegWit P2SH-P2WSH.
     ShWsh,
+    /// Native SegWit P2WSH.
     Wsh,
 }
 
@@ -102,21 +164,48 @@ impl SpecterAddressType {
     }
 }
 
+/// A framed Specter text-protocol request.
 pub struct SpecterTransmit {
+    /// Request bytes including the protocol's line delimiters.
     pub payload: Vec<u8>,
 }
 
+/// A completed Specter command result.
 pub enum SpecterResponse {
+    /// Successful wallet registration without an authentication token.
     TaskDone,
-    MasterFingerprint(Fingerprint),
-    Xpub(Xpub),
-    SignedPsbt(Psbt),
-    Signature(u8, Signature),
-    Address(String),
+    /// Master fingerprint of the active wallet.
+    MasterFingerprint(
+        /// Active wallet master fingerprint.
+        Fingerprint,
+    ),
+    /// Extended public key of the requested path.
+    Xpub(
+        /// Requested extended public key.
+        Xpub,
+    ),
+    /// Original PSBT with supported signing additions merged from the device.
+    SignedPsbt(
+        /// Updated PSBT.
+        Psbt,
+    ),
+    /// Message-signature header byte and ECDSA signature.
+    Signature(
+        /// Device-returned compact signature header.
+        u8,
+        /// Message signature.
+        Signature,
+    ),
+    /// Encoded Bitcoin address.
+    Address(
+        /// Encoded address text.
+        String,
+    ),
 }
 
-/// Decode the ACK and final response incrementally. Transports retain this
-/// decoder for the complete request so fragmented and coalesced reads work.
+/// An incremental decoder for one Specter acknowledgement and final response.
+///
+/// Accepts fragmented or coalesced reads for a single request.
 #[derive(Default)]
 pub struct ResponseDecoder {
     buffer: Vec<u8>,
@@ -125,6 +214,10 @@ pub struct ResponseDecoder {
 }
 
 impl ResponseDecoder {
+    /// Adds received bytes and returns the final payload once its CRLF arrives.
+    ///
+    /// Returns `None` for incomplete framing. Rejects an invalid ACK, oversized
+    /// response, or bytes following the final response.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Option<Vec<u8>>, SpecterError> {
         if self.buffer.len().saturating_add(bytes.len()) > MAX_RESPONSE_FRAME_SIZE {
             return Err(SpecterError::ResponseTooLarge);
@@ -191,6 +284,10 @@ enum State {
     Finished(SpecterResponse),
 }
 
+/// A sans-I/O interpreter for one Specter request.
+///
+/// `exchange` returns `None` both for incomplete framing and after completion;
+/// `end` succeeds only after a complete final response has been received.
 pub struct SpecterInterpreter<C, T, R, E> {
     state: State,
     network: Option<Network>,
@@ -208,7 +305,9 @@ impl<C, T, R, E> Default for SpecterInterpreter<C, T, R, E> {
 }
 
 impl<C, T, R, E> SpecterInterpreter<C, T, R, E> {
-    /// Set the user-selected firmware network for response validation.
+    /// Selects the firmware network for validating returned keys and addresses.
+    ///
+    /// This does not change the device's network, which is selected on-device.
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = Some(network);
         self
@@ -394,7 +493,11 @@ fn parse_response(
     }
 }
 
-/// Merge only signer-owned additions so the original PSBT's metadata survives.
+/// Merges supported signing additions while preserving the original PSBT's metadata.
+///
+/// Requires an identical unsigned transaction and matching map counts. Merges
+/// partial signatures, Taproot signatures, and final input scripts or witnesses;
+/// conflicting values return an error. Other reply metadata is ignored.
 pub fn merge_signed_psbt(original: &Psbt, reply: Psbt) -> Result<Psbt, SpecterError> {
     if original.unsigned_tx != reply.unsigned_tx {
         return Err(SpecterError::MalformedPayload(

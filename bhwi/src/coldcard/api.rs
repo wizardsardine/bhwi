@@ -1,9 +1,14 @@
+//! Coldcard wire request encoding and response parsing.
+//!
 // See https://github.com/Coldcard/ckcc-protocol for implementation details.
+/// Encoders for Coldcard requests.
 pub mod request {
     use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
 
+    /// Maximum upload chunk size in bytes.
     pub const MAX_UPLOAD_CHUNK_LEN: usize = 2048;
 
+    /// Encodes key agreement with an unprefixed host public key and version defaulting to 1.
     pub fn start_encryption(version: Option<u32>, key: &[u8; 64]) -> Vec<u8> {
         let mut data = "ncry".as_bytes().to_owned();
         data.extend(version.unwrap_or(1).to_le_bytes());
@@ -11,10 +16,12 @@ pub mod request {
         data
     }
 
+    /// Encodes a request to create an encrypted backup.
     pub fn start_backup() -> Vec<u8> {
         b"back".to_vec()
     }
 
+    /// Encodes an extended-public-key request for a derivation path.
     pub fn get_xpub(path: &DerivationPath) -> Vec<u8> {
         if path.is_master() {
             "xpubm".as_bytes().to_vec()
@@ -23,23 +30,39 @@ pub mod request {
         }
     }
 
-    /// Address format bitmask constants (from ckcc-protocol)
+    /// Coldcard address-format bitmask constants.
     pub mod addr_fmt {
+        /// Flag selecting a public-key script.
         pub const AFC_PUBKEY: u32 = 0x01;
+        /// Flag selecting SegWit.
         pub const AFC_SEGWIT: u32 = 0x02;
+        /// Flag selecting Bech32 encoding.
         pub const AFC_BECH32: u32 = 0x04;
+        /// Flag selecting a script-hash address.
         pub const AFC_SCRIPT: u32 = 0x08;
+        /// Flag selecting wrapped SegWit.
         pub const AFC_WRAPPED: u32 = 0x10;
+        /// Flag selecting Bech32m encoding.
         pub const AFC_BECH32M: u32 = 0x20;
 
+        /// Legacy P2PKH address format.
         pub const AF_P2PKH: u32 = AFC_PUBKEY;
+        /// Native SegWit P2WPKH address format.
         pub const AF_P2WPKH: u32 = AFC_PUBKEY | AFC_SEGWIT | AFC_BECH32;
+        /// Wrapped SegWit P2SH-P2WPKH address format.
         pub const AF_P2WPKH_P2SH: u32 = AFC_PUBKEY | AFC_SEGWIT | AFC_WRAPPED;
+        /// Taproot P2TR address format.
         pub const AF_P2TR: u32 = AFC_PUBKEY | AFC_SEGWIT | AFC_BECH32M;
+        /// Legacy P2SH address format.
         pub const AF_P2SH: u32 = AFC_SCRIPT;
+        /// Native SegWit P2WSH address format.
         pub const AF_P2WSH: u32 = AFC_SCRIPT | AFC_SEGWIT | AFC_BECH32;
+        /// Wrapped SegWit P2SH-P2WSH address format.
         pub const AF_P2WSH_P2SH: u32 = AFC_SCRIPT | AFC_SEGWIT | AFC_WRAPPED;
 
+        /// Maps a Bitcoin address type, treating P2SH as wrapped P2WPKH.
+        ///
+        /// Unrecognized types use P2WPKH.
         pub fn from_address_type(addr_type: bitcoin::address::AddressType) -> u32 {
             match addr_type {
                 bitcoin::address::AddressType::P2pkh => AF_P2PKH,
@@ -52,6 +75,7 @@ pub mod request {
         }
     }
 
+    /// Encodes an address-display request for a path and address-format bitmask.
     pub fn show_address(path: &DerivationPath, addr_fmt: u32) -> Vec<u8> {
         let mut data = b"show".to_vec();
         data.extend(addr_fmt.to_le_bytes());
@@ -59,6 +83,9 @@ pub mod request {
         data
     }
 
+    /// Encodes a multisig address request with key origins and a concrete redeem script.
+    ///
+    /// Counts and lengths are cast to their wire widths without range validation.
     pub fn show_p2sh_address(
         threshold: u8,
         key_paths: &[(Fingerprint, DerivationPath)],
@@ -91,6 +118,7 @@ pub mod request {
         u32::from(child)
     }
 
+    /// Encodes a registered-descriptor address request for a branch and index.
     pub fn miniscript_address(name: &str, change: bool, index: u32) -> Vec<u8> {
         let mut data = b"msas".to_vec();
         data.extend((change as u32).to_le_bytes());
@@ -99,6 +127,7 @@ pub mod request {
         data
     }
 
+    /// Encodes message signing using the P2WPKH format.
     pub fn sign_message(message: &[u8], path: &DerivationPath) -> Vec<u8> {
         let mut data = b"smsg".to_vec();
         // coldcard can support a few different address types:
@@ -112,10 +141,16 @@ pub mod request {
         data
     }
 
+    /// Encodes a poll for the current message-signing result.
     pub fn get_signed_message() -> Vec<u8> {
         b"smok".to_vec()
     }
 
+    /// Encodes a file upload chunk with byte offset and total byte size.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data` exceeds [`MAX_UPLOAD_CHUNK_LEN`] (2048 bytes).
     pub fn upload(offset: u32, total_size: u32, data: &[u8]) -> Vec<u8> {
         assert!(data.len() <= MAX_UPLOAD_CHUNK_LEN);
         let mut rv = b"upld".to_vec();
@@ -125,10 +160,12 @@ pub mod request {
         rv
     }
 
+    /// Encodes a request for the SHA-256 digest of the uploaded file.
     pub fn sha256() -> Vec<u8> {
         b"sha2".to_vec()
     }
 
+    /// Encodes signing of an uploaded PSBT identified by byte length and SHA-256 digest.
     pub fn sign_transaction(length: u32, file_sha: &[u8; 32]) -> Vec<u8> {
         let mut rv = b"stxn".to_vec();
         rv.extend(length.to_le_bytes());
@@ -137,6 +174,7 @@ pub mod request {
         rv
     }
 
+    /// Encodes wallet enrollment using the uploaded file's byte length and SHA-256 digest.
     pub fn multisig_enroll(length: u32, file_sha: &[u8; 32]) -> Vec<u8> {
         let mut data = b"enrl".to_vec();
         data.extend(length.to_le_bytes());
@@ -144,14 +182,17 @@ pub mod request {
         data
     }
 
+    /// Encodes a poll for the current transaction-signing result.
     pub fn get_signed_transaction() -> Vec<u8> {
         b"stok".to_vec()
     }
 
+    /// Encodes a poll for the current backup file.
     pub fn get_backup_file() -> Vec<u8> {
         b"bkok".to_vec()
     }
 
+    /// Encodes a file download request with byte offset, byte length, and file number.
     pub fn download(offset: u32, length: u32, file_number: u32) -> Vec<u8> {
         let mut rv = b"dwld".to_vec();
         rv.extend(offset.to_le_bytes());
@@ -160,6 +201,7 @@ pub mod request {
         rv
     }
 
+    /// Encodes a firmware-version request.
     pub fn get_version() -> Vec<u8> {
         b"vers".to_vec()
     }
@@ -302,6 +344,7 @@ mod tests {
     }
 }
 
+/// Parsers for Coldcard response tags and payloads.
 pub mod response {
     use std::fmt::Display;
     use std::str::FromStr;
@@ -311,43 +354,47 @@ pub mod response {
 
     use crate::coldcard::{ColdcardError, ColdcardResponse};
 
+    /// Completion status of a transaction-signing poll.
     pub enum SignedTransactionStatus {
+        /// The device has not returned the signed file yet.
         Pending,
-        Complete { length: u32, sha: [u8; 32] },
+        /// The signed file is ready to download.
+        Complete {
+            /// File size in bytes.
+            length: u32,
+            /// SHA-256 digest of the file.
+            sha: [u8; 32],
+        },
     }
 
+    /// Four-byte Coldcard response tags.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ResponseMessage {
-        /// No content, successful response
+        /// Successful acknowledgement without content.
         Okay,
-        /// Frame error
+        /// Framing error.
         Fram,
-        /// Device error
+        /// Device error.
         Err_,
-        /// User refused to approve
+        /// User refusal.
         Refu,
-        /// User didn't approve something yet
+        /// Pending user approval or completion.
         Busy,
-        /// Binary string response
+        /// Binary response payload.
         Biny,
-        /// u32
+        /// One little-endian `u32`.
         Int1,
-        /// 2 u32's
+        /// Two little-endian `u32` values.
         Int2,
-        /// 3 u32's
+        /// Three little-endian `u32` values.
         Int3,
-        /// Response to "ncry"
-        /// response to "ncry" command:
-        /// - the (uncompressed) pubkey of the Coldcard
-        /// - info about master key: xpub, fingerprint of that
-        /// - anti-MitM: remote xpub
-        ///   session key is SHA256(point on sec256pk1 in binary) via D-H
+        /// Key-agreement public key and wallet identity response.
         MyPb,
-        /// Hex or Base58 ascii string
+        /// ASCII string response.
         Asci,
-        /// Message signing result
+        /// Message-signing result.
         Smrx,
-        /// Transaction signing result
+        /// Transaction-signing result.
         Strx,
     }
 
@@ -435,6 +482,7 @@ pub mod response {
         Xpub::from_str(s).map_err(|e| ColdcardError::Serialization(e.to_string()))
     }
 
+    /// Parses an address response or a device refusal or error.
     pub fn show_address(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         match ResponseHandler::parse_response(res)? {
             (ResponseMessage::Asci, data) => {
@@ -452,6 +500,7 @@ pub mod response {
         }
     }
 
+    /// Parses a registered-descriptor address response or device error.
     pub fn miniscript_address(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         match ResponseHandler::parse_response(res)? {
             (ResponseMessage::Asci, data) => {
@@ -469,27 +518,32 @@ pub mod response {
         }
     }
 
+    /// Parses a master xpub response and returns its fingerprint.
     pub fn master_fingerprint(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         Ok(ColdcardResponse::MasterFingerprint(
             xpub(res)?.fingerprint(),
         ))
     }
 
+    /// Parses an extended public key response.
     pub fn get_xpub(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         Ok(ColdcardResponse::Xpub(xpub(res)?))
     }
 
+    /// Parses the acknowledged upload byte offset.
     pub fn upload(res: &[u8]) -> Result<u32, ColdcardError> {
         let data = ResponseHandler::expect_response(res, ResponseMessage::Int1)?;
         decode_u32(Some(data))
     }
 
+    /// Parses a 32-byte SHA-256 digest response.
     pub fn sha256(res: &[u8]) -> Result<[u8; 32], ColdcardError> {
         let data = ResponseHandler::expect_response(res, ResponseMessage::Biny)?;
         data.try_into()
             .map_err(|_| ColdcardError::Serialization("sha256".to_string()))
     }
 
+    /// Parses the acknowledgement or pending status of a signing request.
     pub fn sign_transaction(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         match ResponseHandler::parse_response(res)? {
             (ResponseMessage::Okay, _) => Ok(ColdcardResponse::Ok),
@@ -505,10 +559,12 @@ pub mod response {
         }
     }
 
+    /// Requires a successful acknowledgement response.
     pub fn okay(res: &[u8]) -> Result<(), ColdcardError> {
         ResponseHandler::expect_response(res, ResponseMessage::Okay).map(|_| ())
     }
 
+    /// Parses a transaction-signing poll into pending status or downloadable file metadata.
     pub fn signed_transaction(res: &[u8]) -> Result<SignedTransactionStatus, ColdcardError> {
         match ResponseHandler::parse_response(res)? {
             (ResponseMessage::Okay, _) | (ResponseMessage::Busy, _) => {
@@ -540,10 +596,12 @@ pub mod response {
         }
     }
 
+    /// Parses binary file-download bytes.
     pub fn download(res: &[u8]) -> Result<Vec<u8>, ColdcardError> {
         Ok(ResponseHandler::expect_response(res, ResponseMessage::Biny)?.to_vec())
     }
 
+    /// Parses firmware-version text into a version and model string.
     pub fn version(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         let data = ResponseHandler::expect_response(res, ResponseMessage::Asci)?;
         let version_string =
@@ -557,6 +615,7 @@ pub mod response {
         })
     }
 
+    /// Parses the device's key-agreement public key and optional master xpub.
     pub fn mypub(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         let data = ResponseHandler::expect_response(res, ResponseMessage::MyPb)?;
         let (dev_pubkey, data) = split(data, 64)?;
@@ -592,6 +651,12 @@ pub mod response {
         })
     }
 
+    /// Parses a message-signing acknowledgement, pending status, or compact signature.
+    ///
+    /// # Panics
+    ///
+    /// Panics for a signing-result payload shorter than its four-byte address
+    /// length, or containing no signature header after the address.
     pub fn sign_message(res: &[u8]) -> Result<ColdcardResponse, ColdcardError> {
         match ResponseHandler::parse_response(res)? {
             (ResponseMessage::Okay, _) => Ok(ColdcardResponse::Ok),

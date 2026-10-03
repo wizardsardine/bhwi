@@ -1,20 +1,35 @@
+//! Native discovery and transport errors.
+
 use crate::DeviceType;
 
+/// A result from native device discovery or opening.
 pub type NativeResult<T> = Result<T, NativeError>;
 
+/// A failure while discovering, opening, or probing a native device.
 #[derive(Debug, thiserror::Error)]
 pub enum NativeError {
+    /// Support for the requested device type is disabled in this build.
     #[error("{0} support is not compiled into this build")]
-    NotCompiled(DeviceType),
+    NotCompiled(
+        /// The requested device type.
+        DeviceType,
+    ),
 
-    /// A `DeviceId` field the enumerator needs was left unset.
+    /// A device-identifier constant required by discovery is unset.
     #[error("{0}")]
-    MissingDeviceId(&'static str),
+    MissingDeviceId(
+        /// A description of the missing identifier.
+        &'static str,
+    ),
 
     /// Listed on the bus, but no longer there when it was opened.
     #[error("{0} is no longer connected")]
-    Gone(String),
+    Gone(
+        /// The discovery path that could not be found.
+        String,
+    ),
 
+    /// Native HID enumeration or opening failed.
     #[cfg(any(
         feature = "bitbox",
         feature = "coldcard",
@@ -23,19 +38,39 @@ pub enum NativeError {
         feature = "trezor"
     ))]
     #[error("hid enumeration failed: {0}")]
-    Hid(#[from] async_hid::HidError),
+    Hid(
+        /// The underlying HID error.
+        #[from]
+        async_hid::HidError,
+    ),
 
+    /// A native channel or filesystem operation failed.
     #[error("{0}")]
-    Io(#[from] std::io::Error),
+    Io(
+        /// The underlying I/O error.
+        #[from]
+        std::io::Error,
+    ),
 
+    /// Native USB enumeration failed.
     #[cfg(any(feature = "keepkey", feature = "trezor"))]
     #[error("usb enumeration failed: {0}")]
-    Usb(#[from] nusb::Error),
+    Usb(
+        /// The underlying `nusb` error.
+        #[from]
+        nusb::Error,
+    ),
 
+    /// Serial-port enumeration or opening failed.
     #[cfg(any(feature = "jade", feature = "specter"))]
     #[error("serial port enumeration failed: {0}")]
-    Serial(#[from] tokio_serial::Error),
+    Serial(
+        /// The underlying serial-port error.
+        #[from]
+        tokio_serial::Error,
+    ),
 
+    /// Linux serial enumeration cannot access `/sys/class/tty`.
     #[cfg(any(feature = "jade", feature = "specter"))]
     #[error("serial port enumeration unavailable: /sys/class/tty is missing")]
     SerialSysfsMissing,
@@ -44,7 +79,9 @@ pub enum NativeError {
     #[cfg(feature = "specter")]
     #[error("probing {device_type}: {source}")]
     Probe {
+        /// The device type expected on the opened channel.
         device_type: DeviceType,
+        /// The failed protocol probe.
         source: bhwi_async::HWIDeviceError,
     },
 }

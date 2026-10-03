@@ -1,3 +1,5 @@
+//! Browser WebSerial connections for Jade and Specter-DIY.
+
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -16,6 +18,11 @@ use web_sys::{ReadableStreamDefaultReader, SerialPort};
 
 use crate::WasmError;
 
+/// An open browser serial port with a close callback.
+///
+/// The `SpecterStream` implementation uses deadlines and preserves unread
+/// bytes between calls; the public [`read`](Self::read) method instead collects
+/// chunks with idle windows.
 #[wasm_bindgen]
 pub struct WebSerialDevice {
     port: SerialPort,
@@ -25,6 +32,18 @@ pub struct WebSerialDevice {
 
 #[wasm_bindgen]
 impl WebSerialDevice {
+    /// Requests permission for a serial port and opens it at `baud_rate` bits per second.
+    ///
+    /// Requires a browser `Window` with WebSerial support and permission to show
+    /// the port chooser, normally from a user gesture in a secure context.
+    /// Returns `None` without a window, on cancellation, or if opening fails.
+    /// A function-valued `on_close_cb` is called with no arguments on serial
+    /// disconnect events, without filtering for this port.
+    ///
+    /// # Panics
+    ///
+    /// Panics if browser values have unexpected types or event listeners cannot
+    /// be installed. A throwing disconnect callback also causes a panic.
     pub async fn get_webserial_device(
         baud_rate: u32,
         on_close_cb: JsValue,
@@ -81,6 +100,16 @@ impl WebSerialDevice {
         })
     }
 
+    /// Waits indefinitely for a first chunk, then collects chunks in 500 ms windows.
+    ///
+    /// Once bytes have arrived, an idle window ends collection. An invalid
+    /// chunk or a later read failure returns the bytes collected so far,
+    /// possibly empty; a failure of the first read returns `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the readable stream has no usable default reader or browser
+    /// timers cannot be created.
     #[wasm_bindgen]
     pub async fn read(&self) -> Option<Vec<u8>> {
         let reader = self.port.readable().get_reader();
@@ -177,6 +206,11 @@ impl WebSerialDevice {
         Some(res)
     }
 
+    /// Writes `data` to the serial port and returns browser write failures.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the writable stream cannot provide a writer.
     #[wasm_bindgen]
     pub async fn write(&self, data: &[u8]) -> Result<(), JsValue> {
         let writable = self.port.writable();
@@ -188,6 +222,9 @@ impl WebSerialDevice {
         Ok(())
     }
 
+    /// Schedules closing the port and calling a function-valued close callback.
+    ///
+    /// Returns before closing finishes; close and callback failures are ignored.
     #[wasm_bindgen]
     pub fn close(&mut self) {
         let close_future = JsFuture::from(self.port.close());

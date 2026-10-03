@@ -19,17 +19,29 @@ use crate::{
     device::{Device, DeviceType, supports_multisig_display_address},
 };
 
+/// Missing policy information for a backend's address-display context.
 #[derive(Debug, thiserror::Error)]
 pub enum DisplayAddressContextError {
+    /// The backend requires a policy descriptor.
     #[error("{0} needs the wallet policy descriptor of the registered wallet")]
-    MissingPolicy(DeviceType),
+    MissingPolicy(
+        /// The device family requiring the policy.
+        DeviceType,
+    ),
 
+    /// The backend requires both a policy descriptor and a registration HMAC.
     #[error("{0} needs both the wallet policy descriptor and its registration hmac")]
-    IncompletePolicy(DeviceType),
+    IncompletePolicy(
+        /// The device family requiring both values.
+        DeviceType,
+    ),
 }
 
-/// BitBox02 and Specter-DIY need the policy descriptor every time, Ledger needs
-/// it with its registration hmac, and the rest resolve the name on the device.
+/// Prepares backend-specific context for displaying a registered wallet address.
+///
+/// Enabled BitBox02 and Specter-DIY backends require a policy. Ledger accepts
+/// both policy and HMAC or neither; supplying only one is an error. Other
+/// families return no context. This function does not display an address.
 pub fn display_address_context(
     device_type: DeviceType,
     name: &str,
@@ -60,46 +72,96 @@ pub fn display_address_context(
     }
 }
 
+/// A descriptor could not be converted into an address-display request.
 #[derive(Debug, thiserror::Error)]
 pub enum DisplayAddressError {
+    /// The descriptor's script or key expression is unsupported.
     #[error("Unsupported displayaddress descriptor: {0}")]
-    UnsupportedDescriptor(String),
+    UnsupportedDescriptor(
+        /// The unsupported descriptor text.
+        String,
+    ),
 
+    /// A single-key descriptor lacks key-origin information.
     #[error("Descriptor missing origin info: {0}")]
-    MissingOrigin(String),
+    MissingOrigin(
+        /// The descriptor lacking an origin.
+        String,
+    ),
 
+    /// The descriptor's origin fingerprint differs from the selected wallet.
     #[error("Descriptor fingerprint does not match device: {0}")]
-    FingerprintMismatch(String),
+    FingerprintMismatch(
+        /// The mismatching descriptor.
+        String,
+    ),
 
+    /// The descriptor key differs from the wallet key at its origin path.
     #[error("Key in descriptor does not match device: {0}")]
-    KeyMismatch(String),
+    KeyMismatch(
+        /// The mismatching descriptor.
+        String,
+    ),
 
+    /// A key string contains a character outside the Base58 alphabet.
     #[error("Character '{0}' is not a valid base58 character")]
-    InvalidBase58Character(char),
+    InvalidBase58Character(
+        /// The invalid character.
+        char,
+    ),
 
+    /// The multisig threshold or key list is invalid.
     #[error(
         "Either the redeem script provided is invalid or the keypaths provided are insufficient"
     )]
     InvalidMultisig,
 
+    /// A derivation path or extended public key could not be parsed.
     #[error(transparent)]
-    Bip32(#[from] bip32::Error),
+    Bip32(
+        /// The BIP32 parsing error.
+        #[from]
+        bip32::Error,
+    ),
 
+    /// A key-origin fingerprint could not be parsed.
     #[error(transparent)]
-    Fingerprint(#[from] hex::HexToArrayError),
+    Fingerprint(
+        /// The hexadecimal parsing error.
+        #[from]
+        hex::HexToArrayError,
+    ),
 
+    /// A multisig descriptor key could not be parsed.
     #[error(transparent)]
-    Key(#[from] DescriptorKeyParseError),
+    Key(
+        /// The descriptor-key parsing error.
+        #[from]
+        DescriptorKeyParseError,
+    ),
 
+    /// A multisig threshold could not be parsed as an integer.
     #[error(transparent)]
-    Threshold(#[from] std::num::ParseIntError),
+    Threshold(
+        /// The integer parsing error.
+        #[from]
+        std::num::ParseIntError,
+    ),
 
+    /// A wallet query failed during request preparation.
     #[error(transparent)]
-    Device(#[from] HWIDeviceError),
+    Device(
+        /// The wallet-operation error.
+        #[from]
+        HWIDeviceError,
+    ),
 }
 
-/// Singlesig first, then multisig on devices that take one at display time.
-/// When neither parses, the singlesig error is the one reported.
+/// Prepares an address-display request, trying singlesig before supported multisig.
+///
+/// This may query the wallet's fingerprint and keys, but does not display the
+/// address. When neither conversion succeeds, the singlesig error is reported.
+/// A trailing checksum is stripped without being validated.
 pub async fn display_address_from_descriptor(
     device: &mut Device,
     descriptor: &str,
@@ -119,6 +181,11 @@ pub async fn display_address_from_descriptor(
     }
 }
 
+/// Prepares a concrete single-key address-display request after checking wallet ownership.
+///
+/// Queries the fingerprint and origin key. Supports P2PKH, P2WPKH,
+/// P2SH-P2WPKH, and key-path Taproot; wildcard suffixes are not accepted.
+/// A trailing checksum is stripped without being validated.
 pub async fn singlesig_display_address_from_descriptor(
     device: &mut Device,
     descriptor: &str,
@@ -223,6 +290,11 @@ fn invalid_base58_character(value: &str) -> Option<char> {
     value.chars().find(|ch| !BASE58_ALPHABET.contains(*ch))
 }
 
+/// Parses a multisig descriptor into a request without contacting a device.
+///
+/// Supports `multi` and `sortedmulti` inside P2SH, P2WSH, or P2SH-P2WSH.
+/// Checks the threshold against the key count, but does not check wallet
+/// ownership. A trailing checksum is stripped without being validated.
 pub fn multisig_display_address_from_descriptor(
     descriptor: &str,
 ) -> Result<MultisigDisplayAddress, DisplayAddressError> {

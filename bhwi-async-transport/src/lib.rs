@@ -1,3 +1,12 @@
+//! Native discovery and I/O for asynchronous hardware-wallet sessions.
+//!
+//! [`NativeSource`] discovers device types enabled by Cargo features, using HID,
+//! serial ports, native USB, and optional emulator probes. Compiled support does
+//! not imply that a device is attached or accessible. The `webusb` backend uses
+//! `nusb`, not the browser WebUSB API.
+//!
+//! Shared discovery types and [`Info`] are reexported from [`bhwi_async`].
+
 use async_trait::async_trait;
 use futures::future::join_all;
 
@@ -20,7 +29,6 @@ use crate::trezor::TrezorDevice;
 pub mod bitbox;
 #[cfg(feature = "coldcard")]
 pub mod coldcard;
-/// The Trezor V1 emulator framing, shared with every device that reuses it.
 #[cfg(any(feature = "keepkey", feature = "trezor"))]
 pub mod emulator;
 pub mod error;
@@ -44,7 +52,6 @@ mod serial;
 pub mod specter;
 #[cfg(feature = "trezor")]
 pub mod trezor;
-/// udev rules grant device-node access on Linux; no other host has them.
 #[cfg(target_os = "linux")]
 pub mod udev;
 #[cfg(any(feature = "keepkey", feature = "trezor"))]
@@ -59,19 +66,29 @@ pub use bhwi_async::device::{
 };
 pub use error::{NativeError, NativeResult};
 
+/// A native device-discovery source with optional broad-scan exclusions.
+///
+/// The default scans all compiled device types. Exclusions apply only when
+/// [`DeviceSelector::device_type`] is unset; explicitly naming a type still
+/// selects it. Listing can probe emulators when requested by the selector.
+/// If any candidates are found, listing ignores failures from other device
+/// types; otherwise it returns the first discovery error, if any.
 #[derive(Default)]
 pub struct NativeSource {
     excluded: Vec<DeviceType>,
 }
 
 impl NativeSource {
-    /// Leaves these out of a walk over every device; naming one still reaches it.
+    /// Creates a source that omits `excluded` types from broad discovery.
     pub fn excluding(excluded: impl IntoIterator<Item = DeviceType>) -> Self {
         Self {
             excluded: excluded.into_iter().collect(),
         }
     }
 
+    /// Returns whether support for `device_type` was compiled into this build.
+    ///
+    /// This does not check for attached devices, permissions, or usable wallets.
     pub fn is_supported(device_type: DeviceType) -> bool {
         match device_type {
             DeviceType::BitBox02 => cfg!(feature = "bitbox"),
@@ -202,11 +219,24 @@ pub(crate) fn uses_backend(selected_path: Option<&str>, prefix: &str) -> bool {
     selected_path.is_none_or(|path| path.starts_with(prefix))
 }
 
+/// Native discovery and opening for one device type.
+///
+/// Futures need not be `Send`. Implementations may use different native I/O
+/// backends and emulator probes.
 #[async_trait(?Send)]
 pub trait DeviceEnumerator {
-    /// Reads the bus without opening a device; an emulator is probed instead.
+    /// Lists candidates matching the selector without opening hardware devices.
+    ///
+    /// Emulator discovery may connect or send a probe; a listed candidate is not
+    /// guaranteed to remain available or contain the requested wallet.
     async fn list(selector: &DeviceSelector) -> NativeResult<Vec<DeviceCandidate>>;
 
+    /// Opens a candidate using the selector's device-specific session options.
+    ///
+    /// Opening may perform protocol I/O, such as a Specter fingerprint probe.
+    /// Pairing and host-interaction callbacks are used only by backends that
+    /// support them. Opening does not generally unlock the device or verify the
+    /// selector's fingerprint.
     async fn open(
         candidate: &DeviceCandidate,
         selector: &DeviceSelector,

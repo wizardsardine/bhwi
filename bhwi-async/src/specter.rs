@@ -14,15 +14,18 @@ use bhwi::{
 /// Specter-DIY selects its active network on-device. The network here is used
 /// to validate responses whose encoding carries network information.
 pub struct Specter<T> {
+    /// The transport used for device exchanges.
     pub transport: T,
     network: Network,
 }
 
 impl<T> Specter<T> {
+    /// Creates a client using `network` to validate network-bearing responses.
     pub fn new(network: Network, transport: T) -> Self {
         Self { transport, network }
     }
 
+    /// Sets the expected network without changing the device's on-device selection.
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = network;
         self

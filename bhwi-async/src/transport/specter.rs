@@ -20,12 +20,19 @@ pub const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Stream outcomes that callers must distinguish from ordinary I/O failures.
 #[derive(Debug, thiserror::Error)]
 pub enum SpecterStreamError<E: Debug> {
+    /// The stream reported an I/O failure.
     #[error("stream I/O failed: {0:?}")]
-    Io(E),
+    Io(
+        /// The underlying stream error.
+        E,
+    ),
+    /// The read deadline elapsed.
     #[error("Specter request timed out")]
     Timeout,
+    /// The stream disconnected before completion.
     #[error("Specter stream disconnected")]
     Disconnected,
+    /// The caller or runtime cancelled the operation.
     #[error("Specter request was cancelled")]
     Cancelled,
 }
@@ -36,11 +43,16 @@ pub enum SpecterStreamError<E: Debug> {
 /// elapses, return `Disconnected` for EOF, and return `Cancelled` when their
 /// runtime or caller cancels the pending operation. This keeps runtime policy
 /// outside `bhwi-async` while ensuring confirmation waits are bounded.
+///
+/// Futures need not be `Send`; implementations choose their I/O runtime.
 #[async_trait(?Send)]
 pub trait SpecterStream {
+    /// The underlying stream's I/O error type.
     type Error: Debug;
 
+    /// Writes the complete request or reports a stream failure.
     async fn write_all(&mut self, request: &[u8]) -> Result<(), SpecterStreamError<Self::Error>>;
+    /// Reads bytes before `deadline`, reporting timeout, disconnect, or cancellation.
     async fn read_until(
         &mut self,
         buffer: &mut [u8],
@@ -48,20 +60,35 @@ pub trait SpecterStream {
     ) -> Result<usize, SpecterStreamError<Self::Error>>;
 }
 
+/// A Specter-DIY stream, response-framing, or exchange-lifecycle failure.
 #[derive(Debug, thiserror::Error)]
 pub enum SpecterTransportError<E: Debug> {
+    /// The stream reported an I/O failure.
     #[error("Specter stream I/O failed: {0:?}")]
-    Io(E),
+    Io(
+        /// The underlying stream error.
+        E,
+    ),
+    /// The confirmation deadline elapsed.
     #[error("Specter request timed out")]
     Timeout,
+    /// The stream disconnected before a complete response.
     #[error("Specter stream disconnected")]
     Disconnected,
+    /// The caller or runtime cancelled the exchange.
     #[error("Specter request was cancelled")]
     Cancelled,
+    /// The response did not follow the Specter-DIY framing protocol.
     #[error("invalid Specter response framing: {0}")]
-    Protocol(#[source] SpecterError),
+    Protocol(
+        /// The response-decoding error.
+        #[source]
+        SpecterError,
+    ),
+    /// The response exceeded the protocol's frame-size limit.
     #[error("Specter response is too large")]
     ResponseTooLarge,
+    /// An earlier incomplete exchange left the transport unusable.
     #[error("Specter transport is unusable after an incomplete exchange")]
     Poisoned,
 }
@@ -97,6 +124,7 @@ enum ExchangeState {
 }
 
 impl<S> SpecterTransport<S> {
+    /// Creates a ready transport using [`DEFAULT_CONFIRMATION_TIMEOUT`].
     pub fn new(stream: S) -> Self {
         Self {
             stream,
@@ -105,11 +133,15 @@ impl<S> SpecterTransport<S> {
         }
     }
 
+    /// Sets the response-confirmation timeout measured after the request is written.
+    ///
+    /// A later exchange can panic if adding `timeout` to the current instant overflows.
     pub fn with_confirmation_timeout(mut self, timeout: Duration) -> Self {
         self.confirmation_timeout = timeout;
         self
     }
 
+    /// Returns the stream, without draining stale responses from an incomplete exchange.
     pub fn into_inner(self) -> S {
         self.stream
     }

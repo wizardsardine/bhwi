@@ -1,3 +1,5 @@
+//! Noise XX pairing and encrypted BitBox02 session state.
+//!
 // Ported from bitbox-api-rs (`src/noise.rs` and the handshake driver in `src/lib.rs`),
 // Copyright 2023-2025 Shift Crypto AG. Licensed under the Apache License,
 // Version 2.0 — see BITBOX_LICENSE at the repository root.
@@ -11,7 +13,9 @@ type Cipher = noise_rust_crypto::ChaCha20Poly1305;
 type X25519 = noise_rust_crypto::X25519;
 type Sha256 = noise_rust_crypto::Sha256;
 
+/// A Noise XX handshake using X25519, ChaCha20-Poly1305, and SHA-256.
 pub type HandshakeState = NoiseHandshakeState<X25519, Cipher, Sha256>;
+/// A directional Noise transport cipher.
 pub type CipherState = noise_protocol::CipherState<Cipher>;
 
 /// Persistable noise-pairing data.
@@ -21,17 +25,21 @@ pub type CipherState = noise_protocol::CipherState<Cipher>;
 /// in the list can skip the on-screen pairing-code verification.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct NoiseConfigData {
+    /// Cached host static private key, generated on demand when absent.
     pub app_static_privkey: Option<[u8; 32]>,
+    /// Static public keys of devices whose pairing was confirmed.
     pub device_static_pubkeys: Vec<Vec<u8>>,
 }
 
 impl NoiseConfigData {
+    /// Returns whether a device public key is already trusted.
     pub fn contains_device_static_pubkey(&self, pubkey: &[u8]) -> bool {
         self.device_static_pubkeys
             .iter()
             .any(|p| p.as_slice() == pubkey)
     }
 
+    /// Adds a trusted device public key unless it is already present.
     pub fn add_device_static_pubkey(&mut self, pubkey: &[u8]) {
         if !self.contains_device_static_pubkey(pubkey) {
             self.device_static_pubkeys.push(pubkey.to_vec());
@@ -39,12 +47,12 @@ impl NoiseConfigData {
     }
 }
 
-/// Called synchronously by the interpreter the moment the pairing code becomes available
-/// (right before emitting `OP_I_CAN_HAS_PAIRIN_VERIFICASHUN`). The caller is expected to
-/// display the code so the user can confirm it on the device screen.
+/// A synchronous callback for displaying a newly available pairing code.
+///
+/// Invoked before the interpreter requests pairing confirmation on the device.
 pub type PairingCodeHook = Box<dyn FnMut(&str)>;
 
-/// Persistent noise state held by the async wrapper across calls.
+/// Noise session state retained by callers across interpreter operations.
 pub struct NoiseState {
     inner: NoiseInner,
     pairing_code_hook: Option<PairingCodeHook>,
@@ -65,6 +73,7 @@ enum NoiseInner {
 }
 
 impl NoiseState {
+    /// Creates an unpaired session using cached pairing data, or empty data when absent.
     pub fn new(data: Option<NoiseConfigData>) -> Self {
         NoiseState {
             inner: NoiseInner::Idle {
@@ -74,9 +83,10 @@ impl NoiseState {
         }
     }
 
-    /// Install a hook that fires the moment the pairing code becomes available during a
-    /// first-time pair. The hook runs synchronously inside `Interpreter::exchange`, so it
-    /// must be non-blocking (e.g. `eprintln!` / `log::info!` / a channel send).
+    /// Installs a callback invoked when a new pairing code becomes available.
+    ///
+    /// The callback runs synchronously inside interpreter exchange and must
+    /// not block progress of the protocol.
     pub fn set_pairing_code_hook(&mut self, hook: PairingCodeHook) {
         self.pairing_code_hook = Some(hook);
     }
@@ -88,6 +98,7 @@ impl NoiseState {
         }
     }
 
+    /// Returns the pairing data that the caller may persist.
     pub fn data(&self) -> &NoiseConfigData {
         match &self.inner {
             NoiseInner::Idle { data } => data,
@@ -95,6 +106,7 @@ impl NoiseState {
         }
     }
 
+    /// Returns the pairing code retained by the paired session, if any.
     pub fn pairing_code(&self) -> Option<&str> {
         match &self.inner {
             NoiseInner::Paired { pairing_code, .. } => pairing_code.as_deref(),
@@ -102,15 +114,15 @@ impl NoiseState {
         }
     }
 
+    /// Returns whether transport cipher states have been installed.
     pub fn is_paired(&self) -> bool {
         matches!(self.inner, NoiseInner::Paired { .. })
     }
 
-    /// Start a fresh XX handshake as the initiator. Returns the initial handshake payload
-    /// (without the OP framing byte) and the mutable handshake state.
+    /// Starts a Noise XX handshake and returns its state and initial unframed payload.
     ///
-    /// Also mutates `self` if a new host static key had to be generated so the caller can
-    /// persist the updated `NoiseConfigData` afterwards.
+    /// Generates and caches a host static key when absent, so the caller can
+    /// persist the updated pairing data.
     pub fn start_handshake(&mut self) -> Result<(HandshakeState, Vec<u8>), BitBoxError> {
         let data = match &mut self.inner {
             NoiseInner::Idle { data } => data,
@@ -141,7 +153,7 @@ impl NoiseState {
         Ok((host, msg))
     }
 
-    /// Feed the device's first handshake reply and produce the host's second message.
+    /// Reads the device's handshake message and produces the host's final handshake message.
     pub fn handshake_read_write(
         host: &mut HandshakeState,
         bb02_msg: &[u8],
@@ -152,8 +164,9 @@ impl NoiseState {
             .map_err(|_| BitBoxError::Noise("write handshake 2"))
     }
 
-    /// Consume the device's second reply. Returns whether device-side pairing verification
-    /// is required (byte 0x01), and the raw remote static public key.
+    /// Returns the device's pairing-verification flag and remote static public key.
+    ///
+    /// The flag is true only when the acknowledgement bytes equal `[0x01]`.
     pub fn handshake_finalize(
         host: &mut HandshakeState,
         bb02_msg: &[u8],
@@ -165,7 +178,13 @@ impl NoiseState {
         Ok((device_wants_verify, remote_static.to_vec()))
     }
 
-    /// Compute the base32-formatted pairing code shown to the user (20 characters + separators).
+    /// Formats the first 20 base32 characters of the handshake hash as a pairing code.
+    ///
+    /// Expects a 32-byte Noise handshake hash.
+    ///
+    /// # Panics
+    ///
+    /// Panics if padded base32 encoding produces fewer than 20 characters.
     pub fn pairing_code_from_hash(hash: &[u8]) -> String {
         let encoded = base32_rfc4648(hash);
         format!(
@@ -177,7 +196,9 @@ impl NoiseState {
         )
     }
 
-    /// Transition to the Paired state.
+    /// Installs transport ciphers from a completed handshake.
+    ///
+    /// The caller must finish the handshake before calling this method.
     pub fn finalize(
         &mut self,
         host: HandshakeState,
@@ -197,7 +218,7 @@ impl NoiseState {
         Ok(())
     }
 
-    /// Persist a newly-verified device pubkey into the cached config.
+    /// Adds a caller-confirmed device public key to the cached pairing data.
     pub fn confirm_pairing(&mut self, device_pubkey: &[u8]) -> Result<(), BitBoxError> {
         let data = match &mut self.inner {
             NoiseInner::Idle { data } => data,
@@ -207,6 +228,7 @@ impl NoiseState {
         Ok(())
     }
 
+    /// Encrypts a message and advances the send cipher, or errors when unpaired.
     pub fn encrypt(&mut self, msg: &[u8]) -> Result<Vec<u8>, BitBoxError> {
         match &mut self.inner {
             NoiseInner::Paired { send, .. } => Ok(send.encrypt_vec(msg)),
@@ -214,6 +236,7 @@ impl NoiseState {
         }
     }
 
+    /// Authenticates and decrypts a message, or errors when unpaired or authentication fails.
     pub fn decrypt(&mut self, msg: &[u8]) -> Result<Vec<u8>, BitBoxError> {
         match &mut self.inner {
             NoiseInner::Paired { recv, .. } => recv

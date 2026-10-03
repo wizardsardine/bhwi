@@ -1,3 +1,5 @@
+//! Host-nonce commitments and BitBox02 anti-klepto verification.
+//!
 // Ported from bitbox-api-rs (`src/antiklepto.rs`),
 // Copyright 2023-2025 Shift Crypto AG. Licensed under the Apache License,
 // Version 2.0 — see BITBOX_LICENSE at the repository root.
@@ -19,6 +21,7 @@ fn tagged_sha256(tag: &[u8], msg: &[u8]) -> [u8; 32] {
     sha256::Hash::from_engine(engine).to_byte_array()
 }
 
+/// Generates a 32-byte host nonce from the operating system's random source.
 pub fn gen_host_nonce() -> Result<[u8; 32], BitBoxError> {
     let mut result = [0u8; 32];
     getrandom::getrandom(&mut result)
@@ -26,13 +29,20 @@ pub fn gen_host_nonce() -> Result<[u8; 32], BitBoxError> {
     Ok(result)
 }
 
+/// Returns the tagged SHA-256 commitment to a host nonce.
 pub fn host_commit(host_nonce: &[u8]) -> [u8; 32] {
     tagged_sha256(b"s2c/ecdsa/data", host_nonce)
 }
 
-/// Verify that `host_nonce` was used to tweak the nonce during signature generation:
-/// `k' = k + H(clientCommitment, hostNonce)`, i.e.
-/// `k'*G = signerCommitment + H(signerCommitment, hostNonce)*G`.
+/// Checks that the host nonce contributed to the ECDSA signature's nonce.
+///
+/// `signer_commitment` is a serialized secp256k1 public key; `signature` begins
+/// with the 32-byte compact ECDSA `r` value. This is not general ECDSA signature
+/// verification and does not check a message hash or signing public key.
+///
+/// # Panics
+///
+/// Panics if `signature` contains fewer than 32 bytes after the commitment is parsed.
 pub fn verify_ecdsa(
     host_nonce: &[u8],
     signer_commitment: &[u8],

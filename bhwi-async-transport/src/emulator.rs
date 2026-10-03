@@ -1,4 +1,4 @@
-//! Shared by every device whose emulator speaks the Trezor V1 framing over UDP.
+//! UDP channels for emulators using the Trezor V1 wire format.
 
 use std::time::Duration;
 
@@ -17,18 +17,29 @@ pub(crate) fn emulator_socket(path: &str) -> &str {
     path.strip_prefix("udp:").unwrap_or(path)
 }
 
+/// A connected IPv4 loopback UDP channel for an emulator.
+///
+/// Construction does not establish that an emulator is listening; use
+/// [`Self::ping`] to probe it.
 pub struct EmulatorClient {
     socket: UdpSocket,
 }
 
 impl EmulatorClient {
+    /// Binds a local ephemeral port and connects it to the emulator address.
+    ///
+    /// `addr` may be a socket address with or without a `udp:` prefix.
     pub async fn new(addr: &str) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("127.0.0.1:0").await?;
         socket.connect(emulator_socket(addr)).await?;
         Ok(Self { socket })
     }
 
-    // UDP has no connect to probe, so absence shows up only as no answer.
+    /// Sends `PINGPING` and checks the first eight reply bytes for `PONGPONG`.
+    ///
+    /// Waits up to `timeout` for the reply. An eight-byte receive buffer can truncate
+    /// longer UDP datagrams on Unix, so a matching prefix need not be an exact datagram.
+    /// Returns `false` on send or receive failure, timeout, or a nonmatching prefix.
     pub async fn ping(&self, timeout: Duration) -> bool {
         if self.socket.send(PING).await.is_err() {
             return false;

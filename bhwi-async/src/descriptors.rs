@@ -11,70 +11,102 @@ use bhwi::{
 
 use crate::{HWIDevice, HWIDeviceError};
 
+/// A device-query, derivation, or descriptor-construction failure.
 #[derive(Debug, thiserror::Error)]
 pub enum DescriptorError {
+    /// A wallet query failed.
     #[error("{0}")]
-    Device(#[from] HWIDeviceError),
+    Device(
+        /// The wallet-operation error.
+        #[from]
+        HWIDeviceError,
+    ),
 
+    /// A BIP32 derivation index is invalid.
     #[error("{0}")]
-    Bip32(#[from] bip32::Error),
+    Bip32(
+        /// The derivation error.
+        #[from]
+        bip32::Error,
+    ),
 
+    /// A descriptor could not be constructed.
     #[error("{0}")]
-    Miniscript(#[from] miniscript::Error),
+    Miniscript(
+        /// The descriptor-construction error.
+        #[from]
+        miniscript::Error,
+    ),
 
+    /// The requested descriptor type is unsupported.
     #[error("Unsupported descriptor type {0:?}")]
-    UnsupportedDescriptorType(DescriptorType),
+    UnsupportedDescriptorType(
+        /// The unsupported script type.
+        DescriptorType,
+    ),
 
+    /// A bare public-key descriptor has no supported account purpose.
     #[error("Bare PK descriptors aren't supported")]
     BarePk,
 
+    /// The keypool's first index exceeds its last index.
     #[error("keypool start index must be less than or equal to end index")]
     KeypoolRange,
 
+    /// A hardened child follows an unhardened child in a keypool path.
     #[error("keypool path cannot contain hardened children after an unhardened child")]
     HardenedAfterUnhardened,
 }
 
+/// Parameters for deriving a single-key wildcard descriptor.
 #[derive(Debug, Clone)]
 pub struct GetDescriptorOptions {
-    /// The device's master fingerprint to use in the descriptor
+    /// The device's master fingerprint to include in the key origin.
     pub master_fingerprint: Fingerprint,
-    /// The method used to derive the keys for the descriptor
+    /// The path or account used to derive the descriptor key.
     pub target: DescriptorTarget,
-    /// Is this descriptor used for a change address?
+    /// Whether account-based derivation selects the change branch.
     pub is_change: bool,
-    /// The address type to use for the descriptor
+    /// The requested script type.
     pub descriptor_type: DescriptorType,
-    /// The Bitcoin network to use in descriptor paths
+    /// The network used for account derivation: Bitcoin uses coin type 0, others 1.
     pub network: Network,
 }
 
+/// The path or account used to derive a descriptor key.
 #[derive(Debug, Clone)]
-/// The method used to derive the keys for the descriptor
 pub enum DescriptorTarget {
-    /// Derivation path to derive keys
-    Path(DerivationPath),
-    /// BIP-44 account index
-    Account(u32),
+    /// An explicit derivation path preceding the wildcard.
+    Path(
+        /// The requested derivation path.
+        DerivationPath,
+    ),
+    /// An account index for script-specific BIP44-style derivation.
+    Account(
+        /// The unhardened account index, hardened during derivation.
+        u32,
+    ),
 }
 
+/// Parameters for a wildcard descriptor and an inclusive keypool range.
 #[derive(Debug, Clone)]
 pub struct GetKeypoolOptions {
-    /// BIP account or parent path to derive the keypool branch from
+    /// The account or parent path to which the receive/change branch is appended.
     pub path: DerivationPath,
-    /// First child index included in this keypool range
+    /// The first child index in the inclusive range.
     pub start: u32,
-    /// Last child index included in this keypool range
+    /// The last child index in the inclusive range.
     pub end: u32,
-    /// Whether this keypool is for change/internal addresses
+    /// Whether to append the change branch (1) rather than the receive branch (0).
     pub internal: bool,
-    /// The address type to use for the descriptor
+    /// The requested script type.
     pub descriptor_type: DescriptorType,
-    /// The Bitcoin network to use in descriptor paths
+    /// The network used for descriptor construction.
     pub network: Network,
 }
 
 impl GetDescriptorOptions {
+    /// Creates options using an explicit path preceding the descriptor wildcard.
     pub fn with_path(
         master_fingerprint: Fingerprint,
         path: DerivationPath,
@@ -91,6 +123,7 @@ impl GetDescriptorOptions {
         }
     }
 
+    /// Creates options using a script-specific account and receive/change branch.
     pub fn with_account(
         master_fingerprint: Fingerprint,
         account: u32,
@@ -125,7 +158,11 @@ impl GetKeypoolOptions {
     }
 }
 
-/// Gets a descriptor with the given parameters
+/// Queries a device key and constructs a single-key wildcard descriptor.
+///
+/// Supports P2PKH, P2WPKH, P2SH-P2WPKH, and key-path Taproot. Account targets
+/// choose the corresponding purpose and use coin type 0 for Bitcoin, 1 otherwise.
+/// This does not check whether the device can sign the requested script type.
 // reference: https://github.com/bitcoin-core/HWI/blob/master/hwilib/commands.py#L274
 pub async fn get_descriptor(
     device: &mut dyn HWIDevice,
@@ -176,7 +213,7 @@ pub async fn get_descriptor(
     })
 }
 
-/// The descriptor types a standard wallet is made of, receive and change.
+/// The single-key script types included in the standard receive/change descriptor set.
 pub const PUBKEY_DESCRIPTOR_TYPES: [DescriptorType; 4] = [
     DescriptorType::Pkh,
     DescriptorType::Wpkh,
@@ -187,7 +224,9 @@ pub const PUBKEY_DESCRIPTOR_TYPES: [DescriptorType; 4] = [
 /// Receive and internal descriptors for every type in [`PUBKEY_DESCRIPTOR_TYPES`].
 #[derive(Debug, Clone)]
 pub struct PubkeyDescriptors {
+    /// Wildcard receive descriptors in [`PUBKEY_DESCRIPTOR_TYPES`] order.
     pub receive: Vec<Descriptor<DescriptorPublicKey>>,
+    /// Wildcard change descriptors in [`PUBKEY_DESCRIPTOR_TYPES`] order.
     pub internal: Vec<Descriptor<DescriptorPublicKey>>,
 }
 
@@ -220,7 +259,10 @@ pub async fn get_pubkey_descriptors(
     Ok(descriptors)
 }
 
-/// Gets a ranged keypool descriptor from an account/parent path.
+/// Queries a wildcard keypool descriptor from an account or parent path.
+///
+/// `start` and `end` are inclusive bounds validated for ordering only. They do
+/// not replace the returned descriptor's wildcard or constrain its derivation range.
 pub async fn get_keypool_descriptor(
     device: &mut dyn HWIDevice,
     master_fingerprint: Fingerprint,
