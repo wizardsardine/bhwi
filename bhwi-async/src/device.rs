@@ -8,18 +8,27 @@ use bhwi::passphrase::HostPassphrase;
 
 use crate::{HWIDevice, HWIDeviceError, Info};
 
+/// A supported hardware-wallet family, independent of enabled backend features.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DeviceType {
+    /// A BitBox02.
     BitBox02,
+    /// A Coldcard.
     Coldcard,
+    /// A Blockstream Jade.
     Jade,
+    /// A KeepKey.
     KeepKey,
+    /// A Ledger running the Bitcoin application.
     Ledger,
+    /// A Specter-DIY.
     Specter,
+    /// A Trezor.
     Trezor,
 }
 
 impl DeviceType {
+    /// All recognized wallet families, including backends not compiled in.
     pub const ALL: [DeviceType; 7] = [
         DeviceType::BitBox02,
         DeviceType::Coldcard,
@@ -30,6 +39,7 @@ impl DeviceType {
         DeviceType::Trezor,
     ];
 
+    /// Returns the lowercase device-family identifier.
     pub fn as_str(self) -> &'static str {
         match self {
             DeviceType::BitBox02 => "bitbox02",
@@ -49,7 +59,7 @@ impl fmt::Display for DeviceType {
     }
 }
 
-/// These take the multisig descriptor at display time; the rest need it registered first.
+/// Returns whether the family accepts multisig descriptors directly at display time.
 pub fn supports_multisig_display_address(device_type: DeviceType) -> bool {
     matches!(
         device_type,
@@ -57,6 +67,7 @@ pub fn supports_multisig_display_address(device_type: DeviceType) -> bool {
     )
 }
 
+/// Returns the known Taproot-signing capability for a family and model string.
 pub fn can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
     match device_type {
         DeviceType::BitBox02 => false,
@@ -69,18 +80,25 @@ pub fn can_sign_taproot(device_type: DeviceType, model: &str) -> bool {
     }
 }
 
+/// Returns whether the family reports the management metadata used by discovery.
 pub fn reports_device_info(device_type: DeviceType) -> bool {
     matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor)
 }
 
+/// Filters discovery candidates and optionally selects a wallet by fingerprint.
 #[derive(Debug, Clone)]
 pub struct DeviceSelector {
+    /// The network used when opening a device and running its unlock handshake.
     pub network: Network,
+    /// A wallet fingerprint to query after the unlock handshake; `None` accepts any.
     pub fingerprint: Option<Fingerprint>,
+    /// A device-family filter; `None` accepts any family.
     pub device_type: Option<DeviceType>,
+    /// An exact discovery-path filter; `None` accepts any path.
     pub device_path: Option<String>,
+    /// Whether discovery should include emulator candidates.
     pub include_emulators: bool,
-    /// Only Trezor and KeepKey take a passphrase from the host.
+    /// An optional host passphrase, supported only by Trezor and KeepKey.
     #[cfg(any(feature = "trezor", feature = "keepkey"))]
     pub passphrase: Option<HostPassphrase>,
 }
@@ -100,6 +118,9 @@ impl Default for DeviceSelector {
 }
 
 impl DeviceSelector {
+    /// Returns whether the family and path match, without probing a fingerprint.
+    ///
+    /// This does not check emulator inclusion, the network, or the passphrase.
     pub fn matches(&self, device_type: DeviceType, path: &str) -> bool {
         self.device_type.is_none_or(|target| target == device_type)
             && self
@@ -109,28 +130,41 @@ impl DeviceSelector {
     }
 }
 
+/// A callback that presents a BitBox02 pairing code to the user.
 pub type PairingCodePrompt = Rc<dyn Fn(&str)>;
 
 /// A device found on a bus but not yet opened.
 #[derive(Debug, Clone)]
 pub struct DeviceCandidate {
+    /// The device family.
     pub device_type: DeviceType,
+    /// The discovery source's display name.
     pub name: String,
+    /// The discovery source's model identifier.
     pub model: String,
+    /// The source-specific path used to open this candidate.
     pub path: String,
+    /// Whether this candidate represents an emulator.
     pub is_emulated: bool,
 }
 
-/// A KeepKey asks mid-command, so this attaches before the device is boxed.
+/// Creates host-input handlers before a device is boxed, including mid-command prompts.
 pub type HostInteractionFactory = Rc<dyn Fn() -> Box<dyn crate::HostInteraction>>;
 
+/// Discovers and opens devices using source-specific I/O.
+///
+/// Futures need not be `Send`; implementations choose their I/O runtime.
 #[async_trait(?Send)]
 pub trait DeviceSource {
+    /// A discovery or device-opening failure.
     type Error: std::error::Error + 'static;
 
-    /// Enumerates buses without opening a device; an emulator is probed instead.
+    /// Lists matching candidates, potentially probing emulators with I/O.
     async fn list(&self, selector: &DeviceSelector) -> Result<Vec<DeviceCandidate>, Self::Error>;
 
+    /// Opens a candidate and attaches the supplied pairing and host-input callbacks.
+    ///
+    /// Opening may perform I/O, but does not by itself promise an unlocked wallet.
     async fn open(
         &self,
         candidate: &DeviceCandidate,
@@ -140,23 +174,41 @@ pub trait DeviceSource {
     ) -> Result<Device, Self::Error>;
 }
 
+/// A discovery, opening, or wallet-selection failure.
 #[derive(Debug, thiserror::Error)]
 pub enum SelectError<E> {
+    /// The source could not list candidates.
     #[error(transparent)]
-    Source(E),
+    Source(
+        /// The source error.
+        E,
+    ),
 
+    /// A wallet operation failed or was cancelled.
     #[error(transparent)]
-    Device(#[from] HWIDeviceError),
+    Device(
+        /// The wallet-operation error.
+        #[from]
+        HWIDeviceError,
+    ),
 
+    /// Candidates were found but none could be used.
     #[error(transparent)]
-    NoUsableDevice(#[from] NoUsableDevice),
+    NoUsableDevice(
+        /// The rejected candidates and their errors.
+        #[from]
+        NoUsableDevice,
+    ),
 
+    /// A host passphrase was supplied for a BitBox02.
     #[cfg(feature = "bitbox")]
     #[error("{}", crate::bitbox::HOST_PASSPHRASE_REJECTED)]
     HostPassphraseRejected,
 }
 
+/// Discovers, opens, and selects wallets through a [`DeviceSource`].
 pub struct DeviceManager<S> {
+    /// The discovery filters and wallet-selection requirements.
     pub selector: DeviceSelector,
     source: S,
     pairing_code: Option<PairingCodePrompt>,
@@ -164,6 +216,7 @@ pub struct DeviceManager<S> {
 }
 
 impl<S: DeviceSource> DeviceManager<S> {
+    /// Creates a manager with no pairing or host-input callbacks.
     pub fn new(source: S, selector: DeviceSelector) -> Self {
         Self {
             selector,
@@ -173,20 +226,24 @@ impl<S: DeviceSource> DeviceManager<S> {
         }
     }
 
+    /// Sets the callback used to present BitBox02 pairing codes.
     pub fn with_pairing_code_prompt(mut self, prompt: PairingCodePrompt) -> Self {
         self.pairing_code = Some(prompt);
         self
     }
 
+    /// Sets the factory used to attach host-input handlers to opened devices.
     pub fn with_host_interaction(mut self, factory: HostInteractionFactory) -> Self {
         self.host_interaction = Some(factory);
         self
     }
 
+    /// Lists candidates using the selector, potentially probing emulators.
     pub async fn list(&self) -> Result<Vec<DeviceCandidate>, S::Error> {
         self.source.list(&self.selector).await
     }
 
+    /// Opens a candidate using the selector and configured callbacks.
     pub async fn open(&self, candidate: &DeviceCandidate) -> Result<Device, S::Error> {
         self.source
             .open(
@@ -198,6 +255,11 @@ impl<S: DeviceSource> DeviceManager<S> {
             .await
     }
 
+    /// Opens listed candidates without additional unlock or metadata requests.
+    ///
+    /// Source-specific opening may still send wallet commands, such as native
+    /// Specter's fingerprint probe. Opening errors are collected in
+    /// [`DeviceScan::skipped`].
     pub async fn enumerate(&self) -> Result<DeviceScan, S::Error> {
         let mut scan = DeviceScan::default();
         for candidate in self.list().await? {
@@ -209,6 +271,14 @@ impl<S: DeviceSource> DeviceManager<S> {
         Ok(scan)
     }
 
+    /// Opens candidates and runs their unlock handshake until the optional fingerprint matches.
+    ///
+    /// Successful Trezor or KeepKey initialization can leave the wallet PIN-locked.
+    /// A common [`bhwi::common::Error::UserCancelled`] from unlock or fingerprint
+    /// queries aborts selection. Without a fingerprint filter, any unlock failure
+    /// is returned rather than silently selecting another wallet. Other failures
+    /// are collected as skipped devices. Trezor and KeepKey device-side cancellations
+    /// become authentication refusals and may be skipped when filtering by fingerprint.
     pub async fn select(
         &self,
     ) -> Result<(Option<Device>, Vec<SkippedDevice>), SelectError<S::Error>> {
@@ -261,8 +331,12 @@ impl<S: DeviceSource> DeviceManager<S> {
         Ok((Some(dev), skipped))
     }
 
-    /// Every device that answers, info and fingerprint already read. A cancelled
-    /// device stops the scan rather than joining `skipped`.
+    /// Opens and probes candidates, caching information and initialized-wallet fingerprints.
+    ///
+    /// A common [`bhwi::common::Error::UserCancelled`] from unlock or probe commands
+    /// aborts the scan. Other per-device failures, including Trezor and KeepKey
+    /// device-side cancellations mapped to authentication refusals, are collected
+    /// as skipped devices.
     pub async fn scan(&self) -> Result<DeviceScan, SelectError<S::Error>> {
         let candidates = self.list().await.map_err(SelectError::Source)?;
         let mut scan = DeviceScan::default();
@@ -283,6 +357,10 @@ impl<S: DeviceSource> DeviceManager<S> {
         Ok(scan)
     }
 
+    /// Selects a wallet, returning an error if all candidates were skipped.
+    ///
+    /// With no fingerprint filter, the first successful unlock handshake is accepted;
+    /// Trezor and KeepKey may still require a PIN. Uses the rules of [`Self::select`].
     pub async fn get_device_with_fingerprint(
         &self,
     ) -> Result<Option<Device>, SelectError<S::Error>> {
@@ -293,8 +371,11 @@ impl<S: DeviceSource> DeviceManager<S> {
         }
     }
 
-    /// Selects a device without sending it anything: an `Initialize` would clear the
-    /// keypad a device is waiting on.
+    /// Returns the first usable candidate from [`Self::enumerate`].
+    ///
+    /// The manager makes no additional unlock or metadata request. Discovery and
+    /// source-specific opening may still perform protocol I/O, including native
+    /// Specter's fingerprint probe.
     pub async fn get_device_without_contacting(
         &self,
     ) -> Result<Option<Device>, SelectError<S::Error>> {
@@ -306,8 +387,10 @@ impl<S: DeviceSource> DeviceManager<S> {
     }
 }
 
+/// A scan in which every candidate was rejected.
 #[derive(Debug)]
 pub struct NoUsableDevice {
+    /// The rejected candidates and their classified errors.
     pub skipped: Vec<SkippedDevice>,
 }
 
@@ -347,6 +430,7 @@ async fn probe(device: &mut Device, network: Network) -> Result<(), HWIDeviceErr
     Ok(())
 }
 
+/// Returns `None` for an empty scan or an error containing rejected candidates.
 pub fn no_device(skipped: Vec<SkippedDevice>) -> Result<Option<Device>, NoUsableDevice> {
     if skipped.is_empty() {
         return Ok(None);
@@ -354,8 +438,7 @@ pub fn no_device(skipped: Vec<SkippedDevice>) -> Result<Option<Device>, NoUsable
     Err(NoUsableDevice { skipped })
 }
 
-/// `UserCancelled` reaches callers nested inside `HWIDeviceError`, so downcasting the
-/// outer error never matches it.
+/// Returns whether an error chain contains a common user-cancellation error.
 pub fn is_user_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut source = Some(err);
     while let Some(current) = source {
@@ -370,22 +453,33 @@ pub fn is_user_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
+/// A caller-facing classification of a device-operation failure.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DeviceErrorKind {
+    /// The user cancelled the operation.
     UserCancelled,
+    /// Required command information is absent or address display is unsupported.
     UnsupportedCommand,
+    /// Input or a reported device error was classified as invalid.
     InvalidInput,
+    /// The device reports that it is locked.
     NotReady,
+    /// The device reports that PIN submission is unnecessary or already complete.
     AlreadyUnlocked,
+    /// No recognized typed error or message was found.
     Unclassified,
 }
 
+/// A device error's classification and display message.
 #[derive(Debug, Clone)]
 pub struct ClassifiedDeviceError {
+    /// The recognized error category.
     pub kind: DeviceErrorKind,
+    /// The selected error message.
     pub message: String,
 }
 
+/// Classifies recognized errors in the source chain, then falls back to message matching.
 pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ClassifiedDeviceError {
     let mut source = Some(err);
     while let Some(current) = source {
@@ -427,7 +521,7 @@ pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ClassifiedDevi
     classify_message(err.to_string())
 }
 
-/// A locked Trezor stops answering and says so only in the message text.
+/// Classifies known locked or already-unlocked messages, preserving other messages.
 pub fn classify_message(message: String) -> ClassifiedDeviceError {
     #[cfg(feature = "trezor")]
     if message.contains(LOCKED_MESSAGE) {
@@ -461,27 +555,45 @@ pub fn classify_message(message: String) -> ClassifiedDeviceError {
     }
 }
 
+/// The Trezor locked-device message recognized by [`classify_message`].
 #[cfg(feature = "trezor")]
 pub const LOCKED_MESSAGE: &str = bhwi::trezor::TrezorError::LOCKED;
 
+/// The KeepKey locked-device message recognized by [`classify_message`].
 #[cfg(feature = "keepkey")]
 pub const KEEPKEY_LOCKED_MESSAGE: &str = bhwi::keepkey::KEEPKEY_LOCKED;
 
+/// A candidate rejected during opening, selection, or probing.
 #[derive(Debug, Clone)]
 pub struct SkippedDevice {
+    /// The rejected device family.
     pub device_type: DeviceType,
+    /// The discovery model identifier.
     pub model: String,
+    /// The discovery path.
     pub path: String,
+    /// The classified error's display message.
     pub error: String,
+    /// The classified error category.
     pub kind: DeviceErrorKind,
 }
 
+/// A successfully opened device or a rejected candidate.
 pub enum ScanEntry {
-    Found(Device),
-    Skipped(SkippedDevice),
+    /// An opened device.
+    Found(
+        /// The opened device.
+        Device,
+    ),
+    /// A rejected candidate.
+    Skipped(
+        /// The candidate and its classified error.
+        SkippedDevice,
+    ),
 }
 
 impl SkippedDevice {
+    /// Creates a rejected-candidate record by classifying an error.
     pub fn new(
         device_type: DeviceType,
         model: impl Into<String>,
@@ -500,6 +612,7 @@ impl SkippedDevice {
 }
 
 impl ScanEntry {
+    /// Creates a skipped scan entry from candidate metadata and an error.
     pub fn skipped(
         device_type: DeviceType,
         model: impl Into<String>,
@@ -510,9 +623,12 @@ impl ScanEntry {
     }
 }
 
+/// Opened devices and rejected candidates collected by a scan.
 #[derive(Default)]
 pub struct DeviceScan {
+    /// Successfully opened devices; metadata availability depends on the scan operation.
     pub devices: Vec<Device>,
+    /// Candidates rejected during the scan.
     pub skipped: Vec<SkippedDevice>,
 }
 
@@ -527,12 +643,16 @@ impl Extend<ScanEntry> for DeviceScan {
     }
 }
 
+/// A requested network absent from the device's nonempty reported network list.
 #[derive(Debug, Clone)]
 pub struct NetworkMismatch {
+    /// The requested network.
     pub expected: Network,
+    /// The networks reported by the device.
     pub reported: Vec<Network>,
 }
 
+/// Formats network names as a comma-separated string.
 pub fn networks_string(networks: &[Network]) -> String {
     networks
         .iter()
@@ -541,6 +661,10 @@ pub fn networks_string(networks: &[Network]) -> String {
         .join(", ")
 }
 
+/// An opened wallet with discovery metadata and cached successful query results.
+///
+/// Cached information and fingerprints are not automatically invalidated when
+/// callers change the wallet or session through [`Self::device`].
 pub struct Device {
     name: String,
     device_type: DeviceType,
@@ -553,6 +677,7 @@ pub struct Device {
 }
 
 impl Device {
+    /// Wraps an opened wallet with discovery metadata and empty query caches.
     pub fn new(
         name: &str,
         device_type: DeviceType,
@@ -573,38 +698,47 @@ impl Device {
         }
     }
 
+    /// Returns the discovery display name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the device family.
     pub fn device_type(&self) -> DeviceType {
         self.device_type
     }
 
+    /// Returns the source-specific discovery path.
     pub fn path(&self) -> &str {
         &self.path
     }
 
+    /// Returns the discovery model identifier.
     pub fn model(&self) -> &str {
         &self.model
     }
 
+    /// Returns the underlying wallet interface without invalidating query caches.
     pub fn device(&mut self) -> &mut Box<dyn HWIDevice> {
         &mut self.device
     }
 
+    /// Returns whether discovery identified this device as an emulator.
     pub fn is_emulated(&self) -> bool {
         self.is_emulated
     }
 
+    /// Returns the last successfully queried fingerprint, without performing I/O.
     pub fn cached_fingerprint(&self) -> Option<Fingerprint> {
         self.fingerprint
     }
 
+    /// Returns cached information, without performing I/O.
     pub fn cached_info(&self) -> Option<&Info> {
         self.info.as_ref()
     }
 
+    /// Returns the cached fingerprint or queries the wallet and caches success.
     pub async fn fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError> {
         if let Some(fingerprint) = self.fingerprint {
             Ok(fingerprint)
@@ -615,6 +749,9 @@ impl Device {
         }
     }
 
+    /// Returns a mismatch when nonempty reported networks exclude `expected`.
+    ///
+    /// This may query information; an empty network list is treated as unknown.
     pub async fn network_mismatch(
         &mut self,
         expected: Network,
@@ -629,6 +766,10 @@ impl Device {
         }))
     }
 
+    /// Returns cached information or queries the device and caches success.
+    ///
+    /// Specter-DIY instead receives synthetic default information with version
+    /// `"unavailable"`, because it has no version command.
     pub async fn info(&mut self) -> Result<Info, HWIDeviceError> {
         if let Some(ref info) = self.info {
             Ok(info.clone())

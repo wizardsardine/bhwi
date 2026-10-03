@@ -6,20 +6,35 @@ pub use bhwi::coldcard::COLDCARD_DEVICE_ID;
 const COLDCARD_PACKET_WRITE_SIZE: usize = 63;
 const COLDCARD_PACKET_READ_SIZE: usize = 64;
 
+/// A Coldcard packet-framing or channel failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ColdcardHIDError {
+    /// A channel transfer did not contain a complete report.
     #[error("communication error: {0}")]
-    Comm(&'static str),
+    Comm(
+        /// The short-transfer description.
+        &'static str,
+    ),
 
+    /// A channel I/O failure.
     #[error("HID IO error")]
-    Hid(#[from] std::io::Error),
+    Hid(
+        /// The channel error.
+        #[from]
+        std::io::Error,
+    ),
 }
 
+/// Coldcard exchanges over 64-byte reports with 63-byte payload chunks.
+///
+/// Marks the final outgoing report with the payload's encryption flag; it does
+/// not encrypt the payload. Read timeouts are supplied by the channel.
 pub struct ColdcardTransportHID<C> {
     channel: C,
 }
 
 impl<C> ColdcardTransportHID<C> {
+    /// Creates a framing adapter without contacting the device.
     pub fn new(channel: C) -> Self {
         Self { channel }
     }

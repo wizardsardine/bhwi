@@ -1,3 +1,4 @@
+/// Ledger policy inference and signing-context preparation.
 #[cfg(feature = "ledger")]
 pub mod ledger;
 
@@ -5,8 +6,9 @@ use bhwi::bitcoin::secp256k1::ecdsa::Signature;
 
 use crate::device::DeviceType;
 
-/// A Coldcard leaves its own compressed-key offset on the header, which lands
-/// outside the range a message signature uses.
+/// Normalizes a message-signature header by removing Coldcard's offset when present.
+///
+/// Coldcard headers at least 8 are reduced by 8; other headers are unchanged.
 pub fn message_signature_header(device_type: DeviceType, header: u8) -> u8 {
     if device_type == DeviceType::Coldcard && header >= 8 {
         return header - 8;
@@ -14,6 +16,7 @@ pub fn message_signature_header(device_type: DeviceType, header: u8) -> u8 {
     header
 }
 
+/// Encodes a normalized header and compact ECDSA signature as 65 bytes.
 pub fn message_signature(device_type: DeviceType, header: u8, signature: &Signature) -> [u8; 65] {
     let mut payload = [0u8; 65];
     payload[0] = message_signature_header(device_type, header);

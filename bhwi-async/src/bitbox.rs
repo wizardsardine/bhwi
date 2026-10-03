@@ -12,10 +12,12 @@ use bhwi::{
 
 use crate::{HttpClient, Transport};
 
+/// The error message for a host passphrase supplied to a BitBox02.
 pub const HOST_PASSPHRASE_REJECTED: &str = "The BitBox02 does not accept a passphrase from the host. Please enable the passphrase option and enter the passphrase on the device during unlock.";
 
-/// Async BitBox02 client. Holds the noise-encryption state that persists across
-/// interpreter invocations. The caller is expected to:
+/// An asynchronous BitBox02 client with persistent Noise-encryption state.
+///
+/// The caller is expected to:
 ///
 /// 1. Construct with `BitBox::new(transport, load_persisted_config())`.
 /// 2. Call `HWI::unlock(&mut bb, network).await?` to drive the handshake and pair.
@@ -24,15 +26,17 @@ pub const HOST_PASSPHRASE_REJECTED: &str = "The BitBox02 does not accept a passp
 /// 3. Persist `bb.noise_config_data()` externally for future sessions.
 /// 4. Issue further HWI calls (`get_master_fingerprint`, ...).
 pub struct BitBox<T> {
+    /// The transport used for device exchanges.
     pub transport: T,
+    /// The network used for key encoding, addresses, and signing.
     pub network: Network,
     noise: NoiseState,
 }
 
 impl<T> BitBox<T> {
-    /// `pairing_data` is `None` on first pair; on reconnect, pass the previously persisted
-    /// noise config data back in. Defaults to mainnet; use [`BitBox::with_network`] for
-    /// testnet/signet.
+    /// Creates a mainnet client with optional persisted Noise pairing data.
+    ///
+    /// Use `None` for first pairing and [`Self::with_network`] for other networks.
     pub fn new(transport: T, pairing_data: Option<NoiseConfigData>) -> Self {
         Self {
             transport,
@@ -41,22 +45,21 @@ impl<T> BitBox<T> {
         }
     }
 
-    /// Set the network used for xpub encoding, address/coin selection and signing.
+    /// Sets the network used for xpub encoding, address selection, and signing.
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = network;
         self
     }
 
-    /// Pairing code shown on the device screen. Returns `None` once pairing has been confirmed
-    /// (or if the device was already paired from cached data).
+    /// Returns the device's pairing code until confirmation, or `None` for cached pairing.
     pub fn pairing_code(&self) -> Option<&str> {
         self.noise.pairing_code()
     }
 
-    /// Install a hook that fires the moment the pairing code becomes available during a
-    /// first-time pair — i.e. right before the interpreter blocks on the device's
-    /// verification response. The hook runs synchronously inside `HWI::unlock`, so it must
-    /// be non-blocking. Typical uses: `eprintln!`, `log::info!`, or sending on a channel.
+    /// Installs a hook called when a first-time pairing code becomes available.
+    ///
+    /// The hook runs synchronously inside `HWI::unlock` before waiting for device
+    /// confirmation, so it must not block.
     ///
     /// If the device is already paired (matching `NoiseConfigData.device_static_pubkeys`),
     /// the hook is never called.
@@ -64,11 +67,12 @@ impl<T> BitBox<T> {
         self.noise.set_pairing_code_hook(hook);
     }
 
-    /// Snapshot the noise-pairing state so the caller can persist it externally.
+    /// Returns a snapshot of the Noise pairing state for external persistence.
     pub fn noise_config_data(&self) -> NoiseConfigData {
         self.noise.data().clone()
     }
 
+    /// Returns whether the current Noise session has completed pairing.
     pub fn is_paired(&self) -> bool {
         self.noise.is_paired()
     }
@@ -86,9 +90,10 @@ impl TryFrom<RawCommand> for BitBoxCommand {
 }
 
 impl<T: Transport> BitBox<T> {
-    /// Restore the device from the mnemonic currently loaded on it. This is BitBox-specific
-    /// and intentionally not part of the shared `HWI` trait; its purpose here is to seed the
-    /// BitBox02 simulator with its fixed test mnemonic so derived keys are deterministic.
+    /// Restores from the mnemonic currently loaded on the device.
+    ///
+    /// This BitBox-specific operation seeds the simulator with its fixed test
+    /// mnemonic. `timestamp` is Unix seconds; `timezone_offset` is seconds.
     pub async fn restore_from_mnemonic(
         &mut self,
         timestamp: u32,
@@ -164,6 +169,9 @@ impl<T> crate::OnUnlock for BitBox<T> {
     }
 }
 
+/// An unused HTTP client whose [`HttpClient::request`] implementation always panics.
+///
+/// BitBox02 commands do not use HTTP; this is not a fallback HTTP implementation.
 pub struct DummyClient;
 
 #[async_trait(?Send)]
