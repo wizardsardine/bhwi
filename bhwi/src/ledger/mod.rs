@@ -1,3 +1,9 @@
+//! Ledger Bitcoin application commands, wallet policies, and delegated data requests.
+//!
+//! Common signing requires Ledger device context even when its HMAC is absent.
+//! Common descriptor display also requires that context; management and backup
+//! commands are unsupported, and opening an application requires a network.
+
 pub mod command;
 mod merkle;
 pub mod store;
@@ -21,42 +27,84 @@ pub use wallet::{AddressType, LedgerWalletPolicy, Version, WalletError, singlesi
 use crate::Interpreter;
 use crate::device::DeviceId;
 
+/// Ledger USB vendor and firmware usage page, with the default Speculos endpoint.
 pub const LEDGER_DEVICE_ID: DeviceId = DeviceId::new(0x2c97)
     .with_usage_page(0xffa0)
     .with_emulator_path("tcp:127.0.0.1:9999");
 
+/// Errors in Ledger command preparation and interpretation.
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
+    /// Missing command context or an unsupported common operation.
     #[error("missing command info: {0}")]
-    MissingCommandInfo(&'static str),
+    MissingCommandInfo(
+        /// Missing context or unsupported-operation description.
+        &'static str,
+    ),
 
+    /// An operation ended without a result.
     #[error("no error or result returned")]
     NoErrorOrResult,
 
+    /// APDU decoding failure.
     #[error("APDU error")]
-    Apdu(#[from] ApduError),
+    Apdu(
+        /// APDU decoder error.
+        #[from]
+        ApduError,
+    ),
 
+    /// Failure answering a delegated data request.
     #[error("store error")]
-    Store(#[from] StoreError),
+    Store(
+        /// Delegated-store error.
+        #[from]
+        StoreError,
+    ),
 
+    /// Wallet policy encoding failure.
     #[error("wallet error: {0}")]
-    Wallet(#[from] WalletError),
+    Wallet(
+        /// Wallet policy error.
+        #[from]
+        WalletError,
+    ),
 
+    /// A command interrupted without usable delegated state.
     #[error("operation interrupted")]
     Interrupted,
 
+    /// Unexpected response bytes and their operation context.
     #[error("unexpected result for {1}: {0:x?}")]
-    UnexpectedResult(Vec<u8>, String),
+    UnexpectedResult(
+        /// Unexpected response bytes.
+        Vec<u8>,
+        /// Operation context.
+        String,
+    ),
 
+    /// An unsupported address-display request.
     #[error("unsupported display address: {0}")]
-    UnsupportedDisplayAddress(String),
+    UnsupportedDisplayAddress(
+        /// Unsupported-display description.
+        String,
+    ),
 
+    /// Failure opening the selected Bitcoin application, with response bytes.
     #[error("failed to open app: {0:x?}")]
-    FailedToOpenApp(Vec<u8>),
+    FailedToOpenApp(
+        /// Application-open response bytes.
+        Vec<u8>,
+    ),
 
+    /// Invalid PSBT data or yielded signing result.
     #[error("invalid psbt: {0}")]
-    InvalidPsbt(String),
+    InvalidPsbt(
+        /// Invalid PSBT or signature description.
+        String,
+    ),
 
+    /// User cancellation reported by the application.
     #[error("action canceled by the user")]
     UserCancelled,
 }
@@ -71,34 +119,56 @@ fn is_cancel(status_word: StatusWord) -> bool {
 }
 
 impl LedgerError {
+    /// Creates an error retaining response bytes and operation context.
     pub fn unexpected_result(data: Vec<u8>, context: impl Into<String>) -> Self {
         LedgerError::UnexpectedResult(data, context.into())
     }
 }
 
+/// A Ledger Bitcoin application command interpreted without transport I/O.
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum LedgerCommand {
-    OpenApp(Network),
+    /// Opens `Bitcoin` for mainnet or `Bitcoin Test` for any other network.
+    OpenApp(
+        /// Network selecting the mainnet or test application.
+        Network,
+    ),
+    /// Requests the running application's name, version, and flags.
     GetAppInfo,
+    /// Requests the active wallet's master fingerprint.
     GetMasterFingerprint,
+    /// Requests an extended public key.
     GetXpub {
+        /// Key derivation path.
         path: DerivationPath,
+        /// Whether to ask for confirmation on the device.
         display: bool,
     },
+    /// Requests or displays a wallet address.
     GetWalletAddress {
+        /// Path-derived or explicit wallet-policy address request.
         address: LedgerDisplayAddress,
     },
+    /// Signs a message at the given key path.
     SignMessage {
+        /// Message bytes to sign.
         message: Vec<u8>,
+        /// Signing key derivation path.
         path: DerivationPath,
     },
+    /// Registers a wallet policy and returns its authentication HMAC.
     RegisterWallet {
+        /// Named policy to register.
         policy: LedgerWalletPolicy,
     },
+    /// Signs a PSBT under an explicit wallet policy.
     SignPsbt {
+        /// PSBT to sign.
         psbt: Psbt,
+        /// Policy describing the signing wallet.
         policy: LedgerWalletPolicy,
+        /// Registration HMAC, or `None` to send a zero HMAC for a standard policy.
         hmac: Option<[u8; 32]>,
     },
 }
@@ -111,15 +181,24 @@ pub enum LedgerCommand {
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum LedgerDisplayAddress {
+    /// A single-key policy inferred from an address path and queried device keys.
     ByPath {
+        /// Purpose/coin/account/change/index path, at least five levels deep.
         path: DerivationPath,
+        /// Whether to display the address on the device.
         display: bool,
     },
+    /// An address derived from an explicit policy and optional registration HMAC.
     ByWalletPolicy {
+        /// Wallet policy to use.
         policy: LedgerWalletPolicy,
+        /// Registration HMAC, or `None` for a zero HMAC.
         hmac: Option<[u8; 32]>,
+        /// Whether to use the change branch.
         change: bool,
+        /// Address index within the branch.
         address_index: u32,
+        /// Whether to display the address on the device.
         display: bool,
     },
 }
@@ -133,12 +212,16 @@ pub enum LedgerDisplayAddress {
 /// - length-prefixed bytes: state flags
 #[derive(Debug, Clone)]
 pub struct GetAppInfoResponse {
+    /// Running application name.
     pub app_name: String,
+    /// Application version string.
     pub version: String,
+    /// Application state flag bytes.
     pub flags: Vec<u8>,
 }
 
 impl GetAppInfoResponse {
+    /// Returns mainnet for the `Bitcoin` application, and testnet for every other name.
     pub fn network(&self) -> Network {
         if self.app_name == "Bitcoin" {
             Network::Bitcoin
@@ -172,15 +255,50 @@ impl TryFrom<Vec<u8>> for GetAppInfoResponse {
     }
 }
 
+/// A completed Ledger command result.
 pub enum LedgerResponse {
-    AppInfo(GetAppInfoResponse),
-    MasterFingerprint(Fingerprint),
-    Signature(u8, Signature),
+    /// Running application information.
+    AppInfo(
+        /// Running application information.
+        GetAppInfoResponse,
+    ),
+    /// Master fingerprint of the active wallet.
+    MasterFingerprint(
+        /// Active wallet master fingerprint.
+        Fingerprint,
+    ),
+    /// Message-signature header byte and ECDSA signature.
+    Signature(
+        /// Device-returned compact signature header.
+        u8,
+        /// Message signature.
+        Signature,
+    ),
+    /// A terminal outcome without a returned value.
+    ///
+    /// Signing also returns this for [`StatusWord::SignatureFail`] or
+    /// [`StatusWord::ClaNotSupported`]; it does not guarantee success.
     TaskDone,
-    Xpub(Xpub),
-    Address(String),
-    WalletHmac([u8; 32]),
-    SignedPsbt(Psbt),
+    /// Extended public key of the requested path.
+    Xpub(
+        /// Requested extended public key.
+        Xpub,
+    ),
+    /// Encoded Bitcoin address.
+    Address(
+        /// Encoded address text.
+        String,
+    ),
+    /// Authentication HMAC returned by wallet registration.
+    WalletHmac(
+        /// Registration authentication token.
+        [u8; 32],
+    ),
+    /// PSBT containing returned signatures.
+    SignedPsbt(
+        /// Updated PSBT.
+        Psbt,
+    ),
 }
 
 #[derive(Default)]
@@ -211,6 +329,11 @@ enum GetWalletAddressStep {
     },
 }
 
+/// A sans-I/O Ledger interpreter answering application data requests from a delegated store.
+///
+/// # Panics
+///
+/// Exchanging a successful message-signing response panics if its payload is empty.
 pub struct LedgerInterpreter<C, T, R, E> {
     state: State,
     _marker: std::marker::PhantomData<(C, T, R, E)>,

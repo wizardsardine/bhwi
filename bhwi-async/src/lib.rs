@@ -1,23 +1,45 @@
+//! Asynchronous hardware-wallet operations over caller-provided transports.
+//!
+//! [`HWI`] preserves backend error types; [`HWIDevice`] provides an object-safe,
+//! error-erased interface. The asynchronous traits use `async_trait(?Send)`:
+//! their futures need not be `Send`, and no particular async runtime is required.
+//!
+//! Shared command types are reexported from `bhwi::common`, including typed
+//! host requests and responses for [`HostInteraction`] implementations.
+
+/// BitBox02 sessions and pairing.
 #[cfg(feature = "bitbox")]
 pub mod bitbox;
+/// Coldcard sessions.
 #[cfg(feature = "coldcard")]
 pub mod coldcard;
+/// Standard descriptor and keypool construction.
 pub mod descriptors;
+/// Device discovery, selection, and cached metadata.
 pub mod device;
+/// Address-display requests prepared from descriptors.
 pub mod display_address;
+/// Jade sessions and PIN-server integration.
 #[cfg(feature = "jade")]
 pub mod jade;
+/// KeepKey sessions and host interaction.
 #[cfg(feature = "keepkey")]
 pub mod keepkey;
+/// Ledger sessions.
 #[cfg(feature = "ledger")]
 pub mod ledger;
+/// Device-specific setup, recovery, and PIN contexts.
 #[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 pub mod management;
+/// PSBT input cleanup and signature accumulation.
 pub mod psbt;
+/// Message-signature encoding and device-specific signing preparation.
 pub mod signing;
 #[cfg(feature = "specter")]
 pub mod specter;
+/// Framing adapters over caller-provided I/O channels.
 pub mod transport;
+/// Trezor sessions and host interaction.
 #[cfg(feature = "trezor")]
 pub mod trezor;
 
@@ -31,7 +53,6 @@ pub use bhwi::common::Info;
 pub use bhwi::common::RestoreOptions;
 pub use bhwi::common::SetupOptions;
 pub use bhwi::common::WalletRegistration;
-/// Named by `HostInteraction`, so implementing it needs no `bhwi` dependency.
 pub use bhwi::common::{Error as HostError, HostRequest, HostResponse, PinMatrixRequestKind};
 pub use bhwi::common::{MultisigAddressType, MultisigDisplayAddress};
 use bhwi::miniscript::descriptor::WalletPolicy;
@@ -47,86 +68,144 @@ use bhwi::{
     },
     common::{self},
 };
+/// The asynchronous Jade client.
 #[cfg(feature = "jade")]
 pub use jade::Jade;
+/// The asynchronous KeepKey client.
 #[cfg(feature = "keepkey")]
 pub use keepkey::KeepKey;
+/// The asynchronous Ledger client.
 #[cfg(feature = "ledger")]
 pub use ledger::Ledger;
+/// The asynchronous Specter-DIY client.
 #[cfg(feature = "specter")]
 pub use specter::Specter;
+/// The asynchronous Trezor client.
 #[cfg(feature = "trezor")]
 pub use trezor::Trezor;
 
+/// Exchanges already-encoded interpreter payloads with a device.
+///
+/// Implementations provide framing and I/O, not interpreter-level encryption.
+/// Futures need not be `Send`; the trait does not select an async runtime.
 #[async_trait(?Send)]
 pub trait Transport {
+    /// An I/O or framing failure.
     type Error: Debug;
+    /// Sends a payload and returns the device response.
+    ///
+    /// `encrypted` identifies an already-encrypted payload for framing purposes;
+    /// it is not a request to encrypt `command` again.
     async fn exchange(&mut self, command: &[u8], encrypted: bool) -> Result<Vec<u8>, Self::Error>;
 
-    /// Whether an exchange failed while reading after the request was successfully written.
+    /// Returns whether the backend classifies `error` as a post-write read failure.
     ///
-    /// Stateful commands that reboot a device can use this to distinguish an expected
-    /// post-write disconnect from a failure to deliver the command.
+    /// Commands that allow a final disconnect may treat this classification as
+    /// success. BitBox includes timeouts and short reports; `true` proves neither
+    /// that the device disconnected nor that its action completed.
     fn is_post_write_disconnect(&self, _error: &Self::Error) -> bool {
         false
     }
 }
 
+/// Sends interpreter PIN-server requests using caller-provided HTTP I/O.
+///
+/// Futures need not be `Send`; the trait does not select an async runtime.
 #[async_trait(?Send)]
 pub trait HttpClient {
+    /// An HTTP request failure.
     type Error: Debug;
+    /// Sends the encoded request to `url` and returns the encoded response body.
     async fn request(&self, url: &str, request: &[u8]) -> Result<Vec<u8>, Self::Error>;
 }
 
+/// Collects typed user input requested by a device.
+///
+/// Futures need not be `Send`. The command driver validates and encodes returned
+/// responses with [`HostResponse::into_bytes_for`].
 #[async_trait(?Send)]
 pub trait HostInteraction {
+    /// Returns input for `request`, or an error such as cancellation.
     async fn respond(
         &mut self,
         request: &common::HostRequest,
     ) -> Result<common::HostResponse, common::Error>;
 }
 
+/// Asynchronous wallet operations with a backend-specific error type.
+///
+/// Support and required [`DeviceContext`] values vary by device. Unsupported
+/// operations and missing context return errors. Futures need not be `Send`,
+/// and the trait does not select an async runtime.
 #[async_trait(?Send)]
 pub trait HWI {
+    /// A device, transport, or host-interaction failure.
     type Error: Debug;
+    /// Requests a device backup, which need not produce a downloadable file.
     async fn backup_device(&mut self) -> Result<DeviceBackup, Self::Error>;
+    /// Initializes a device using options and any required caller-supplied context.
     async fn setup_device(
         &mut self,
         options: SetupOptions,
         context: Option<DeviceContext>,
     ) -> Result<bool, Self::Error>;
+    /// Requests a device wipe and returns the reported or assumed outcome.
+    ///
+    /// Qualifying post-write read errors are treated as `Ok(true)` without
+    /// confirming the wipe. On BitBox this includes timeouts and short reports,
+    /// even on the initial information query before the wipe request is sent.
     async fn wipe_device(&mut self) -> Result<bool, Self::Error>;
+    /// Restores a device using options and any required recovery context.
     async fn restore_device(
         &mut self,
         options: RestoreOptions,
         context: Option<DeviceContext>,
     ) -> Result<bool, Self::Error>;
+    /// Requests a passphrase-protection toggle and returns the backend's outcome.
+    ///
+    /// KeepKey can return `true` while awaiting PIN entry, before the setting changes.
     async fn toggle_passphrase(&mut self) -> Result<bool, Self::Error>;
+    /// Requests PIN entry and returns whether the prompt was accepted.
     async fn prompt_pin(&mut self) -> Result<bool, Self::Error>;
+    /// Submits scrambled keypad positions supplied in the device-specific context.
     async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, Self::Error>;
+    /// Runs the backend's initialization or unlock handshake for `network`.
+    ///
+    /// This may involve device or host interaction. Trezor and KeepKey initialization
+    /// can succeed while a PIN is still required; `Ok(())` does not guarantee an
+    /// unlocked wallet.
     async fn unlock(&mut self, network: Network) -> Result<(), Self::Error>;
+    /// Returns device information, which may be synthesized by the backend.
     async fn get_info(&mut self) -> Result<Info, Self::Error>;
+    /// Returns the master fingerprint of the currently selected wallet.
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, Self::Error>;
+    /// Derives an extended public key, optionally requesting on-device display.
     async fn get_extended_pubkey(
         &mut self,
         path: DerivationPath,
         display: bool,
     ) -> Result<Xpub, Self::Error>;
+    /// Signs a message and returns the backend's header and ECDSA signature.
     async fn sign_message(
         &mut self,
         message: &[u8],
         path: DerivationPath,
     ) -> Result<(u8, Signature), Self::Error>;
+    /// Displays an address using any backend-required policy or registration context.
     async fn display_address(
         &mut self,
         address: common::DisplayAddress,
         context: Option<common::DeviceContext>,
     ) -> Result<String, Self::Error>;
+    /// Registers a named wallet policy, possibly leaving user confirmation pending.
     async fn register_wallet(
         &mut self,
         name: &str,
         policy: &str,
     ) -> Result<WalletRegistration, Self::Error>;
+    /// Signs a PSBT using any backend-required context and returns the updated PSBT.
+    ///
+    /// Ledger requires a Ledger context even for a policy without a registration HMAC.
     async fn sign_tx(
         &mut self,
         psbt: Psbt,
@@ -137,46 +216,77 @@ pub trait HWI {
 // TODO: this will become a pain to maintain, but we can have a proc-macro
 // generate this trait by putting it over HWI's definition and then also
 // generate the blanket impl which will map the errors to HWIDeviceError
+/// Object-safe wallet operations with errors erased into [`HWIDeviceError`].
+///
+/// The blanket implementation delegates to [`HWI`]. Support and context
+/// requirements remain backend-specific; futures need not be `Send`.
 #[async_trait(?Send)]
 pub trait HWIDevice {
+    /// Requests a device backup, which need not produce a downloadable file.
     async fn backup_device(&mut self) -> Result<DeviceBackup, HWIDeviceError>;
+    /// Initializes a device using options and any required caller-supplied context.
     async fn setup_device(
         &mut self,
         options: SetupOptions,
         context: Option<DeviceContext>,
     ) -> Result<bool, HWIDeviceError>;
+    /// Requests a device wipe and returns the reported or assumed outcome.
+    ///
+    /// Qualifying post-write read errors are treated as `Ok(true)` without
+    /// confirming the wipe. On BitBox this includes timeouts and short reports,
+    /// even on the initial information query before the wipe request is sent.
     async fn wipe_device(&mut self) -> Result<bool, HWIDeviceError>;
+    /// Restores a device using options and any required recovery context.
     async fn restore_device(
         &mut self,
         options: RestoreOptions,
         context: Option<DeviceContext>,
     ) -> Result<bool, HWIDeviceError>;
+    /// Requests a passphrase-protection toggle and returns the backend's outcome.
+    ///
+    /// KeepKey can return `true` while awaiting PIN entry, before the setting changes.
     async fn toggle_passphrase(&mut self) -> Result<bool, HWIDeviceError>;
+    /// Requests PIN entry and returns whether the prompt was accepted.
     async fn prompt_pin(&mut self) -> Result<bool, HWIDeviceError>;
+    /// Submits scrambled keypad positions supplied in the device-specific context.
     async fn send_pin(&mut self, context: Option<DeviceContext>) -> Result<bool, HWIDeviceError>;
+    /// Runs the backend's initialization or unlock handshake for `network`.
+    ///
+    /// This may involve device or host interaction. Trezor and KeepKey initialization
+    /// can succeed while a PIN is still required; `Ok(())` does not guarantee an
+    /// unlocked wallet.
     async fn unlock(&mut self, network: Network) -> Result<(), HWIDeviceError>;
+    /// Returns device information, which may be synthesized by the backend.
     async fn get_info(&mut self) -> Result<Info, HWIDeviceError>;
+    /// Returns the master fingerprint of the currently selected wallet.
     async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError>;
+    /// Derives an extended public key, optionally requesting on-device display.
     async fn get_extended_pubkey(
         &mut self,
         path: DerivationPath,
         display: bool,
     ) -> Result<Xpub, HWIDeviceError>;
+    /// Signs a message and returns the backend's header and ECDSA signature.
     async fn sign_message(
         &mut self,
         message: &[u8],
         path: DerivationPath,
     ) -> Result<(u8, Signature), HWIDeviceError>;
+    /// Displays an address using any backend-required policy or registration context.
     async fn display_address(
         &mut self,
         address: common::DisplayAddress,
         context: Option<common::DeviceContext>,
     ) -> Result<String, HWIDeviceError>;
+    /// Registers a named wallet policy, possibly leaving user confirmation pending.
     async fn register_wallet(
         &mut self,
         name: &str,
         policy: &str,
     ) -> Result<WalletRegistration, HWIDeviceError>;
+    /// Signs a PSBT using any backend-required context and returns the updated PSBT.
+    ///
+    /// Ledger requires a Ledger context even for a policy without a registration HMAC.
     async fn sign_tx(
         &mut self,
         psbt: Psbt,
@@ -184,27 +294,42 @@ pub trait HWIDevice {
     ) -> Result<Psbt, HWIDeviceError>;
 }
 
-/// Not `transparent`: that would forward `source()` past the cause.
+/// An erased wallet-operation error that retains the original error as its source.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct HWIDeviceError(#[from] Box<dyn StdError + Send + Sync + 'static>);
 
 impl HWIDeviceError {
+    /// Wraps a backend error while retaining its error chain.
     pub fn new(error: impl StdError + Send + Sync + 'static) -> Self {
         Self(Box::new(error))
     }
 }
 
+/// A failure while driving a common command through its interpreter and I/O.
 #[derive(Debug, thiserror::Error)]
 pub enum Error<E, F> {
+    /// A device transport failure.
     #[error("transport error: {0}")]
-    Transport(E),
+    Transport(
+        /// The transport's error.
+        E,
+    ),
 
+    /// A PIN-server HTTP failure.
     #[error("http client error: {0}")]
-    HttpClient(F),
+    HttpClient(
+        /// The HTTP client's error.
+        F,
+    ),
 
+    /// An interpreter or host-interaction failure.
     #[error("{0}")]
-    Interpreter(#[from] common::Error),
+    Interpreter(
+        /// The command or input error.
+        #[from]
+        common::Error,
+    ),
 }
 
 #[async_trait(?Send)]
@@ -527,14 +652,22 @@ where
     }
 }
 
+/// Updates persistent client state after the unlock interpreter completes.
 pub trait OnUnlock {
+    /// Applies the unlock response, or returns an error if it cannot be accepted.
     fn on_unlock(&mut self, _response: common::Response) -> Result<(), common::Error>;
 }
 
+/// Supplies the I/O endpoints and interpreter used to drive a command.
 pub trait CommonInterface<C, T, R, E> {
+    /// The device transport's error type.
     type TransportError: Debug;
+    /// The PIN-server client's error type.
     type HttpClientError: Debug;
 
+    /// Borrows the transport, HTTP client, optional host input, and a fresh interpreter.
+    ///
+    /// Session state may be borrowed by the interpreter and retained between commands.
     #[allow(clippy::type_complexity)]
     fn components(
         &mut self,

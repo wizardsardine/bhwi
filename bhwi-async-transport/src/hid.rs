@@ -1,3 +1,5 @@
+//! Native HID discovery paths and report I/O.
+
 use std::sync::Arc;
 
 use async_hid::{
@@ -8,10 +10,11 @@ use bhwi_async::transport::Channel;
 use futures::stream::StreamExt;
 use tokio::sync::Mutex;
 
-/// A user passes this back with `--device-path`. A serial survives a replug and
-/// two of the same model only share one if the firmware is broken. Without one
-/// the OS identifier is all that tells two otherwise identical devices apart,
-/// at the cost of changing on every replug.
+/// Returns a discovery path suitable for [`crate::DeviceSelector::device_path`].
+///
+/// The path is `hid:VID:PID:SUFFIX`, with four-digit hexadecimal USB identifiers.
+/// `SUFFIX` uses the serial number when available, otherwise an OS identifier
+/// that may change after reconnecting the device.
 pub fn hid_path(dev: &HidDevice) -> String {
     let suffix = dev.serial_number.clone().unwrap_or_else(|| os_id(&dev.id));
     format!("hid:{:04x}:{:04x}:{suffix}", dev.vendor_id, dev.product_id)
@@ -29,7 +32,10 @@ fn os_id(id: &DeviceId) -> String {
     }
 }
 
-/// The bus is read again at open time, since a listed device may be gone by then.
+/// Returns the first currently enumerated HID device satisfying `matches`.
+///
+/// The bus is read again so a previously listed device may no longer be present.
+/// This does not open the device.
 pub async fn find_hid(
     matches: impl Fn(&HidDevice) -> bool,
 ) -> crate::NativeResult<Option<HidDevice>> {
@@ -43,11 +49,16 @@ pub async fn find_hid(
     Ok(None)
 }
 
+/// A native HID report channel backed by `async_hid`.
+///
+/// Writes prepend a zero report ID for unnumbered reports; callers provide only
+/// the report payload. Reads return the input report bytes.
 pub struct HidChannel {
     device: Arc<Mutex<DeviceReaderWriter>>,
 }
 
 impl HidChannel {
+    /// Creates a channel from an already-open HID reader and writer.
     pub fn new(device: DeviceReaderWriter) -> Self {
         Self {
             device: Arc::new(Mutex::new(device)),

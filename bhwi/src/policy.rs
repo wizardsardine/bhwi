@@ -1,15 +1,14 @@
-//! Shared wallet-policy extraction, used by both the Ledger and BitBox backends.
+//! Shared extraction of BIP-388 wallet-policy templates and keys.
 //!
-//! Both backends need the same two things from a BIP-388 `WalletPolicy`: the template string
-//! (with `@i` placeholders) and the ordered list of per-placeholder keys with their origins.
-//! This module centralizes that extraction so the backends don't each re-derive it.
+//! Ledger and BitBox use the template's `@i` placeholders and the ordered keys
+//! with their origins.
 
 use core::fmt::Display;
 
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, WalletPolicyError};
 
-/// Extract the BIP-388 template and the ordered per-placeholder keys from a wallet policy.
+/// Extracts the BIP-388 template and ordered per-placeholder keys from a wallet policy.
 ///
 /// The returned keys are index-aligned with the template's `@i` placeholders. Miniscript's
 /// `WalletPolicy` assigns a distinct placeholder to each unique key expression (key info plus
@@ -18,6 +17,11 @@ use miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, WalletPolicyErro
 /// info in first-occurrence order and the template placeholders are renumbered to match:
 /// `Display` renders placeholders left to right in the same order `iter_pk()` yields keys, so
 /// the n-th `@i` token corresponds to the n-th key occurrence.
+///
+/// # Errors
+///
+/// Returns an error if the policy cannot be converted to a descriptor or the
+/// template's placeholder occurrences do not match its keys.
 pub fn extract_parts(
     policy: &WalletPolicy,
 ) -> Result<(String, Vec<DescriptorPublicKey>), WalletPolicyError> {
@@ -60,9 +64,10 @@ pub fn extract_parts(
     Ok((renumbered, keys))
 }
 
-/// Format a key as a BIP-388 KEY_INFO string (`[origin]xkey`), dropping the derivation-path
-/// suffix and wildcard that `Display` would append. This is the form the Ledger merkle tree
-/// hashes keys in.
+/// Formats a key as a BIP-388 KEY_INFO string (`[origin]xkey`).
+///
+/// Extended keys omit derivation suffixes, including multipath suffixes and wildcards.
+/// Single keys retain their display representation. Ledger hashes keys in this form.
 pub fn format_key_info(key: &DescriptorPublicKey) -> String {
     match key {
         DescriptorPublicKey::Single(_) => key.to_string(),
@@ -82,7 +87,7 @@ fn format_origin_xkey<K: Display>(
     }
 }
 
-/// Split an xpub key into its origin fingerprint, origin path, and the xpub itself.
+/// Splits an extended key into its origin fingerprint, origin path, and extended public key.
 ///
 /// Returns `None` for a single (non-extended) key, which the xpub-based device policies do not
 /// use. The origin fingerprint and path are `None` for a bare xpub with no `[origin]` prefix.

@@ -1,3 +1,5 @@
+//! BitBox02 wallet policy templates and key origins.
+
 use bitcoin::bip32::{DerivationPath, Fingerprint, Xpub};
 use miniscript::descriptor::WalletPolicy;
 
@@ -7,20 +9,28 @@ use super::proto as pb;
 /// Miniscript wallet policy, in the BIP-388 sense (template + resolved keys).
 #[derive(Clone, Debug)]
 pub struct Policy {
+    /// Descriptor template containing indexed key placeholders and derivation suffixes.
     pub template: String,
+    /// Extended keys indexed by the template's placeholders.
     pub pubkeys: Vec<KeyInfo>,
 }
 
+/// An extended public key and its optional master-key origin.
 #[derive(Clone, Debug)]
 pub struct KeyInfo {
+    /// Extended public key used by the policy.
     pub xpub: Xpub,
+    /// Derivation path from the master key, or `None` when no origin was supplied.
     pub path: Option<DerivationPath>,
+    /// Master fingerprint, or `None` when no origin was supplied.
     pub master_fingerprint: Option<Fingerprint>,
 }
 
 impl Policy {
-    /// Build a BitBox policy from a miniscript `WalletPolicy`, resolving each `@i` placeholder
-    /// to its key origin. The template is the BIP-388 `@i/**` form the device expects.
+    /// Creates a device policy from a wallet template and extended-key origins.
+    ///
+    /// Repeated placeholders and multipath derivation suffixes are retained
+    /// through the shared BIP-388 extraction.
     pub fn from_wallet_policy(policy: &WalletPolicy) -> Result<Policy, BitBoxError> {
         let (template, keys) = crate::policy::extract_parts(policy)
             .map_err(|_| BitBoxError::InvalidInput("invalid wallet policy"))?;

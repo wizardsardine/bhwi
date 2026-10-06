@@ -18,11 +18,16 @@ use crate::HWIDeviceError;
 use crate::device::Device;
 use crate::display_address::multisig_display_address_from_descriptor;
 
+/// A script family used to order Ledger signing passes.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LedgerAddressType {
+    /// Taproot key-path signing.
     Tap,
+    /// Native SegWit signing.
     Wit,
+    /// P2SH-wrapped SegWit signing.
     ShWit,
+    /// Legacy signing.
     Legacy,
 }
 
@@ -46,15 +51,23 @@ impl LedgerAddressType {
     }
 }
 
+/// A wallet policy inferred from PSBT metadata for a Ledger signing pass.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum LedgerSigningPlan {
+    /// A standard single-key account policy that needs no registration.
     Default {
+        /// The account's script family.
         address_type: LedgerAddressType,
+        /// The account-level key derivation path.
         account_path: DerivationPath,
     },
+    /// A multisig policy that must be registered before signing.
     Registered {
+        /// The policy's script family.
         address_type: LedgerAddressType,
+        /// The generated registration name.
         name: String,
+        /// The wallet-policy descriptor text.
         policy: String,
     },
 }
@@ -69,6 +82,12 @@ impl LedgerSigningPlan {
     }
 }
 
+/// Infers distinct standard-account and supported multisig signing policies from a PSBT.
+///
+/// Uses `fingerprint` to identify owned inputs and `network` for account paths.
+/// Skips inputs with neither UTXO field before checking ownership. For inputs
+/// with UTXO data, returns an error if an owned input's policy cannot be inferred.
+/// Plans are ordered Taproot, native SegWit, wrapped SegWit, then legacy; no I/O occurs.
 pub fn ledger_signing_plans(
     psbt: &Psbt,
     fingerprint: Fingerprint,
@@ -456,6 +475,7 @@ fn input_utxo(psbt: &Psbt, input_index: usize) -> Result<Option<TxOut>, String> 
     Ok(input.witness_utxo.clone().or(non_witness))
 }
 
+/// Appends the receive branch and first address index (`/0/0`) to an account path.
 pub fn extend_account_path_for_policy(path: &DerivationPath) -> DerivationPath {
     let mut children = path.as_ref().to_vec();
     children.push(ChildNumber::from_normal_idx(0).expect("valid receive branch"));
@@ -591,15 +611,26 @@ const MULTISIG_KEY_COUNT_RULE: &str = "Invalid threshold or number of keys";
 const MULTISIG_ORIGIN_RULE: &str =
     "Ledger multisig display requires extended public keys with origin information";
 
+/// A multisig policy and concrete derivation prepared for Ledger address display.
 #[derive(Debug)]
 pub struct LedgerMultisigDisplayPlan {
+    /// The generated wallet-registration name.
     pub name: String,
+    /// The ranged wallet-policy descriptor text.
     pub policy_text: String,
+    /// The parsed ranged wallet policy.
     pub policy: WalletPolicy,
+    /// Whether the concrete address uses the change branch.
     pub change: bool,
+    /// The concrete address's unhardened child index.
     pub address_index: u32,
 }
 
+/// Converts a concrete multisig request into a ranged Ledger policy and display coordinates.
+///
+/// Requires 1–16 origin-bearing xpubs with the same unhardened `/0/index` or
+/// `/1/index` suffix and no wildcard. Origin paths may contain at most four
+/// components. This prepares data without registering or displaying anything.
 pub fn ledger_multisig_display_plan(
     multisig: MultisigDisplayAddress,
 ) -> Result<LedgerMultisigDisplayPlan, String> {
@@ -682,7 +713,10 @@ pub fn ledger_multisig_display_plan(
     })
 }
 
-/// No `hmac` means a default policy, which needs no registration.
+/// Creates Ledger context with a version-2 policy and an optional registration HMAC.
+///
+/// An absent HMAC is appropriate for a supported default policy; this helper
+/// does not verify that the supplied policy is a default policy.
 pub fn registered_context(
     name: String,
     policy: WalletPolicy,
@@ -694,28 +728,50 @@ pub fn registered_context(
     }
 }
 
+/// A Ledger policy-inference or registration failure.
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerSigningError {
+    /// PSBT or descriptor data could not be converted into a supported policy.
     #[error("{0}")]
-    BadArgument(String),
+    BadArgument(
+        /// The policy-conversion failure message.
+        String,
+    ),
 
+    /// A wallet operation failed.
     #[error(transparent)]
-    Device(#[from] HWIDeviceError),
+    Device(
+        /// The wallet-operation error.
+        #[from]
+        HWIDeviceError,
+    ),
 
+    /// Registration returned no HMAC, including pending confirmation.
     #[error("Ledger wallet registration returned no HMAC")]
     MissingHmac,
 
+    /// Registration returned a HMAC with an unexpected byte length.
     #[error("Ledger wallet registration returned a {0}-byte HMAC instead of 32 bytes")]
-    HmacLength(usize),
+    HmacLength(
+        /// The returned length in bytes.
+        usize,
+    ),
 }
 
+/// The script family and backend context for one Ledger signing pass.
 pub struct LedgerSigningContext {
+    /// The script family used to order signing passes.
     pub address_type: LedgerAddressType,
+    /// The Ledger wallet policy and optional registration HMAC.
     pub context: DeviceContext,
 }
 
-/// Turns the plans a PSBT needs into signing contexts, registering the multisig
-/// policies the device does not already hold.
+/// Prepares signing contexts, querying keys and registering inferred multisig policies.
+///
+/// Uses [`ledger_signing_plans`], including its omission of inputs without UTXO
+/// data. Registration may prompt the user. This function prepares contexts rather
+/// than signing; a missing registration HMAC is an error, even if confirmation
+/// is pending.
 pub async fn ledger_signing_contexts(
     device: &mut Device,
     psbt: &Psbt,
@@ -776,7 +832,10 @@ pub async fn ledger_signing_contexts(
     Ok(contexts)
 }
 
-/// Registers the policy so the device can be asked to show the address.
+/// Registers a multisig policy and prepares its address-display request and context.
+///
+/// Registration may prompt the user, but this function does not display the
+/// address. A missing HMAC, including pending confirmation, is an error.
 pub async fn ledger_multisig_display_address(
     device: &mut Device,
     descriptor: &str,

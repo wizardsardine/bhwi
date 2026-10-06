@@ -2,11 +2,14 @@ use async_trait::async_trait;
 
 use crate::{Transport, transport::jade::CborStream};
 
+/// Jade command exchanges over a CBOR byte stream.
 pub struct TcpTransport<C> {
+    /// The stream used to write commands and collect responses.
     pub client: C,
 }
 
 impl<C> TcpTransport<C> {
+    /// Creates a transport from a stream without performing I/O.
     pub fn new(client: C) -> TcpTransport<C> {
         TcpTransport { client }
     }

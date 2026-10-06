@@ -1,3 +1,5 @@
+//! Native Trezor HID, USB, and UDP emulator discovery.
+
 use crate::{NativeError, NativeResult};
 use async_hid::Device as HidDevice;
 use async_hid::HidBackend;
@@ -17,10 +19,18 @@ use crate::{
     webusb::{WebUsbChannel, webusb_path},
 };
 
+/// A Trezor One session using native HID reports.
 pub type TrezorOneDevice = Trezor<TrezorTransport<HidChannel>>;
+/// A Trezor session using native `nusb` USB transfers.
 pub type TrezorWebUsbDevice = Trezor<TrezorTransport<WebUsbChannel>>;
+/// A Trezor emulator session using UDP.
 pub type TrezorEmulatorDevice = Trezor<TrezorTransport<EmulatorClient>>;
 
+/// The native Trezor enumerator for HID, USB, and UDP emulator interfaces.
+///
+/// Listing pings the emulator when requested. Opened sessions use the selector's
+/// network and passphrase; this enumerator does not install host-interaction
+/// callbacks.
 pub struct TrezorDevice;
 
 impl TrezorDevice {

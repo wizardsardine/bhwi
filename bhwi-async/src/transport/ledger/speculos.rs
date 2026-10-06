@@ -4,20 +4,32 @@ use async_trait::async_trait;
 
 use crate::{Transport, transport::Channel};
 
+/// Ledger APDU exchanges over a Speculos length-prefixed channel.
+///
+/// The channel must complete each requested transfer: returned byte counts are
+/// not checked. Responses include the trailing two-byte status word.
 pub struct LedgerTransportTcp<C: Channel> {
     channel: C,
 }
 
+/// A Speculos channel or response failure.
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerTcpError {
+    /// The channel reported an I/O failure.
     #[error("ledger io error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(
+        /// The channel error.
+        #[from]
+        std::io::Error,
+    ),
 
+    /// A response was invalid.
     #[error("ledger invalid response")]
     InvalidResponse,
 }
 
 impl<C: Channel> LedgerTransportTcp<C> {
+    /// Creates an emulator framing adapter without performing I/O.
     pub fn new(channel: C) -> Self {
         Self { channel }
     }

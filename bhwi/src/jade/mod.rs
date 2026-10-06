@@ -1,3 +1,5 @@
+//! Jade CBOR commands and PIN-server authentication routing.
+
 pub mod api;
 
 use std::collections::BTreeMap;
@@ -16,10 +18,14 @@ use crate::Interpreter;
 use crate::device::DeviceId;
 use crate::jade::api::GetInfoResponse;
 
+/// Jade network identifier for Bitcoin mainnet.
 pub const JADE_NETWORK_MAINNET: &str = "mainnet";
+/// Jade network identifier for test networks.
 pub const JADE_NETWORK_TESTNET: &str = "testnet";
+/// Jade network identifier for regtest.
 pub const JADE_NETWORK_LOCALTEST: &str = "localtest";
 
+/// USB identifiers used by supported Jade serial interfaces.
 pub const JADE_DEVICE_IDS: [DeviceId; 6] = [
     DeviceId::new(0x10c4).with_pid(0xea60),
     DeviceId::new(0x1a86).with_pid(0x55d4),
@@ -29,76 +35,170 @@ pub const JADE_DEVICE_IDS: [DeviceId; 6] = [
     DeviceId::new(0x303a).with_pid(0x1001),
 ];
 
+/// Errors in Jade request encoding, authentication, and response handling.
 #[derive(Debug)]
 pub enum JadeError {
+    /// A response containing neither an error nor a result.
     NoErrorOrResult,
-    Rpc(api::Error),
+    /// An RPC error reported by the device.
+    Rpc(
+        /// Device-reported RPC failure.
+        api::Error,
+    ),
+    /// Invalid CBOR data.
     Cbor,
-    Serialization(String),
-    UnexpectedResult(String),
+    /// Encoding or Bitcoin data conversion failure.
+    Serialization(
+        /// Conversion failure description.
+        String,
+    ),
+    /// A result incompatible with the current protocol step.
+    UnexpectedResult(
+        /// Unexpected-result description.
+        String,
+    ),
+    /// Device authentication refused.
     HandshakeRefused,
+    /// An unsupported address-display format.
     UnsupportedDisplayAddress,
 }
 
+/// A Jade command using the interpreter's selected network.
 pub enum JadeCommand {
+    /// Authenticates the user, routing PIN-server requests to the caller.
     Auth,
+    /// Requests the active wallet's master fingerprint.
     GetMasterFingerprint,
+    /// Requests firmware, device state, and network information.
     GetInfo,
-    GetXpub(DerivationPath),
-    GetReceiveAddress(ReceiveAddress),
+    /// Requests an extended public key at the given path.
+    GetXpub(
+        /// Key derivation path.
+        DerivationPath,
+    ),
+    /// Displays a receive or change address.
+    GetReceiveAddress(
+        /// Address derivation settings.
+        ReceiveAddress,
+    ),
+    /// Registers a descriptor template and its substituted keys.
     RegisterDescriptor {
+        /// User-visible descriptor name.
         descriptor_name: String,
+        /// Descriptor template with Jade derivation suffixes.
         descriptor: String,
+        /// Placeholder-to-key substitutions.
         datavalues: BTreeMap<String, String>,
     },
+    /// Registers a multisig wallet, then displays its requested address.
     RegisterMultisig {
+        /// User-visible multisig wallet name.
         multisig_name: String,
+        /// Multisig script and signer description.
         descriptor: api::MultisigDescriptor,
+        /// Concrete derivation suffixes used for the subsequent address display.
         paths: Vec<Vec<u32>>,
     },
+    /// Signs a UTF-8 message; non-UTF-8 bytes return a serialization error.
     SignMessage {
+        /// UTF-8 message bytes.
         message: Vec<u8>,
+        /// Signing key derivation path.
         path: DerivationPath,
     },
+    /// Signs a PSBT and collects fragmented results when necessary.
     SignPsbt {
+        /// PSBT to sign.
         psbt: Psbt,
     },
 }
 
+/// A Jade address-display request.
 pub enum ReceiveAddress {
+    /// An address from a registered descriptor.
     Descriptor {
+        /// Address index within the branch.
         index: u32,
+        /// Whether to use the change branch.
         change: bool,
+        /// Registered descriptor name.
         descriptor_name: String,
     },
+    /// A single-key address at a concrete derivation path.
     Path {
+        /// Address derivation path.
         path: DerivationPath,
+        /// Jade script variant, such as `wpkh(k)`.
         variant: &'static str,
     },
+    /// An address from a registered multisig wallet.
     Multisig {
+        /// Derivation suffix for each signer.
         paths: Vec<Vec<u32>>,
+        /// Registered multisig wallet name.
         multisig_name: String,
     },
 }
 
+/// A completed Jade command result.
 pub enum JadeResponse {
-    GetInfo(GetInfoResponse),
-    MasterFingerprint(Fingerprint),
-    Signature(u8, Signature),
+    /// Firmware, device state, and network information.
+    GetInfo(
+        /// Device-reported information.
+        GetInfoResponse,
+    ),
+    /// Master fingerprint of the active wallet.
+    MasterFingerprint(
+        /// Active wallet master fingerprint.
+        Fingerprint,
+    ),
+    /// Message-signature header byte and ECDSA signature.
+    Signature(
+        /// Device-returned compact signature header.
+        u8,
+        /// Message signature.
+        Signature,
+    ),
+    /// A terminal outcome without a returned value.
+    ///
+    /// The interpreter discards the boolean in [`api::AuthUserResponse::Authenticated`],
+    /// including `false`, so this does not confirm successful authentication.
     TaskDone,
-    Xpub(Xpub),
-    Address(String),
+    /// Extended public key of the requested path.
+    Xpub(
+        /// Requested extended public key.
+        Xpub,
+    ),
+    /// Encoded Bitcoin address.
+    Address(
+        /// Encoded address text.
+        String,
+    ),
+    /// Successful descriptor registration, without an authentication token.
     RegisteredDescriptor,
-    SignedPsbt(Psbt),
+    /// PSBT containing returned signatures.
+    SignedPsbt(
+        /// Updated PSBT.
+        Psbt,
+    ),
 }
 
+/// Destination of the next Jade protocol transmission.
 pub enum JadeRecipient {
+    /// The connected Jade device.
     Device,
-    PinServer { url: String },
+    /// A PIN-server HTTP endpoint selected from the device request.
+    PinServer {
+        /// Endpoint URL.
+        url: String,
+    },
 }
 
+/// An encoded Jade transmission routed to a device or PIN server.
 pub struct JadeTransmit {
+    /// Destination of the payload.
     pub recipient: JadeRecipient,
+    /// CBOR device request or JSON PIN-server request body bytes.
     pub payload: Vec<u8>,
 }
 
@@ -116,6 +216,12 @@ enum State {
     },
 }
 
+/// A sans-I/O Jade interpreter, defaulting to Bitcoin mainnet.
+///
+/// # Panics
+///
+/// Exchanging a message-signing response panics if its decoded signature bytes
+/// are empty.
 pub struct JadeInterpreter<C, T, R, E> {
     network: &'static str,
     state: State,
@@ -135,6 +241,10 @@ impl<C, T, R, E> Default for JadeInterpreter<C, T, R, E> {
 }
 
 impl<C, T, R, E> JadeInterpreter<C, T, R, E> {
+    /// Selects the network for subsequent commands.
+    ///
+    /// Bitcoin maps to `mainnet`, regtest to `localtest`, and all other networks
+    /// to `testnet`.
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = match network {
             Network::Bitcoin => JADE_NETWORK_MAINNET,

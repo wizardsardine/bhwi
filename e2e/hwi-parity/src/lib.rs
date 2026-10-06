@@ -2639,7 +2639,33 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
         keys.sort_unstable();
         if keys != ["psbt", "signed"] {
-            bail!("{label} hwi signtx keys did not match");
+            let code = json.get("code").and_then(Value::as_i64);
+            // Only report known constant errors; arbitrary HWI exceptions can contain payloads.
+            let error = json
+                .get("error")
+                .and_then(Value::as_str)
+                .map(|error| {
+                    error
+                        .rsplit_once(": ")
+                        .map_or(error, |(_, message)| message)
+                })
+                .filter(|error| {
+                    matches!(
+                        *error,
+                        "Failed to compile output"
+                            | "Failed to compile input"
+                            | "Transaction has changed during signing"
+                            | "Transaction cancelled"
+                            | "Segwit not enabled on this coin"
+                            | "Segwit input without amount"
+                            | "Some signatures are missing!"
+                            | "Unexpected message"
+                    )
+                })
+                .unwrap_or("<redacted>");
+            bail!(
+                "{label} hwi signtx keys did not match: keys={keys:?}, code={code:?}, error={error}"
+            );
         }
         if json
             .get("psbt")

@@ -20,26 +20,42 @@ use std::io::Cursor;
 
 use crate::{Transport, transport::Channel};
 
+/// The channel identifier used in Ledger HID reports.
 pub const LEDGER_CHANNEL: u16 = 0x0101;
 // for Windows compatability, we prepend the buffer with a 0x00
 // so the actual buffer is 64 bytes
 const LEDGER_PACKET_WRITE_SIZE: u8 = 64;
 const LEDGER_PACKET_READ_SIZE: u8 = 64;
 
+/// A Ledger HID framing or channel failure.
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerHIDError {
+    /// A short transfer or invalid response header.
     #[error("communication error: {0}")]
-    Comm(&'static str),
+    Comm(
+        /// The framing failure description.
+        &'static str,
+    ),
 
+    /// A channel I/O or header-read failure.
     #[error("HID IO error")]
-    Hid(#[from] std::io::Error),
+    Hid(
+        /// The I/O error.
+        #[from]
+        std::io::Error,
+    ),
 }
 
+/// Ledger APDU exchanges over 64-byte HID reports.
+///
+/// Checks response channel, tag, and sequence headers. Channel implementations
+/// supply timeouts; this adapter adds no deadline.
 pub struct LedgerTransportHID<C: Channel> {
     channel: C,
 }
 
 impl<C: Channel> LedgerTransportHID<C> {
+    /// Creates a framing adapter without contacting the device.
     pub fn new(channel: C) -> Self {
         Self { channel }
     }

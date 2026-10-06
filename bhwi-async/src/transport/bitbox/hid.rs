@@ -7,6 +7,7 @@ pub use bhwi::bitbox::{
 };
 use bhwi::device::DeviceId;
 
+/// BitBox02 USB matching information and the default simulator endpoint.
 pub const BITBOX02_DEVICE_ID: DeviceId = DeviceId::new(BITBOX02_VID)
     .with_pid(BITBOX02_PID)
     .with_emulator_path("tcp:127.0.0.1:15423");
@@ -23,28 +24,50 @@ const HWW_RSP_NOTREADY: u8 = 0x01;
 const HWW_RSP_BUSY: u8 = 0x02;
 const HWW_RSP_NACK: u8 = 0x03;
 
+/// A BitBox02 HID framing or channel failure.
 #[derive(Debug, thiserror::Error)]
 pub enum BitBoxHIDError {
+    /// A short transfer or unexpected firmware response.
     #[error("communication error: {0}")]
-    Comm(&'static str),
+    Comm(
+        /// The communication failure description.
+        &'static str,
+    ),
+    /// The device rejected the request.
     #[error("device NACK")]
     Nack,
+    /// The device reported that it is busy.
     #[error("device busy")]
     Busy,
+    /// U2F message encoding or decoding failed.
     #[error("U2F framing error")]
     U2f,
+    /// A channel write failed.
     #[error("HID write error: {0}")]
-    Write(std::io::Error),
+    Write(
+        /// The channel write error.
+        std::io::Error,
+    ),
+    /// A channel read failed, including a short report.
     #[error("HID read error: {0}")]
-    Read(std::io::Error),
+    Read(
+        /// The channel read error.
+        std::io::Error,
+    ),
 }
 
+/// BitBox02 firmware exchanges over 64-byte U2F-style HID reports.
+///
+/// Polls firmware `NOTREADY` replies until a final response, with no adapter
+/// timeout. Channel timeouts are caller-provided; U2F decoding does not check
+/// continuation sequence numbers.
 pub struct BitBoxTransportHID<C> {
     channel: C,
     u2f: U2fHid,
 }
 
 impl<C> BitBoxTransportHID<C> {
+    /// Creates a firmware framing adapter without contacting the device.
     pub fn new(channel: C) -> Self {
         Self {
             channel,

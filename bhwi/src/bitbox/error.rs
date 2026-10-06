@@ -1,3 +1,5 @@
+//! Errors reported by BitBox02 devices and protocol helpers.
+//!
 // Error variants (`BitBoxDeviceError`) and their integer code mapping are ported
 // from bitbox-api-rs (`src/error.rs`),
 // Copyright 2023-2025 Shift Crypto AG. Licensed under the Apache License,
@@ -8,29 +10,40 @@ use thiserror::Error;
 /// Errors returned by the BitBox02 device itself (protobuf `error.code`).
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum BitBoxDeviceError {
+    /// An unrecognized device error code.
     #[error("error code not recognized")]
     Unknown,
+    /// Input rejected by the device.
     #[error("invalid input")]
     InvalidInput,
+    /// A device memory error.
     #[error("memory")]
     Memory,
+    /// An unspecified device failure.
     #[error("generic error")]
     Generic,
+    /// An operation cancelled on the device.
     #[error("aborted by the user")]
     UserAbort,
+    /// An endpoint invoked in the wrong device state.
     #[error("can't call this endpoint: wrong state")]
     InvalidState,
+    /// A disabled device function.
     #[error("function disabled")]
     Disabled,
+    /// An entry that already exists.
     #[error("duplicate entry")]
     Duplicate,
+    /// Device-side Noise encryption failure.
     #[error("noise encryption failed")]
     NoiseEncrypt,
+    /// Device-side Noise decryption failure.
     #[error("noise decryption failed")]
     NoiseDecrypt,
 }
 
 impl BitBoxDeviceError {
+    /// Maps a firmware error code, returning [`Self::Unknown`] for unrecognized codes.
     pub fn from_code(code: i32) -> Self {
         match code {
             101 => Self::InvalidInput,
@@ -50,38 +63,94 @@ impl BitBoxDeviceError {
 /// Top-level BitBox integration error.
 #[derive(Error, Debug)]
 pub enum BitBoxError {
+    /// A minimum firmware version requirement.
     #[error("firmware version {0} required")]
-    Version(&'static str),
+    Version(
+        /// Required minimum firmware version.
+        &'static str,
+    ),
+    /// An error reported by the device.
     #[error("bitbox device error: {0}")]
-    Device(#[from] BitBoxDeviceError),
+    Device(
+        /// Device-reported failure.
+        #[from]
+        BitBoxDeviceError,
+    ),
+    /// A Noise session or handshake failure.
     #[error("noise channel error: {0}")]
-    Noise(&'static str),
+    Noise(
+        /// Failure context.
+        &'static str,
+    ),
+    /// Invalid Noise configuration.
     #[error("noise config error: {0}")]
-    NoiseConfig(String),
+    NoiseConfig(
+        /// Configuration failure description.
+        String,
+    ),
+    /// Pairing rejected by the user.
     #[error("pairing code rejected by user")]
     NoisePairingRejected,
+    /// A response incompatible with the current operation.
     #[error("BitBox returned an unexpected response")]
     UnexpectedResponse,
+    /// Protobuf decoding failure.
     #[error("protobuf message could not be decoded: {0}")]
-    ProtobufDecode(String),
+    ProtobufDecode(
+        /// Decoder error description.
+        String,
+    ),
+    /// Protobuf encoding failure.
     #[error("protobuf message could not be encoded: {0}")]
-    ProtobufEncode(String),
+    ProtobufEncode(
+        /// Encoder error description.
+        String,
+    ),
+    /// Invalid or unsupported PSBT data.
     #[error("PSBT error: {0}")]
-    Psbt(String),
+    Psbt(
+        /// PSBT failure description.
+        String,
+    ),
+    /// A malformed device signature.
     #[error("unexpected signature format returned by BitBox")]
     InvalidSignature,
+    /// An anti-klepto nonce or verification failure.
     #[error("Antiklepto verification failed: {0}")]
-    AntiKlepto(String),
+    AntiKlepto(
+        /// Nonce or verification failure description.
+        String,
+    ),
+    /// A transaction signing preparation or protocol failure.
     #[error("Bitcoin transaction signing error: {0}")]
-    BtcSign(String),
+    BtcSign(
+        /// Signing failure description.
+        String,
+    ),
+    /// Invalid command input or missing context.
     #[error("invalid input: {0}")]
-    InvalidInput(&'static str),
+    InvalidInput(
+        /// Invalid-input description.
+        &'static str,
+    ),
+    /// An address format unsupported by this adapter.
     #[error("unsupported display address: {0}")]
-    UnsupportedDisplayAddress(&'static str),
+    UnsupportedDisplayAddress(
+        /// Unsupported-format description.
+        &'static str,
+    ),
+    /// Invalid communication framing.
     #[error("communication framing error: {0}")]
-    Framing(&'static str),
+    Framing(
+        /// Framing failure description.
+        &'static str,
+    ),
+    /// A transport failure.
     #[error("transport error: {0}")]
-    Transport(String),
+    Transport(
+        /// Transport failure description.
+        String,
+    ),
 }
 
 impl From<prost::DecodeError> for BitBoxError {

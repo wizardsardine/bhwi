@@ -1,3 +1,7 @@
+//! Device-backed descriptor derivation and stdout formatting.
+//!
+//! Descriptor options and derivation helpers are reexported from `bhwi-async`.
+
 use crate::DeviceManager;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -8,12 +12,17 @@ use serde::{Serialize, Serializer};
 
 use crate::{OutputFormat, select_device};
 
+/// A ranged descriptor record suitable for Bitcoin Core keypool import.
 #[derive(Debug, Clone, Serialize)]
 pub struct KeypoolDescriptor {
+    /// The wildcard descriptor, serialized as a string without a checksum.
     #[serde(serialize_with = "serialize_descriptor")]
     pub descriptor: Descriptor<DescriptorPublicKey>,
+    /// The inclusive first and last child indices; the descriptor remains ranged.
     pub range: [u32; 2],
+    /// Whether this describes the internal change branch.
     pub internal: bool,
+    /// Whether the descriptor should be added to the keypool.
     pub keypool: bool,
 }
 
@@ -27,13 +36,27 @@ where
     ser.serialize_str(&format!("{descriptor:#}"))
 }
 
+/// Asynchronous CLI helpers that print descriptors to stdout.
+///
+/// Returned futures need not be `Send`.
 #[async_trait(?Send)]
 pub trait DescriptorOutput {
+    /// Derives and prints one ranged keypool descriptor.
+    ///
+    /// `format` selects a table or JSON record; `None` prints a descriptor with
+    /// range and import flags. The [`DeviceManager`] implementation performs
+    /// device I/O and prints nothing if no device is found.
     async fn get_keypool(
         &self,
         options: GetKeypoolOptions,
         format: Option<OutputFormat>,
     ) -> Result<()>;
+    /// Derives and prints receive and change descriptors for supported address types.
+    ///
+    /// `account` defaults to zero. `format` selects a table or a JSON object with
+    /// `receive` and `internal` arrays; `None` prints one descriptor per line.
+    /// The [`DeviceManager`] implementation performs device I/O and prints
+    /// nothing if no device is found.
     async fn get_pubkey_descriptors(
         &self,
         account: Option<u32>,
@@ -43,7 +66,6 @@ pub trait DescriptorOutput {
 
 #[async_trait(?Send)]
 impl DescriptorOutput for DeviceManager {
-    /// Output a ranged descriptor suitable for Bitcoin Core keypool import.
     async fn get_keypool(
         &self,
         options: GetKeypoolOptions,
@@ -81,8 +103,6 @@ impl DescriptorOutput for DeviceManager {
         Ok(())
     }
 
-    /// Output all supported pubkey output descriptors for a device. Analogous
-    /// to the Python HWI when uses with JSON formatting.
     // TODO: Python HWI outputs using h instead of ' for hardened paths but
     // rust-miniscript doesn't allow this when displaying an entire Descriptor.
     async fn get_pubkey_descriptors(

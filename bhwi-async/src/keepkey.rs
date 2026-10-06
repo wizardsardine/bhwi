@@ -8,7 +8,9 @@ use bhwi::{
     passphrase::HostPassphrase,
 };
 
+/// An asynchronous KeepKey client with optional host passphrase and input handling.
 pub struct KeepKey<T> {
+    /// The transport used for device exchanges.
     pub transport: T,
     network: Network,
     passphrase: Option<HostPassphrase>,
@@ -16,6 +18,7 @@ pub struct KeepKey<T> {
 }
 
 impl<T> KeepKey<T> {
+    /// Creates a mainnet client with no host passphrase or input handler.
     pub fn new(transport: T) -> Self {
         Self {
             transport,
@@ -25,16 +28,21 @@ impl<T> KeepKey<T> {
         }
     }
 
+    /// Sets the network used for key encoding, addresses, and signing.
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = network;
         self
     }
 
+    /// Sets the normalized host passphrase; `None` uses an empty host passphrase.
+    ///
+    /// KeepKey defaults to host entry and limits passphrases to 50 normalized UTF-8 bytes.
     pub fn with_passphrase(mut self, passphrase: Option<HostPassphrase>) -> Self {
         self.passphrase = passphrase;
         self
     }
 
+    /// Attaches a handler for mid-command PIN and recovery input requests.
     pub fn with_host_interaction(mut self, interaction: Box<dyn HostInteraction>) -> Self {
         self.host_interaction = Some(interaction);
         self

@@ -1,3 +1,5 @@
+//! PSBT v2 key-value maps and signature decoding for the Ledger Bitcoin application.
+//!
 /// code is from github.com/rust-bitcoin/rust-bitcoin
 /// SPDX-License-Identifier: CC0-1.0
 ///
@@ -61,6 +63,7 @@ const PSBT_GLOBAL_OUTPUT_COUNT: u8 = 0x05;
 /// Type: Version Number PSBT_GLOBAL_VERSION = 0xFB
 const PSBT_GLOBAL_VERSION: u8 = 0xFB;
 
+/// Returns the global key-value pairs in the Ledger PSBT v2 representation.
 pub fn get_v2_global_pairs(psbt: &Psbt) -> Vec<raw::Pair> {
     let mut rv: Vec<raw::Pair> = Default::default();
 
@@ -186,6 +189,7 @@ const PSBT_IN_TAP_INTERNAL_KEY: u8 = 0x17;
 /// Type: Taproot Merkle Root PSBT_IN_TAP_MERKLE_ROOT = 0x18
 const PSBT_IN_TAP_MERKLE_ROOT: u8 = 0x18;
 
+/// Returns PSBT v2 input pairs, combining PSBT metadata with its unsigned transaction input.
 pub fn get_v2_input_pairs(input: &Input, txin: &TxIn) -> Vec<raw::Pair> {
     let mut rv: Vec<raw::Pair> = Default::default();
 
@@ -323,6 +327,7 @@ const PSBT_OUT_TAP_TREE: u8 = 0x06;
 /// Type: Taproot Key BIP 32 Derivation Path PSBT_OUT_TAP_BIP32_DERIVATION = 0x07
 const PSBT_OUT_TAP_BIP32_DERIVATION: u8 = 0x07;
 
+/// Returns PSBT v2 output pairs, combining PSBT metadata with its unsigned transaction output.
 pub fn get_v2_output_pairs(output: &Output, txout: &TxOut) -> Vec<raw::Pair> {
     let mut rv: Vec<raw::Pair> = Default::default();
 
@@ -383,6 +388,7 @@ pub fn get_v2_output_pairs(output: &Output, txout: &TxOut) -> Vec<raw::Pair> {
     rv
 }
 
+/// Returns the raw key and value bytes of a PSBT pair, without their length prefixes.
 pub fn deserialize_pair(pair: raw::Pair) -> (Vec<u8>, Vec<u8>) {
     (
         deserialize(&Serialize::serialize(&pair.key)).unwrap(),
@@ -390,14 +396,30 @@ pub fn deserialize_pair(pair: raw::Pair) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+/// A yielded Ledger signature and the key identifying its PSBT destination.
 pub enum PartialSignature {
-    /// signature stored in pbst.partial_sigs
-    Sig(PublicKey, ecdsa::Signature),
-    /// signature stored in pbst.tap_script_sigs
-    TapScriptSig(XOnlyPublicKey, Option<TapLeafHash>, taproot::Signature),
+    /// An ECDSA public key and signature for the input's partial-signature map.
+    Sig(
+        /// Signing public key.
+        PublicKey,
+        /// ECDSA signature including its sighash type.
+        ecdsa::Signature,
+    ),
+    /// A Taproot key, optional script leaf hash, and signature.
+    ///
+    /// An absent leaf hash indicates key-path signing.
+    TapScriptSig(
+        /// Signing x-only public key.
+        XOnlyPublicKey,
+        /// Signed script leaf, or `None` for a key-path signature.
+        Option<TapLeafHash>,
+        /// Taproot signature including its sighash type.
+        taproot::Signature,
+    ),
 }
 
 impl PartialSignature {
+    /// Decodes a key-augmentation length, key data, and trailing signature bytes.
     pub fn from_slice(slice: &[u8]) -> Result<Self, PartialSignatureError> {
         let key_augment_byte = slice
             .first()
@@ -430,13 +452,35 @@ impl PartialSignature {
     }
 }
 
+/// Errors decoding a yielded Ledger partial signature.
 pub enum PartialSignatureError {
+    /// Missing or out-of-bounds key-augmentation length.
     BadKeyAugmentLength,
-    XOnlyPubKey(secp256k1::Error),
-    PubKey(KeyError),
-    EcdsaSig(ecdsa::Error),
-    TaprootSig(taproot::SigFromSliceError),
-    TapLeaf(bitcoin::hashes::FromSliceError),
+    /// Invalid x-only public key.
+    XOnlyPubKey(
+        /// X-only key decoder error.
+        secp256k1::Error,
+    ),
+    /// Invalid full public key.
+    PubKey(
+        /// Public-key decoder error.
+        KeyError,
+    ),
+    /// Invalid ECDSA signature.
+    EcdsaSig(
+        /// ECDSA signature decoder error.
+        ecdsa::Error,
+    ),
+    /// Invalid Taproot signature.
+    TaprootSig(
+        /// Taproot signature decoder error.
+        taproot::SigFromSliceError,
+    ),
+    /// Invalid Taproot leaf hash length.
+    TapLeaf(
+        /// Leaf-hash decoder error.
+        bitcoin::hashes::FromSliceError,
+    ),
 }
 
 mod serialize {

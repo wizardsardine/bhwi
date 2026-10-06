@@ -5,13 +5,18 @@ use bhwi::{
     jade::{JadeCommand, JadeError, JadeInterpreter, JadeResponse, JadeTransmit},
 };
 
+/// An asynchronous Jade client with device and PIN-server I/O.
 pub struct Jade<T, S> {
+    /// The network used by the Jade interpreter.
     pub network: Network,
+    /// The transport used for device exchanges.
     pub transport: T,
+    /// The HTTP client used for interpreter-routed PIN-server requests.
     pub pinserver: S,
 }
 
 impl<T, S> Jade<T, S> {
+    /// Creates a client with the selected network, transport, and PIN-server client.
     pub fn new(network: Network, transport: T, pinserver: S) -> Self {
         Self {
             network,

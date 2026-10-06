@@ -28,11 +28,16 @@ fn hardened_prefix(path: &DerivationPath) -> DerivationPath {
         .collect()
 }
 
+/// An input of a previous transaction requested during signing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrevTxInput {
+    /// Previous transaction identifier in Bitcoin's internal byte order.
     pub prev_out_hash: Vec<u8>,
+    /// Output index within the previous transaction.
     pub prev_out_index: u32,
+    /// Raw input script bytes.
     pub signature_script: Vec<u8>,
+    /// Consensus-encoded sequence number.
     pub sequence: u32,
 }
 
@@ -47,9 +52,12 @@ impl From<&bitcoin::TxIn> for PrevTxInput {
     }
 }
 
+/// An output of a previous transaction requested during signing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrevTxOutput {
+    /// Output value in satoshis.
     pub value: u64,
+    /// Raw output script bytes.
     pub pubkey_script: Vec<u8>,
 }
 
@@ -62,11 +70,16 @@ impl From<&bitcoin::TxOut> for PrevTxOutput {
     }
 }
 
+/// A previous transaction in the format used by the BitBox02 signing protocol.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrevTx {
+    /// Consensus transaction version represented as an unsigned integer.
     pub version: u32,
+    /// Previous transaction inputs.
     pub inputs: Vec<PrevTxInput>,
+    /// Previous transaction outputs.
     pub outputs: Vec<PrevTxOutput>,
+    /// Consensus-encoded absolute lock time.
     pub locktime: u32,
 }
 
@@ -81,13 +94,20 @@ impl From<&bitcoin::Transaction> for PrevTx {
     }
 }
 
+/// A transaction input and its device signing key.
 #[derive(Debug, PartialEq)]
 pub struct TxInput {
+    /// Spent transaction identifier in Bitcoin's internal byte order.
     pub prev_out_hash: Vec<u8>,
+    /// Index of the spent output.
     pub prev_out_index: u32,
+    /// Value of the spent output in satoshis.
     pub prev_out_value: u64,
+    /// Consensus-encoded sequence number.
     pub sequence: u32,
+    /// Derivation path of the signing key.
     pub keypath: DerivationPath,
+    /// Index into [`Transaction::script_configs`].
     pub script_config_index: u32,
     /// Can be `None` if all transaction inputs are Taproot.
     pub prev_tx: Option<PrevTx>,
@@ -101,20 +121,31 @@ impl TxInput {
     }
 }
 
+/// An output identified as belonging to the device's wallet.
 #[derive(Debug, PartialEq)]
 pub struct TxInternalOutput {
+    /// Derivation path of the output key.
     pub keypath: DerivationPath,
+    /// Output value in satoshis.
     pub value: u64,
+    /// Index into [`Transaction::script_configs`].
     pub script_config_index: u32,
 }
 
+/// A recognized output script's hash, witness program, or OP_RETURN data.
 #[derive(Debug, PartialEq)]
 pub struct Payload {
+    /// Script payload bytes without the script's framing opcodes.
     pub data: Vec<u8>,
+    /// Device output type describing the payload.
     pub output_type: pb::BtcOutputType,
 }
 
 impl Payload {
+    /// Extracts a payload from a supported output script.
+    ///
+    /// Supports P2PKH, P2SH, P2WPKH, P2WSH, P2TR, and OP_RETURN with exactly
+    /// one minimal data push. Other scripts return a signing error.
     pub fn from_pkscript(pkscript: &[u8]) -> Result<Payload, BitBoxError> {
         let script = Script::from_bytes(pkscript);
         if script.is_p2pkh() {
@@ -188,9 +219,12 @@ impl Payload {
     }
 }
 
+/// An output not identified as belonging to the device's wallet.
 #[derive(Debug, PartialEq)]
 pub struct TxExternalOutput {
+    /// Recognized script payload.
     pub payload: Payload,
+    /// Output value in satoshis.
     pub value: u64,
 }
 
@@ -204,18 +238,33 @@ impl TryFrom<&bitcoin::TxOut> for TxExternalOutput {
     }
 }
 
+/// A transaction output classified for device signing.
 #[derive(Debug, PartialEq)]
 pub enum TxOutput {
-    Internal(TxInternalOutput),
-    External(TxExternalOutput),
+    /// An output belonging to the device wallet.
+    Internal(
+        /// Wallet-owned output details.
+        TxInternalOutput,
+    ),
+    /// An output to an external recipient or OP_RETURN.
+    External(
+        /// External output details.
+        TxExternalOutput,
+    ),
 }
 
+/// A Bitcoin transaction prepared for the BitBox02 signing protocol.
 #[derive(Debug, PartialEq)]
 pub struct Transaction {
+    /// Script configurations referenced by inputs and internal outputs.
     pub script_configs: Vec<pb::BtcScriptConfigWithKeypath>,
+    /// Consensus transaction version represented as an unsigned integer.
     pub version: u32,
+    /// Inputs to sign.
     pub inputs: Vec<TxInput>,
+    /// Outputs classified by ownership.
     pub outputs: Vec<TxOutput>,
+    /// Consensus-encoded absolute lock time.
     pub locktime: u32,
 }
 
@@ -223,11 +272,25 @@ pub struct Transaction {
 /// to insert the returned signature back into the PSBT under the correct key.
 #[derive(Clone, Debug)]
 pub enum OurKey {
-    Segwit(bitcoin::secp256k1::PublicKey, DerivationPath),
-    TaprootInternal(DerivationPath),
+    /// A SegWit public key and its derivation path.
+    Segwit(
+        /// Signing public key.
+        bitcoin::secp256k1::PublicKey,
+        /// Signing key derivation path.
+        DerivationPath,
+    ),
+    /// A Taproot internal key's derivation path.
+    TaprootInternal(
+        /// Internal key derivation path.
+        DerivationPath,
+    ),
+    /// A Taproot script public key, leaf hash, and derivation path.
     TaprootScript(
+        /// Signing x-only public key.
         bitcoin::secp256k1::XOnlyPublicKey,
+        /// Leaf whose script is signed.
         bitcoin::taproot::TapLeafHash,
+        /// Signing key derivation path.
         DerivationPath,
     ),
 }
@@ -379,6 +442,11 @@ fn script_config_from_utxo(
 }
 
 impl Transaction {
+    /// Lowers a PSBT into a device transaction and aligned per-input signing keys.
+    ///
+    /// Every input must have a key origin matching `our_root_fingerprint` and
+    /// usable UTXO data. Without a forced configuration, only supported
+    /// single-key scripts are inferred; policy signing supplies its configuration.
     pub fn from_psbt(
         our_root_fingerprint: &[u8],
         psbt: &bitcoin::psbt::Psbt,
@@ -494,7 +562,11 @@ pub(crate) fn is_schnorr(script_config: &pb::BtcScriptConfigWithKeypath) -> bool
     is_taproot_simple(script_config) || is_taproot_policy(script_config)
 }
 
-/// Insert signatures returned by the BitBox into their corresponding PSBT inputs.
+/// Inserts device signatures into their aligned PSBT inputs.
+///
+/// Inputs, signatures, and keys are zipped without checking equal lengths;
+/// unmatched entries are ignored. An invalid signature can return an error after
+/// earlier inputs have already been modified.
 pub fn apply_signatures(
     psbt: &mut bitcoin::psbt::Psbt,
     signatures: &[Vec<u8>],

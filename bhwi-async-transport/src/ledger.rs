@@ -1,3 +1,5 @@
+//! Native Ledger HID discovery and Speculos TCP sessions.
+
 use std::sync::Arc;
 
 use crate::{NativeError, NativeResult};
@@ -27,9 +29,15 @@ use crate::{
     hid::{HidChannel, find_hid, hid_path},
 };
 
+/// A Ledger session using native HID reports.
 pub type LedgerHidDevice = Ledger<LedgerTransportHID<HidChannel>>;
+/// A Ledger session using the Speculos TCP protocol.
 pub type LedgerSpeculosDevice = Ledger<LedgerTransportTcp<SpeculosTcpChannel>>;
 
+/// The native Ledger enumerator for HID devices and the Speculos endpoint.
+///
+/// Listing can briefly connect to Speculos. Opening creates a session without
+/// checking whether the Bitcoin application is ready.
 pub struct LedgerDevice;
 
 impl LedgerDevice {
@@ -157,11 +165,15 @@ fn ledger_model(product_id: u16, is_emulated: bool) -> &'static str {
     }
 }
 
+/// A raw TCP channel for the Ledger Speculos emulator.
+///
+/// Reads fill the supplied buffer without imposing a timeout.
 pub struct SpeculosTcpChannel {
     stream: Arc<Mutex<TcpStream>>,
 }
 
 impl SpeculosTcpChannel {
+    /// Creates a channel from an already-connected Speculos TCP stream.
     pub fn new(stream: TcpStream) -> Self {
         Self {
             stream: Arc::new(Mutex::new(stream)),

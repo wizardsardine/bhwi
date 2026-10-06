@@ -1,3 +1,9 @@
+//! Device-independent commands, responses, and message routing.
+//!
+//! Command support and required context vary by device. Interpreters perform no I/O:
+//! callers route [`Transmit`] messages to the device, PIN server, or host and return
+//! the resulting bytes to [`crate::Interpreter::exchange`].
+
 #[cfg(feature = "bitbox")]
 use crate::bitbox;
 #[cfg(feature = "coldcard")]
@@ -21,20 +27,35 @@ use bitcoin::secp256k1::ecdsa::Signature;
 
 mod adapters;
 
+/// Options for starting a device session or unlocking a wallet.
 #[derive(Default)]
 pub struct UnlockOptions {
+    /// Requested network, where supported by the backend.
+    ///
+    /// Ledger requires a network to select its Bitcoin application. Trezor and
+    /// KeepKey use it to select the session network; other common adapters ignore it.
     pub network: Option<Network>,
 }
 
+/// Options for initializing a new device wallet.
 #[derive(Clone, Debug, Default)]
 pub struct SetupOptions {
+    /// Requested device label; empty labels are omitted by Trezor and KeepKey.
     pub label: String,
+    /// Backup passphrase supplied by the caller.
+    ///
+    /// BitBox rejects nonempty values; the Trezor and KeepKey adapters do not use it.
     pub backup_passphrase: String,
 }
 
+/// Options for restoring a device wallet.
 #[derive(Clone, Debug)]
 pub struct RestoreOptions {
+    /// Requested device label; empty labels are omitted by Trezor and KeepKey.
     pub label: String,
+    /// Number of recovery words.
+    ///
+    /// Defaults to 24. Trezor and KeepKey accept 12, 18, or 24; BitBox ignores this field.
     pub word_count: i32,
 }
 
@@ -47,26 +68,45 @@ impl Default for RestoreOptions {
     }
 }
 
+/// Inputs for deriving or displaying an address.
+///
+/// Display flags request device confirmation where supported. Some backends ignore
+/// the flag or always display; Specter-DIY rejects requests for undisplayed addresses.
 #[derive(Clone, Debug)]
 pub enum DisplayAddress {
+    /// Derives an address from a device key path.
     ByPath {
+        /// Key derivation path for the address.
         path: DerivationPath,
+        /// Whether to request address confirmation on the device.
         display: bool,
+        /// Requested script format, or the backend's default or path-inferred format.
         address_format: Option<AddressType>,
     },
+    /// Derives an address from a registered descriptor or wallet policy.
+    ///
+    /// Ledger, BitBox, and Specter-DIY require their corresponding [`DeviceContext`].
+    /// Trezor and KeepKey do not support this form.
     ByDescriptor {
+        /// Address index within the selected descriptor branch.
         index: u32,
+        /// Whether to select the change branch rather than the receiving branch.
         change: bool,
+        /// Whether to request address confirmation on the device.
         display: bool,
+        /// Registered descriptor name used by Jade and Coldcard.
+        ///
+        /// Policy-based backends use the supplied context instead.
         descriptor_name: String,
     },
-    /// Display a multisig address from the same inputs as Python HWI's
-    /// `display_multisig_address(addr_type, multisig)` API.
-    ByMultisig(MultisigDisplayAddress),
+    /// Displays a multisig address using Python HWI-compatible inputs.
+    ByMultisig(
+        /// Multisig script wrapper, threshold, and concrete keys.
+        MultisigDisplayAddress,
+    ),
 }
 
-/// Sans-I/O representation of Python HWI's `AddressType` and
-/// `MultisigDescriptor` arguments to `display_multisig_address`.
+/// Sans-I/O inputs for Python HWI's `display_multisig_address` operation.
 ///
 /// `threshold`, `sorted`, and `keys` correspond to HWI's
 /// `MultisigDescriptor.thresh`, `is_sorted`, and `pubkeys`, respectively.
@@ -82,6 +122,7 @@ pub struct MultisigDisplayAddress {
     pub keys: Vec<DescriptorPublicKey>,
 }
 
+/// A script wrapper for a multisig address.
 #[derive(Clone, Copy, Debug)]
 pub enum MultisigAddressType {
     /// Legacy P2SH multisig.
@@ -92,86 +133,224 @@ pub enum MultisigAddressType {
     Wit,
 }
 
+/// A device-independent hardware-wallet operation.
+///
+/// Commands are not supported uniformly. Conversion to a device command can fail
+/// for unsupported operations or missing or mismatched [`DeviceContext`].
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
+    /// Creates a backup on the device or retrieves a backup file.
     Backup,
-    Setup(SetupOptions, Option<DeviceContext>),
+    /// Initializes a device wallet using caller-supplied management data.
+    Setup(
+        /// Requested label and backup options.
+        SetupOptions,
+        /// Device-specific setup inputs, such as host entropy.
+        Option<DeviceContext>,
+    ),
+    /// Erases the device's wallet material.
     Wipe,
-    Restore(RestoreOptions, Option<DeviceContext>),
+    /// Starts wallet recovery using caller-supplied management data.
+    Restore(
+        /// Requested label and recovery word count.
+        RestoreOptions,
+        /// Device-specific recovery inputs, such as a U2F counter.
+        Option<DeviceContext>,
+    ),
+    /// Toggles the device's BIP-39 passphrase-protection setting.
     TogglePassphrase,
+    /// Retrieves the wallet's master key fingerprint.
     GetMasterFingerprint,
+    /// Retrieves backend-specific firmware or application information.
     GetVersion,
+    /// Retrieves an extended public key.
     GetXpub {
+        /// Key derivation path.
         path: DerivationPath,
+        /// Whether to request confirmation on the device, where supported.
         display: bool,
     },
-    DisplayAddress(DisplayAddress, Option<DeviceContext>),
+    /// Derives or displays an address.
+    DisplayAddress(
+        /// Address derivation inputs and requested display behavior.
+        DisplayAddress,
+        /// Device-specific policy context required by some address forms.
+        Option<DeviceContext>,
+    ),
+    /// Registers a named wallet policy on a supporting device.
+    ///
+    /// Trezor and KeepKey do not support wallet registration.
     RegisterWallet {
+        /// Wallet name shown or stored by the device.
         name: String,
+        /// Wallet policy, including its descriptor keys and origins.
         policy: WalletPolicy,
     },
-    SignTx(Psbt, Option<DeviceContext>),
+    /// Signs the inputs of a partially signed Bitcoin transaction.
+    ///
+    /// Ledger requires policy context even when no wallet HMAC is needed. BitBox
+    /// accepts optional policy context; Coldcard, Trezor, and KeepKey require `None`.
+    SignTx(
+        /// Transaction and metadata to sign.
+        Psbt,
+        /// Optional device-specific policy inputs.
+        Option<DeviceContext>,
+    ),
+    /// Signs a message with the key at a derivation path.
     SignMessage {
+        /// Message bytes in the form accepted by the device protocol.
         message: Vec<u8>,
+        /// Signing key derivation path.
         path: DerivationPath,
     },
+    /// Starts a session, authenticates, pairs, or opens an app, depending on the backend.
+    ///
+    /// This does not uniformly mean that a device's PIN lock is cleared.
     Unlock {
+        /// Requested session network and unlock options.
         options: UnlockOptions,
     },
+    /// Requests a scrambled PIN-entry matrix from a supporting device.
     PromptPin,
-    SendPin(Option<DeviceContext>),
+    /// Submits scrambled keypad positions, not literal PIN digits.
+    SendPin(
+        /// Management context containing the caller-supplied PIN positions.
+        Option<DeviceContext>,
+    ),
 }
 
-/// Device-specific context data required by certain commands.
+/// Device-specific inputs required by certain shared commands.
+///
+/// Management context carries caller-provided entropy, PIN positions, timestamps,
+/// or counters. Interpreters neither collect these inputs nor perform transport I/O.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum DeviceContext {
-    /// Required contexts for Ledger devices
+    /// Wallet policy for Ledger signing and descriptor-based address display.
     #[cfg(feature = "ledger")]
     Ledger {
+        /// Policy used to derive addresses or identify signing inputs.
         wallet_policy: ledger::LedgerWalletPolicy,
+        /// Registration HMAC, or `None` for a policy used without a token.
+        ///
+        /// The Ledger context itself is still required when this is `None`.
         wallet_hmac: Option<[u8; 32]>,
     },
-    /// Required context for BitBox02 descriptor-based address display: the wallet policy
-    /// (with key origins) of the registered descriptor.
+    /// Wallet policy for BitBox descriptor display or policy-based signing.
     #[cfg(feature = "bitbox")]
-    BitBox { policy: WalletPolicy },
+    BitBox {
+        /// Descriptor policy with the key origins required by the device.
+        policy: WalletPolicy,
+    },
     /// Required context for BitBox02 setup and restore operations.
     #[cfg(feature = "bitbox")]
-    BitBoxManagement(bitbox::ManagementContext),
-    /// Required context for Trezor setup.
+    BitBoxManagement(
+        /// Caller-supplied setup mode and time information.
+        bitbox::ManagementContext,
+    ),
+    /// Caller-supplied inputs for Trezor setup, restore, or PIN submission.
     #[cfg(feature = "trezor")]
-    TrezorManagement(trezor::ManagementContext),
-    /// Required context for KeepKey management commands.
+    TrezorManagement(
+        /// Host entropy, U2F counter, or scrambled keypad positions.
+        trezor::ManagementContext,
+    ),
+    /// Caller-supplied inputs for KeepKey setup, restore, or PIN submission.
     #[cfg(feature = "keepkey")]
-    KeepKeyManagement(keepkey::ManagementContext),
-    /// Required context for Specter-DIY descriptor address display.
+    KeepKeyManagement(
+        /// Host entropy, U2F counter, or scrambled keypad positions.
+        keepkey::ManagementContext,
+    ),
+    /// Wallet policy required for Specter-DIY descriptor address display.
     #[cfg(feature = "specter")]
-    Specter { policy: WalletPolicy },
+    Specter {
+        /// Descriptor policy used to prepare the address display request.
+        policy: WalletPolicy,
+    },
 }
 
+/// The result of a shared hardware-wallet command.
 pub enum Response {
-    Backup(DeviceBackup),
-    DeviceAction(bool),
+    /// The outcome of a backup operation.
+    Backup(
+        /// Backup completion or downloaded file contents.
+        DeviceBackup,
+    ),
+    /// Backend-specific outcome of a management or PIN request.
+    ///
+    /// Trezor PIN prompting and KeepKey passphrase toggling can return `true`
+    /// while PIN entry is still pending.
+    DeviceAction(
+        /// Whether the backend accepted or completed the request.
+        bool,
+    ),
+    /// A terminal outcome without another result.
+    ///
+    /// Ledger also uses this for failed or unsupported signing; it does not
+    /// guarantee success.
     TaskDone,
+    /// The device reports that an operation is still busy.
     TaskBusy,
-    Info(Info),
-    MasterFingerprint(Fingerprint),
-    Xpub(Xpub),
-    EncryptionKey([u8; 64]),
-    Signature(u8, Signature),
-    SignedPsbt(Psbt),
-    Address(String),
-    WalletRegistration(WalletRegistration),
+    /// Backend-specific device or application information.
+    Info(
+        /// Information reported or derived by the backend.
+        Info,
+    ),
+    /// The wallet's master key fingerprint.
+    MasterFingerprint(
+        /// Four-byte BIP-32 fingerprint.
+        Fingerprint,
+    ),
+    /// An extended public key.
+    Xpub(
+        /// Derived BIP-32 extended public key.
+        Xpub,
+    ),
+    /// Coldcard peer public-key material for establishing encryption.
+    EncryptionKey(
+        /// Uncompressed secp256k1 public key without the `0x04` prefix.
+        [u8; 64],
+    ),
+    /// An ECDSA message signature and its backend-specific header.
+    Signature(
+        /// Compact-message signature header, not normalized across backends.
+        u8,
+        /// ECDSA signature, excluding the header byte.
+        Signature,
+    ),
+    /// A PSBT containing signatures returned by the device.
+    SignedPsbt(
+        /// Partially signed transaction; not necessarily finalized or fully signed.
+        Psbt,
+    ),
+    /// An address returned by the device.
+    Address(
+        /// Address in the device protocol's string encoding.
+        String,
+    ),
+    /// The outcome of registering a wallet policy.
+    WalletRegistration(
+        /// Registration state and any authentication token.
+        WalletRegistration,
+    ),
 }
 
+/// Completion state of a wallet-registration request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WalletRegistration {
-    Complete { hmac: Option<[u8; 32]> },
+    /// Registration completed, with or without an authentication token.
+    Complete {
+        /// Device-issued wallet HMAC, when the backend provides one.
+        hmac: Option<[u8; 32]>,
+    },
+    /// The request was submitted but still requires confirmation on the device.
     PendingUserConfirmation,
 }
 
 impl WalletRegistration {
+    /// Returns the registration HMAC, if available.
+    ///
+    /// Returns `None` both for completion without a token and for pending user
+    /// confirmation. Inspect the variant to distinguish those states.
     pub fn hmac(self) -> Option<[u8; 32]> {
         match self {
             Self::Complete { hmac } => hmac,
@@ -180,17 +359,32 @@ impl WalletRegistration {
     }
 }
 
+/// Completion or file contents returned by a backup operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeviceBackup {
+    /// The device completed its backup without returning a downloaded file.
     Complete,
-    File(Vec<u8>),
+    /// A backup file downloaded from the device.
+    File(
+        /// File bytes in the device's backup format.
+        Vec<u8>,
+    ),
 }
 
-/// Device Information
+/// Backend-specific device, firmware, and session information.
+///
+/// Optional fields may be unreported, not `false`. The meaning and availability of
+/// names and network lists depend on the backend.
 #[derive(Debug, Clone, Default)]
 pub struct Info {
+    /// Firmware or application version string reported by the backend.
     pub version: String,
+    /// Networks reported by the backend, or an empty list when unreported.
+    ///
+    /// This may describe the active application or selected session network rather
+    /// than every network supported by the hardware.
     pub networks: Vec<Network>,
+    /// Backend-specific device, model, or application name, when reported.
     pub firmware: Option<String>,
     /// Whether the device has initialized wallet material, when reported by the firmware.
     pub initialized: Option<bool>,
@@ -200,35 +394,64 @@ pub struct Info {
     pub on_device_passphrase_entry: Option<bool>,
     /// Whether the device is waiting for a PIN from the host, when it reports a lock state.
     pub needs_pin_sent: Option<bool>,
-    /// Whether the device expects the BIP39 passphrase from the host rather than its own screen.
+    /// Whether the BIP-39 passphrase is expected from the host, when reported or derived.
     pub needs_passphrase_sent: Option<bool>,
 }
 
+/// A device request for input that the caller must collect from the user.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HostRequest {
+    /// Requests positions on the scrambled keypad displayed by the device.
     PinMatrix {
+        /// Whether the device asks for the current PIN or a new PIN confirmation.
         kind: PinMatrixRequestKind,
     },
+    /// Requests a character or control action during cipher-based recovery.
     RecoveryCharacter {
+        /// Zero-based recovery word position reported by the device.
         word_position: u32,
+        /// Zero-based character position within the current recovery word.
         character_position: u32,
     },
 }
 
+/// The purpose of a scrambled PIN-matrix request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PinMatrixRequestKind {
+    /// Entry of the current PIN.
     Current,
+    /// First entry of a new PIN.
     NewFirst,
+    /// Confirmation of the new PIN.
     NewSecond,
-    Unknown(i32),
+    /// A request kind not recognized by this library.
+    Unknown(
+        /// Raw protocol value.
+        i32,
+    ),
 }
 
+/// A typed answer to a [`HostRequest`].
+///
+/// Encode the answer with [`into_bytes_for`](Self::into_bytes_for) before returning
+/// it to the interpreter. `Debug` output redacts PIN positions and recovery characters.
 #[derive(Eq, PartialEq)]
 pub enum HostResponse {
-    PinPositions(String),
-    RecoveryCharacter(char),
+    /// Scrambled keypad positions, never the literal PIN digits.
+    PinPositions(
+        /// Nonempty ASCII digits representing the selected positions.
+        String,
+    ),
+    /// A recovery-cipher character selected using the device's displayed mapping.
+    RecoveryCharacter(
+        /// One lowercase ASCII character.
+        char,
+    ),
+    /// Deletes the previous recovery character.
     RecoveryDelete,
+    /// Advances to the next recovery word.
     RecoveryNextWord,
+    /// Completes recovery after the last word.
     RecoveryDone,
 }
 
@@ -249,6 +472,39 @@ fn zeroize_string(value: &mut String) {
 }
 
 impl HostResponse {
+    /// Validates and encodes this answer for the given host request.
+    ///
+    /// PIN positions encode as ASCII bytes. Validation requires nonempty ASCII
+    /// digits but does not restrict them to the range 1–9. Recovery characters
+    /// must be lowercase ASCII. Delete encodes as `0x08` and is allowed unless both
+    /// positions are zero; next-word encodes as a space and requires a character
+    /// position of at least 3. Done encodes as a newline and requires a word position
+    /// of 11, 17, or 23 and a character position of at least 3.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the answer does not match the request,
+    /// its contents are invalid, or a recovery action is invalid at that position.
+    ///
+    /// # Examples
+    ///
+    /// Encode synthetic keypad positions, not literal PIN digits:
+    ///
+    /// ```
+    /// use bhwi::common::{Error, HostRequest, HostResponse, PinMatrixRequestKind};
+    ///
+    /// let request = HostRequest::PinMatrix {
+    ///     kind: PinMatrixRequestKind::Current,
+    /// };
+    /// let bytes = HostResponse::PinPositions("123".into())
+    ///     .into_bytes_for(&request)
+    ///     .unwrap();
+    /// assert_eq!(bytes, b"123");
+    /// assert!(matches!(
+    ///     HostResponse::PinPositions(String::new()).into_bytes_for(&request),
+    ///     Err(Error::InvalidInput(_))
+    /// ));
+    /// ```
     pub fn into_bytes_for(self, request: &HostRequest) -> Result<Vec<u8>, Error> {
         match (request, self) {
             (HostRequest::PinMatrix { .. }, Self::PinPositions(mut positions)) => {
@@ -309,79 +565,159 @@ impl HostResponse {
     }
 }
 
+/// The destination of a shared interpreter's next request.
 pub enum Recipient {
+    /// The hardware wallet or its emulator.
     Device,
-    PinServer { url: String },
-    Host(HostRequest),
+    /// An external PIN-server HTTP endpoint.
+    PinServer {
+        /// URL to which the caller sends the transmission payload.
+        url: String,
+    },
+    /// User interaction handled by the caller rather than a transport.
+    Host(
+        /// Request to answer with [`HostResponse::into_bytes_for`].
+        HostRequest,
+    ),
 }
 
+/// A routed request produced by a shared interpreter.
+///
+/// Send device or PIN-server payloads to their recipient and return the response
+/// bytes to [`crate::Interpreter::exchange`]. For host requests, collect a typed
+/// [`HostResponse`] and encode it with [`HostResponse::into_bytes_for`].
+///
+/// Converting a byte vector targets the device with `encrypted` set to `false`.
+/// Converting a [`HostRequest`] targets the host with an empty payload.
 pub struct Transmit {
+    /// Destination of the payload or host-interaction request.
     pub recipient: Recipient,
+    /// Encoded protocol payload, ready to route; empty for a converted host request.
     pub payload: Vec<u8>,
+    /// Whether the payload is already encrypted.
+    ///
+    /// Transports may use this flag for framing; callers must not encrypt the
+    /// payload again.
     pub encrypted: bool,
 }
 
+/// A shared command-conversion, input, or protocol-processing error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Session encryption could not be established or used.
     #[error("encryption error: {0}")]
-    Encryption(&'static str),
+    Encryption(
+        /// Description of the encryption failure.
+        &'static str,
+    ),
 
+    /// No device error or final result was available.
     #[error("no error or result returned")]
     NoErrorOrResult,
 
+    /// Required command inputs are missing or the operation is unsupported.
     #[error("missing command info: {0}")]
-    MissingCommandInfo(&'static str),
+    MissingCommandInfo(
+        /// Missing input or unsupported operation.
+        &'static str,
+    ),
 
+    /// A device-specific failure.
     #[error("{0}")]
-    Device(String),
+    Device(
+        /// Device error message.
+        String,
+    ),
 
+    /// Response data did not match the expected protocol result.
     #[error("unexpected result for {1}: {0:x?}")]
-    UnexpectedResult(Vec<u8>, String),
+    UnexpectedResult(
+        /// Unexpected response bytes or diagnostic data.
+        Vec<u8>,
+        /// Description of the expected result or operation.
+        String,
+    ),
 
+    /// The device returned an RPC failure.
     #[error("rpc error {0}: {1:?}")]
-    Rpc(i32, Option<String>),
+    Rpc(
+        /// Device-provided error code.
+        i32,
+        /// Device-provided error message, when available.
+        Option<String>,
+    ),
 
+    /// A protocol value could not be encoded or decoded.
     #[error("serialization error: {0}")]
-    Serialization(String),
+    Serialization(
+        /// Description of the serialization failure.
+        String,
+    ),
 
+    /// Caller input or protocol data is invalid for the operation.
     #[error("invalid input: {0}")]
-    InvalidInput(String),
+    InvalidInput(
+        /// Description of the invalid input.
+        String,
+    ),
 
+    /// A protocol request could not be completed.
     #[error("request error: {0}")]
-    Request(&'static str),
+    Request(
+        /// Description of the request failure.
+        &'static str,
+    ),
 
+    /// Authentication, pairing, or confirmation was refused.
     #[error("authentication refused")]
     AuthenticationRefused,
 
+    /// The user canceled the operation.
     #[error("action canceled by the user")]
     UserCancelled,
 
+    /// The requested address-display form is not supported.
     #[error("unsupported display address: {0}")]
-    UnsupportedDisplayAddress(String),
+    UnsupportedDisplayAddress(
+        /// Description of the unsupported address form.
+        String,
+    ),
 
+    /// PIN interaction was requested for a device that is already unlocked.
     #[error("{0}")]
-    DeviceAlreadyUnlocked(&'static str),
+    DeviceAlreadyUnlocked(
+        /// Description of the device's unlocked state.
+        &'static str,
+    ),
 }
 
 impl Error {
+    /// Creates an unexpected-result error with response data and operation context.
     pub fn unexpected_result(data: Vec<u8>, context: impl Into<String>) -> Self {
         Error::UnexpectedResult(data, context.into())
     }
 }
 
+/// The BitBox interpreter using this module's shared command and result types.
 #[cfg(feature = "bitbox")]
 pub type BitBoxInterpreter<'a> = bitbox::BitBoxInterpreter<'a, Command, Transmit, Response, Error>;
+/// The Coldcard interpreter using this module's shared command and result types.
 #[cfg(feature = "coldcard")]
 pub type ColdcardInterpreter<'a> =
     coldcard::ColdcardInterpreter<'a, Command, Transmit, Response, Error>;
+/// The Jade interpreter using this module's shared command and result types.
 #[cfg(feature = "jade")]
 pub type JadeInterpreter = jade::JadeInterpreter<Command, Transmit, Response, Error>;
+/// The Ledger interpreter using this module's shared command and result types.
 #[cfg(feature = "ledger")]
 pub type LedgerInterpreter = ledger::LedgerInterpreter<Command, Transmit, Response, Error>;
+/// The Trezor interpreter using this module's shared command and result types.
 #[cfg(feature = "trezor")]
 pub type TrezorInterpreter = trezor::TrezorInterpreter<Command, Transmit, Response, Error>;
+/// The KeepKey interpreter using this module's shared command and result types.
 #[cfg(feature = "keepkey")]
 pub type KeepKeyInterpreter = keepkey::KeepKeyInterpreter<Command, Transmit, Response, Error>;
+/// The Specter-DIY interpreter using this module's shared command and result types.
 #[cfg(feature = "specter")]
 pub type SpecterInterpreter = specter::SpecterInterpreter<Command, Transmit, Response, Error>;
 

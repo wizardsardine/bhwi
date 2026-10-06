@@ -1,3 +1,8 @@
+//! Channel adapters for browser WebHID and WebUSB connections.
+//!
+//! These implementations connect browser channels to the asynchronous device
+//! framing transports.
+
 use super::webhid::WebHidDevice;
 use super::webusb::WebUsbDevice;
 use async_trait::async_trait;

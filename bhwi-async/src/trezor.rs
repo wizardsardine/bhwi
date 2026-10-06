@@ -8,7 +8,9 @@ use bhwi::{
     trezor::{TrezorCommand, TrezorError, TrezorInterpreter, TrezorResponse},
 };
 
+/// An asynchronous Trezor client with session-dependent passphrase entry.
 pub struct Trezor<T> {
+    /// The transport used for device exchanges.
     pub transport: T,
     network: Network,
     passphrase: Option<HostPassphrase>,
@@ -17,6 +19,7 @@ pub struct Trezor<T> {
 }
 
 impl<T> Trezor<T> {
+    /// Creates a mainnet client defaulting to on-device passphrase entry.
     pub fn new(transport: T) -> Self {
         Self {
             transport,
@@ -27,18 +30,23 @@ impl<T> Trezor<T> {
         }
     }
 
+    /// Sets the network used for key encoding, addresses, and signing.
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = network;
         self
     }
 
+    /// Sets the normalized passphrase used when the session selects host entry.
+    ///
+    /// `None` uses an empty host passphrase. The limit is 50 normalized UTF-8 bytes.
     pub fn with_passphrase(mut self, passphrase: Option<HostPassphrase>) -> Self {
         self.passphrase = passphrase;
         self
     }
 
-    /// Emulators report the on-device passphrase capability but have no way to take one,
-    /// so the host supplies it regardless.
+    /// Marks emulator sessions so unlock selects host passphrase entry.
+    ///
+    /// Emulators may advertise on-device entry without being able to collect input.
     pub fn with_emulator(mut self, is_emulated: bool) -> Self {
         self.is_emulated = is_emulated;
         self
@@ -86,6 +94,9 @@ impl<T> crate::OnUnlock for Trezor<T> {
     }
 }
 
+/// An unused HTTP client whose [`HttpClient::request`] implementation always panics.
+///
+/// Trezor commands do not use HTTP; this is not a fallback HTTP implementation.
 pub struct DummyClient;
 #[async_trait(?Send)]
 impl HttpClient for DummyClient {

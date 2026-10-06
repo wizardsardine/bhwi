@@ -1,3 +1,5 @@
+//! Browser WebHID connections and queued input reports.
+
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use js_sys::Uint8Array;
@@ -7,6 +9,11 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::HidDevice;
 
+/// An open WebHID connection with queued input reports and a close callback.
+///
+/// Its [`Channel`](bhwi_async::transport::Channel) implementation requires a
+/// receive buffer matching the input report length. It reports sends as
+/// successful even when [`write`](Self::write) logs a failure.
 #[wasm_bindgen]
 pub struct WebHidDevice {
     device: HidDevice,
@@ -15,6 +22,19 @@ pub struct WebHidDevice {
 }
 
 impl WebHidDevice {
+    /// Requests permission for a matching HID device and opens the first selection.
+    ///
+    /// Requires a browser `Window` with WebHID support and permission to show the
+    /// device chooser, normally from a user gesture in a secure context. The
+    /// optional `name` must be a substring of the selected device's product name.
+    /// Returns `None` without a window, on cancellation, on a name mismatch, or
+    /// when opening fails. If `on_close_cb` is a function, disconnect events for
+    /// the same vendor and product IDs call it with no arguments.
+    ///
+    /// # Panics
+    ///
+    /// Panics if browser values have unexpected types or event listeners cannot
+    /// be installed. A throwing close callback also causes a panic.
     pub async fn get_webhid_device(
         name: Option<&str>,
         vendor_id: u16,
@@ -127,12 +147,22 @@ impl WebHidDevice {
 
 #[wasm_bindgen]
 impl WebHidDevice {
+    /// Waits for the next input report, returning `None` when the queue ends.
+    ///
+    /// No read timeout is imposed.
     // TODO: return error and maybe remove wasm_bindgen
     #[wasm_bindgen]
     pub async fn read(&mut self) -> Option<Vec<u8>> {
         self.msg_queue.next().await
     }
 
+    /// Sends HID report zero, logging asynchronous failures or a closed connection.
+    ///
+    /// Failures are not returned to the caller.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the browser rejects the send call synchronously.
     // TODO: return error and maybe remove wasm_bindgen
     #[wasm_bindgen]
     pub async fn write(&self, data: &[u8]) {
@@ -151,6 +181,13 @@ impl WebHidDevice {
         }
     }
 
+    /// Schedules closing the connection and calling a function-valued close callback.
+    ///
+    /// Returns before the browser finishes closing.
+    ///
+    /// # Panics
+    ///
+    /// The scheduled task panics if closing fails or the callback throws.
     #[wasm_bindgen]
     pub fn close(&mut self) {
         let close_future = JsFuture::from(self.device.close());
@@ -169,6 +206,7 @@ impl WebHidDevice {
         });
     }
 
+    /// Returns whether the browser currently reports the connection as open.
     #[wasm_bindgen]
     pub fn valid(&self) -> bool {
         self.device.opened()

@@ -1,3 +1,5 @@
+//! Ledger wallet policy encoding and single-key policy construction.
+
 use core::str::FromStr;
 
 use bitcoin::{
@@ -10,19 +12,23 @@ use miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, WalletPolicyErro
 
 use super::{merkle::MerkleTree, store::DelegatedStore};
 
+/// Ledger wallet policy wire-format version.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Version {
+    /// Version 1, embedding the descriptor template.
     V1 = 1,
+    /// Version 2, committing to the descriptor template's SHA-256 hash.
     V2 = 2,
 }
 
+/// Bitcoin address families used by Ledger wallet policies.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AddressType {
     /// Legacy address type. P2PKH for single sig, P2SH for scripts.
     Legacy,
-    /// Native segwit v0 address type. P2WPKH for single sig, P2WPSH for scripts.
+    /// Native SegWit v0: P2WPKH for single keys and P2WSH for scripts.
     NativeSegwit,
-    /// Nested segwit v0 address type. P2SH-P2WPKH for single sig, P2SH-P2WPSH for scripts.
+    /// Wrapped SegWit v0: P2SH-P2WPKH for single keys and P2SH-P2WSH for scripts.
     NestedSegwit,
     /// Segwit v1 Taproot address type. P2TR always.
     Taproot,
@@ -34,8 +40,11 @@ pub enum AddressType {
 /// and provides the wire-format serialization that the Ledger Bitcoin app expects.
 #[derive(Clone, Debug)]
 pub struct LedgerWalletPolicy {
+    /// User-visible wallet name; standard unnamed policies use an empty string.
     pub name: String,
+    /// Wallet policy wire-format version.
     pub version: Version,
+    /// Descriptor template and resolved keys.
     pub policy: WalletPolicy,
 }
 
@@ -58,6 +67,7 @@ impl WalletPolicyParts {
 }
 
 impl LedgerWalletPolicy {
+    /// Creates a policy wrapper without validating firmware-specific constraints.
     pub fn new(name: String, version: Version, policy: WalletPolicy) -> Self {
         Self {
             name,
@@ -66,6 +76,9 @@ impl LedgerWalletPolicy {
         }
     }
 
+    /// Serializes the policy with its descriptor commitment and key Merkle root.
+    ///
+    /// The name byte length is cast to `u8` without range validation.
     pub fn serialize(&self) -> Result<Vec<u8>, WalletError> {
         let parts = WalletPolicyParts::from_policy(&self.policy)?;
         let mut res: Vec<u8> = (self.version as u8).to_be_bytes().to_vec();
@@ -106,6 +119,7 @@ impl LedgerWalletPolicy {
         Ok(res)
     }
 
+    /// Returns the SHA-256 digest of the serialized policy.
     pub fn id(&self) -> Result<[u8; 32], WalletError> {
         let serialized = self.serialize()?;
         let mut engine = sha256::Hash::engine();
@@ -113,6 +127,7 @@ impl LedgerWalletPolicy {
         Ok(sha256::Hash::from_engine(engine).to_byte_array())
     }
 
+    /// Creates a delegated store containing the policy, template, and key preimages.
     pub fn to_store(&self) -> Result<DelegatedStore, WalletError> {
         let parts = WalletPolicyParts::from_policy(&self.policy)?;
         let mut store = DelegatedStore::new();
@@ -169,12 +184,20 @@ pub fn singlesig_wallet_policy(
     Ok(policy)
 }
 
+/// Errors constructing or encoding a Ledger wallet policy.
 #[derive(Debug)]
 pub enum WalletError {
+    /// An invalid signature threshold.
     InvalidThreshold,
+    /// A path purpose or address family not supported by the policy builder.
     UnsupportedAddressType,
+    /// An invalid path, key, or policy.
     InvalidPolicy,
-    WalletPolicy(WalletPolicyError),
+    /// A miniscript wallet policy error.
+    WalletPolicy(
+        /// Miniscript policy error.
+        WalletPolicyError,
+    ),
 }
 
 impl core::fmt::Display for WalletError {
