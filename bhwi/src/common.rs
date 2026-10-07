@@ -621,6 +621,8 @@ pub enum ErrorKind {
     Locked,
     /// The device is reachable but not ready to run commands.
     NotReady,
+    /// Another caller holds the device.
+    Busy,
     /// A PIN step was requested but the device is already unlocked.
     AlreadyUnlocked,
     /// The device has no wallet.
