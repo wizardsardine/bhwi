@@ -18,6 +18,7 @@ use bitcoin::{
 
 use super::api::make_script_config_simple;
 use super::error::BitBoxError;
+use super::policy::OwnedAccount;
 use super::proto as pb;
 
 /// The leading run of hardened elements of a derivation path (the account-level prefix).
@@ -404,6 +405,53 @@ fn find_our_key<T: PsbtOutputInfo>(
         "could not find our key in an input".into(),
     ))
 }
+fn find_account_key<T: PsbtOutputInfo>(
+    account: &OwnedAccount,
+    output_info: T,
+    secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::VerifyOnly>,
+) -> Result<Option<OurKey>, BitBoxError> {
+    let mut found = None;
+    let mut mismatched = false;
+    for (pubkey, (fingerprint, path)) in output_info.get_bip32_derivation() {
+        let prefix = account.path.as_ref();
+        let full = path.as_ref();
+        if *fingerprint != account.fingerprint || !full.starts_with(prefix) {
+            continue;
+        }
+        let suffix = &full[prefix.len()..];
+        if !matches!(
+            suffix,
+            [
+                bitcoin::bip32::ChildNumber::Normal { index: 0 | 1 },
+                bitcoin::bip32::ChildNumber::Normal { .. }
+            ]
+        ) {
+            return Err(BitBoxError::BtcSign(
+                "invalid multisig account child path".into(),
+            ));
+        }
+        let derived = account
+            .xpub
+            .derive_pub(secp, &suffix)
+            .map_err(|_| BitBoxError::BtcSign("invalid multisig public derivation".into()))?;
+        if derived.public_key != *pubkey {
+            mismatched = true;
+            continue;
+        }
+        if found.is_some() {
+            return Err(BitBoxError::BtcSign(
+                "ambiguous multisig input or change keys".into(),
+            ));
+        }
+        found = Some(OurKey::Segwit(*pubkey, path.clone()));
+    }
+    if found.is_none() && mismatched {
+        return Err(BitBoxError::BtcSign(
+            "multisig origin public key mismatch".into(),
+        ));
+    }
+    Ok(found)
+}
 
 fn script_config_from_utxo(
     output: &bitcoin::TxOut,
@@ -452,6 +500,16 @@ impl Transaction {
         psbt: &bitcoin::psbt::Psbt,
         force_script_config: Option<pb::BtcScriptConfigWithKeypath>,
     ) -> Result<(Self, Vec<OurKey>), BitBoxError> {
+        Self::from_psbt_with_account(our_root_fingerprint, psbt, force_script_config, None)
+    }
+
+    pub(crate) fn from_psbt_with_account(
+        our_root_fingerprint: &[u8],
+        psbt: &bitcoin::psbt::Psbt,
+        force_script_config: Option<pb::BtcScriptConfigWithKeypath>,
+        account: Option<&OwnedAccount>,
+    ) -> Result<(Self, Vec<OurKey>), BitBoxError> {
+        let secp = account.map(|_| bitcoin::secp256k1::Secp256k1::verification_only());
         let mut script_configs: Vec<pb::BtcScriptConfigWithKeypath> = Vec::new();
         let mut is_script_config_forced = false;
         if let Some(cfg) = force_script_config {
@@ -478,7 +536,12 @@ impl Transaction {
             let utxo = psbt
                 .spend_utxo(input_index)
                 .map_err(|e| BitBoxError::Psbt(e.to_string()))?;
-            let our_key = find_our_key(our_root_fingerprint, psbt_input)?;
+            let our_key = match (account, secp.as_ref()) {
+                (Some(account), Some(secp)) => find_account_key(account, psbt_input, secp)?.ok_or(
+                    BitBoxError::InvalidInput("multisig input has no verified device account key"),
+                )?,
+                _ => find_our_key(our_root_fingerprint, psbt_input)?,
+            };
             let script_config_index = if is_script_config_forced {
                 0
             } else {
@@ -503,9 +566,12 @@ impl Transaction {
 
         let mut outputs: Vec<TxOutput> = Vec::new();
         for (tx_output, psbt_output) in psbt.unsigned_tx.output.iter().zip(&psbt.outputs) {
-            let our_key = find_our_key(our_root_fingerprint, psbt_output);
+            let our_key = match (account, secp.as_ref()) {
+                (Some(account), Some(secp)) => find_account_key(account, psbt_output, secp)?,
+                _ => find_our_key(our_root_fingerprint, psbt_output).ok(),
+            };
             match our_key {
-                Ok(our_key) => {
+                Some(our_key) => {
                     let script_config_index = if is_script_config_forced {
                         0
                     } else {
@@ -521,7 +587,7 @@ impl Transaction {
                         script_config_index: script_config_index as _,
                     }));
                 }
-                Err(_) => {
+                None => {
                     outputs.push(TxOutput::External(tx_output.try_into()?));
                 }
             }
@@ -600,4 +666,257 @@ pub fn apply_signatures(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::policy::{AccountResolver, Policy};
+    use super::*;
+    use bitcoin::bip32::{ChildNumber, Xpriv, Xpub};
+    use bitcoin::secp256k1::Secp256k1;
+    use miniscript::descriptor::{Descriptor, DescriptorPublicKey, WalletPolicy};
+    use miniscript::psbt::{PsbtInputExt, PsbtOutputExt};
+    use std::str::FromStr;
+
+    fn fixture() -> (
+        OwnedAccount,
+        bitcoin::psbt::Psbt,
+        pb::BtcScriptConfigWithKeypath,
+        Xpriv,
+        Xpriv,
+    ) {
+        let secp = Secp256k1::new();
+        let root = Xpriv::new_master(bitcoin::Network::Testnet, &[31; 32]).unwrap();
+        let foreign = Xpriv::new_master(bitcoin::Network::Testnet, &[32; 32]).unwrap();
+        let path: DerivationPath = "m/48'/1'/3'/2'".parse().unwrap();
+        let ours = Xpub::from_priv(&secp, &root.derive_priv(&secp, &path).unwrap());
+        let theirs = Xpub::from_priv(&secp, &foreign.derive_priv(&secp, &path).unwrap());
+        let fingerprint = root.fingerprint(&secp);
+        // A fingerprint collision at the same account path must not select the foreign key.
+        let descriptor = format!(
+            "wsh(sortedmulti(2,[{fingerprint}/{path}]{theirs}/<0;1>/*,[{fingerprint}/{path}]{ours}/<0;1>/*))"
+        );
+        let wallet = WalletPolicy::from_str(&descriptor).unwrap();
+        let policy = Policy::from_wallet_policy(&wallet).unwrap();
+        let mut resolver =
+            AccountResolver::new(&policy, fingerprint, bitcoin::Network::Testnet).unwrap();
+        assert!(!resolver.accept_xpub(&policy, ours).unwrap());
+        assert!(resolver.accept_xpub(&policy, ours).unwrap());
+        let (config, account) = resolver.finish(policy).unwrap();
+        let config = pb::BtcScriptConfigWithKeypath {
+            script_config: Some(config),
+            keypath: path.to_u32_vec(),
+        };
+        let branches = Descriptor::<DescriptorPublicKey>::from_str(&descriptor)
+            .unwrap()
+            .into_single_descriptors()
+            .unwrap();
+        let receive = branches[0].derive_at_index(7).unwrap();
+        let change = branches[1].derive_at_index(9).unwrap();
+        let previous = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::null(),
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(50_000),
+                script_pubkey: receive.derived_descriptor(&secp).script_pubkey(),
+            }],
+        };
+        let mut psbt = bitcoin::psbt::Psbt::from_unsigned_tx(bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: previous.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(49_000),
+                script_pubkey: change.derived_descriptor(&secp).script_pubkey(),
+            }],
+        })
+        .unwrap();
+        psbt.inputs[0].witness_utxo = Some(previous.output[0].clone());
+        psbt.inputs[0].non_witness_utxo = Some(previous);
+        psbt.inputs[0]
+            .update_with_descriptor_unchecked(&receive)
+            .unwrap();
+        psbt.outputs[0]
+            .update_with_descriptor_unchecked(&change)
+            .unwrap();
+        (account, psbt, config, root, foreign)
+    }
+
+    fn sign_with_root(psbt: &mut bitcoin::psbt::Psbt, root: &Xpriv, path: &DerivationPath) {
+        let secp = Secp256k1::new();
+        let private = bitcoin::PrivateKey::new(
+            root.derive_priv(&secp, path).unwrap().private_key,
+            bitcoin::Network::Testnet,
+        );
+        let keys = BTreeMap::from([(private.public_key(&secp), private)]);
+        psbt.sign(&keys, &secp).unwrap();
+    }
+
+    #[test]
+    fn native_multisig_lowering_checks_derived_keys_and_preserves_real_partials() {
+        let (account, mut psbt, config, root, foreign) = fixture();
+        let input_path = account.path.extend([
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index: 7 },
+        ]);
+        sign_with_root(&mut psbt, &foreign, &input_path);
+        let original = psbt.clone();
+        let (transaction, keys) = Transaction::from_psbt_with_account(
+            account.fingerprint.as_bytes(),
+            &psbt,
+            Some(config.clone()),
+            Some(&account),
+        )
+        .unwrap();
+        assert_eq!(transaction.script_configs, vec![config]);
+        assert_eq!(transaction.inputs[0].keypath, input_path);
+        assert!(matches!(&transaction.outputs[0], TxOutput::Internal(output)
+            if output.keypath == account.path.extend([ChildNumber::Normal { index: 1 }, ChildNumber::Normal { index: 9 }])));
+        let secp = Secp256k1::new();
+        let ours = account
+            .xpub
+            .derive_pub(
+                &secp,
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 7 },
+                ],
+            )
+            .unwrap()
+            .public_key;
+        assert!(
+            matches!(&keys[0], OurKey::Segwit(key, path) if *key == ours && *path == input_path)
+        );
+        let mut signed = psbt.clone();
+        sign_with_root(&mut signed, &root, &input_path);
+        let signature = signed.inputs[0].partial_sigs[&bitcoin::PublicKey::new(ours)]
+            .signature
+            .serialize_compact();
+        apply_signatures(&mut psbt, &[signature.to_vec()], &keys).unwrap();
+        assert_eq!(psbt, signed);
+        for (key, signature) in &original.inputs[0].partial_sigs {
+            assert_eq!(psbt.inputs[0].partial_sigs.get(key), Some(signature));
+        }
+        let mut cache = bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
+        let (message, _) = psbt.sighash_ecdsa(0, &mut cache).unwrap();
+        for (key, signature) in &psbt.inputs[0].partial_sigs {
+            secp.verify_ecdsa(&message, &signature.signature, &key.inner)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn native_multisig_input_and_change_metadata_fail_closed() {
+        let (account, original, config, _, _) = fixture();
+        let secp = Secp256k1::verification_only();
+        let ours = account
+            .xpub
+            .derive_pub(
+                &secp,
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 7 },
+                ],
+            )
+            .unwrap()
+            .public_key;
+        let change_key = account
+            .xpub
+            .derive_pub(
+                &secp,
+                &[
+                    ChildNumber::Normal { index: 1 },
+                    ChildNumber::Normal { index: 9 },
+                ],
+            )
+            .unwrap()
+            .public_key;
+        let lower = |psbt: &bitcoin::psbt::Psbt| {
+            Transaction::from_psbt_with_account(
+                account.fingerprint.as_bytes(),
+                psbt,
+                Some(config.clone()),
+                Some(&account),
+            )
+        };
+        let mut missing = original.clone();
+        missing.inputs[0].bip32_derivation.remove(&ours);
+        assert!(lower(&missing).is_err());
+        let mut wrong_change = original.clone();
+        wrong_change.outputs[0].bip32_derivation.remove(&change_key);
+        assert!(lower(&wrong_change).is_err());
+        let mut wrong_origin = original.clone();
+        wrong_origin.inputs[0]
+            .bip32_derivation
+            .get_mut(&ours)
+            .unwrap()
+            .1 = "m/48'/1'/4'/2'/0/7".parse().unwrap();
+        assert!(lower(&wrong_origin).is_err());
+        let mut wrong_fingerprint = original.clone();
+        wrong_fingerprint.inputs[0]
+            .bip32_derivation
+            .get_mut(&ours)
+            .unwrap()
+            .0 = bitcoin::bip32::Fingerprint::from([0; 4]);
+        assert!(lower(&wrong_fingerprint).is_err());
+        for suffix in ["2/7", "0/7'", "0/7/0", "0", ""] {
+            let mut wrong = original.clone();
+            let path: DerivationPath = if suffix.is_empty() {
+                account.path.clone()
+            } else {
+                format!("{}/{suffix}", account.path).parse().unwrap()
+            };
+            wrong.inputs[0].bip32_derivation.get_mut(&ours).unwrap().1 = path.clone();
+            assert!(lower(&wrong).is_err(), "input accepted {path}");
+            let mut wrong = original.clone();
+            wrong.outputs[0]
+                .bip32_derivation
+                .get_mut(&change_key)
+                .unwrap()
+                .1 = path;
+            assert!(lower(&wrong).is_err(), "change accepted {suffix}");
+        }
+        let mut ambiguous = original.clone();
+        let child = account
+            .xpub
+            .derive_pub(
+                &secp,
+                &[
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 8 },
+                ],
+            )
+            .unwrap();
+        ambiguous.inputs[0].bip32_derivation.insert(
+            child.public_key,
+            (
+                account.fingerprint,
+                account.path.extend([
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 8 },
+                ]),
+            ),
+        );
+        assert!(lower(&ambiguous).is_err());
+        let mut external = original;
+        external.outputs[0].bip32_derivation.clear();
+        assert!(matches!(
+            &lower(&external).unwrap().0.outputs[0],
+            TxOutput::External(_)
+        ));
+    }
 }
