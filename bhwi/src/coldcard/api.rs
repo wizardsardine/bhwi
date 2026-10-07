@@ -342,6 +342,36 @@ mod tests {
         };
         assert_eq!(error.to_string(), "Coldcard Error: boom");
     }
+
+    #[test]
+    fn every_parser_reports_refu_and_err_frames() {
+        use super::response;
+        use crate::coldcard::ColdcardError;
+
+        type Parser = fn(&[u8]) -> Result<(), ColdcardError>;
+        let parsers: [(&str, Parser); 8] = [
+            ("get_xpub", |res| response::get_xpub(res).map(|_| ())),
+            ("master_fingerprint", |res| {
+                response::master_fingerprint(res).map(|_| ())
+            }),
+            ("upload", |res| response::upload(res).map(|_| ())),
+            ("sha256", |res| response::sha256(res).map(|_| ())),
+            ("okay", response::okay),
+            ("download", |res| response::download(res).map(|_| ())),
+            ("version", |res| response::version(res).map(|_| ())),
+            ("mypub", |res| response::mypub(res).map(|_| ())),
+        ];
+        for (name, parse) in parsers {
+            assert!(
+                matches!(parse(b"refu"), Err(ColdcardError::UserCancelled)),
+                "{name}"
+            );
+            assert!(
+                matches!(parse(b"err_boom"), Err(ColdcardError::Device(text)) if text == "boom"),
+                "{name}"
+            );
+        }
+    }
 }
 
 /// Parsers for Coldcard response tags and payloads.
@@ -412,13 +442,14 @@ pub mod response {
         /// Parse data from the raw device response given an expected response
         /// message.
         fn expect_response(res: &[u8], expected: ResponseMessage) -> Result<&[u8], ColdcardError> {
-            ResponseHandler::parse_response(res).and_then(|(msg, data)| {
-                if expected == msg {
-                    Ok(data)
-                } else {
-                    Err(ColdcardError::unexpected_response_message(msg, &[expected]))
-                }
-            })
+            match ResponseHandler::parse_response(res)? {
+                (msg, data) if msg == expected => Ok(data),
+                (ResponseMessage::Refu, _) => Err(ColdcardError::UserCancelled),
+                (ResponseMessage::Err_, data) => Err(ColdcardError::Device(
+                    String::from_utf8_lossy(data).into_owned(),
+                )),
+                (msg, _) => Err(ColdcardError::unexpected_response_message(msg, &[expected])),
+            }
         }
     }
 

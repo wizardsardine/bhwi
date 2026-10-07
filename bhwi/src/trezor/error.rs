@@ -25,7 +25,7 @@ pub enum TrezorError {
     #[error("device failure: {1}")]
     Failure(
         /// Device failure code.
-        i32,
+        Option<i32>,
         /// Device failure message.
         String,
     ),
@@ -39,8 +39,8 @@ pub enum TrezorError {
     #[error("device returned a key for the wrong network")]
     NetworkMismatch,
     /// An operation refused or cancelled by the device.
-    #[error("device refused the operation")]
-    ActionCancelled,
+    #[error("{}", .1.as_deref().unwrap_or("device refused the operation"))]
+    ActionCancelled(i32, Option<String>),
     /// Setup or restore attempted on an initialized device.
     #[error("device is already initialized")]
     AlreadyInitialized,
@@ -50,6 +50,9 @@ pub enum TrezorError {
         /// Unsupported operation or missing context.
         &'static str,
     ),
+    /// A management command missing caller-supplied data.
+    #[error("unsupported command: {0}")]
+    MissingContext(&'static str),
     /// An unsupported address-display request.
     #[error("unsupported display address: {0}")]
     UnsupportedDisplayAddress(

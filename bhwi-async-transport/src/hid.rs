@@ -78,7 +78,7 @@ impl Channel for HidChannel {
             .await
             .write_output_report(&report)
             .await
-            .map_err(std::io::Error::other)?;
+            .map_err(hid_io_error)?;
         Ok(data.len())
     }
 
@@ -88,6 +88,15 @@ impl Channel for HidChannel {
             .await
             .read_input_report(data)
             .await
-            .map_err(std::io::Error::other)
+            .map_err(hid_io_error)
+    }
+}
+
+fn hid_io_error(error: async_hid::HidError) -> std::io::Error {
+    match error {
+        async_hid::HidError::Disconnected | async_hid::HidError::NotConnected => {
+            std::io::Error::new(std::io::ErrorKind::NotConnected, error)
+        }
+        error => std::io::Error::other(error),
     }
 }

@@ -3,10 +3,11 @@ use std::rc::Rc;
 
 use async_trait::async_trait;
 use bhwi::bitcoin::{Network, bip32::Fingerprint};
+use bhwi::common::{self, ErrorKind};
 #[cfg(any(feature = "trezor", feature = "keepkey"))]
 use bhwi::passphrase::HostPassphrase;
 
-use crate::{HWIDevice, HWIDeviceError, Info};
+use crate::{ErrorKindOf, HWIDevice, HWIDeviceError, Info};
 
 /// A supported hardware-wallet family, independent of enabled backend features.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -157,7 +158,7 @@ pub type HostInteractionFactory = Rc<dyn Fn() -> Box<dyn crate::HostInteraction>
 #[async_trait(?Send)]
 pub trait DeviceSource {
     /// A discovery or device-opening failure.
-    type Error: std::error::Error + 'static;
+    type Error: std::error::Error + ErrorKindOf + 'static;
 
     /// Lists matching candidates, potentially probing emulators with I/O.
     async fn list(&self, selector: &DeviceSelector) -> Result<Vec<DeviceCandidate>, Self::Error>;
@@ -265,7 +266,7 @@ impl<S: DeviceSource> DeviceManager<S> {
         for candidate in self.list().await? {
             match self.open(&candidate).await {
                 Ok(device) => scan.devices.push(device),
-                Err(err) => scan.skipped.push(skipped_candidate(&candidate, &err)),
+                Err(err) => scan.skipped.push(unopened_candidate(&candidate, &err)),
             }
         }
         Ok(scan)
@@ -274,7 +275,7 @@ impl<S: DeviceSource> DeviceManager<S> {
     /// Opens candidates and runs their unlock handshake until the optional fingerprint matches.
     ///
     /// Successful Trezor or KeepKey initialization can leave the wallet PIN-locked.
-    /// A common [`bhwi::common::Error::UserCancelled`] from unlock or fingerprint
+    /// A common [`bhwi::common::ErrorKind::UserCancelled`] from unlock or fingerprint
     /// queries aborts selection. Without a fingerprint filter, any unlock failure
     /// is returned rather than silently selecting another wallet. Other failures
     /// are collected as skipped devices. Trezor and KeepKey device-side cancellations
@@ -289,14 +290,16 @@ impl<S: DeviceSource> DeviceManager<S> {
             let mut d = match self.open(&candidate).await {
                 Ok(device) => device,
                 Err(err) => {
-                    skipped.push(skipped_candidate(&candidate, &err));
+                    skipped.push(unopened_candidate(&candidate, &err));
                     continue;
                 }
             };
 
             if let Err(err) = d.device().unlock(self.selector.network).await {
                 // Without a fingerprint, skipping would hand back the next wallet instead.
-                if is_user_cancelled(&err) || self.selector.fingerprint.is_none() {
+                if err.kind() == Some(ErrorKind::UserCancelled)
+                    || self.selector.fingerprint.is_none()
+                {
                     return Err(err.into());
                 }
                 skipped.push(skipped_candidate(&candidate, &err));
@@ -314,7 +317,7 @@ impl<S: DeviceSource> DeviceManager<S> {
                 }
                 Ok(_) => {}
                 Err(err) => {
-                    if is_user_cancelled(&err) {
+                    if err.kind() == Some(ErrorKind::UserCancelled) {
                         return Err(err.into());
                     }
                     skipped.push(skipped_candidate(&candidate, &err));
@@ -333,7 +336,7 @@ impl<S: DeviceSource> DeviceManager<S> {
 
     /// Opens and probes candidates, caching information and initialized-wallet fingerprints.
     ///
-    /// A common [`bhwi::common::Error::UserCancelled`] from unlock or probe commands
+    /// A common [`bhwi::common::ErrorKind::UserCancelled`] from unlock or probe commands
     /// aborts the scan. Other per-device failures, including Trezor and KeepKey
     /// device-side cancellations mapped to authentication refusals, are collected
     /// as skipped devices.
@@ -344,13 +347,13 @@ impl<S: DeviceSource> DeviceManager<S> {
             let mut device = match self.open(&candidate).await {
                 Ok(device) => device,
                 Err(err) => {
-                    scan.skipped.push(skipped_candidate(&candidate, &err));
+                    scan.skipped.push(unopened_candidate(&candidate, &err));
                     continue;
                 }
             };
             match probe(&mut device, self.selector.network).await {
                 Ok(()) => scan.devices.push(device),
-                Err(err) if is_user_cancelled(&err) => return Err(err.into()),
+                Err(err) if err.kind() == Some(ErrorKind::UserCancelled) => return Err(err.into()),
                 Err(err) => scan.skipped.push(skipped_candidate(&candidate, &err)),
             }
         }
@@ -420,6 +423,18 @@ fn skipped_candidate(
     )
 }
 
+fn unopened_candidate<E>(candidate: &DeviceCandidate, error: &E) -> SkippedDevice
+where
+    E: std::error::Error + ErrorKindOf + 'static,
+{
+    SkippedDevice {
+        device_type: candidate.device_type,
+        model: candidate.model.clone(),
+        path: candidate.path.clone(),
+        error: classify(error, Some(error.error_kind())),
+    }
+}
+
 async fn probe(device: &mut Device, network: Network) -> Result<(), HWIDeviceError> {
     // XXX: Coldcard always needs unlocking
     device.device().unlock(network).await?;
@@ -440,128 +455,56 @@ pub fn no_device(skipped: Vec<SkippedDevice>) -> Result<Option<Device>, NoUsable
 
 /// Returns whether an error chain contains a common user-cancellation error.
 pub fn is_user_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
+    classify_error(err).kind() == ErrorKind::UserCancelled
+}
+
+/// Classifies an error chain into a common error, keeping its kind, code, and message.
+pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> common::Error {
+    classify(err, None)
+}
+
+fn classify(err: &(dyn std::error::Error + 'static), kind: Option<ErrorKind>) -> common::Error {
+    let message = err.to_string();
+    let mut kind = kind;
     let mut source = Some(err);
     while let Some(current) = source {
-        if matches!(
-            current.downcast_ref::<bhwi::common::Error>(),
-            Some(bhwi::common::Error::UserCancelled)
-        ) {
-            return true;
+        if let Some(error) = current.downcast_ref::<common::Error>() {
+            return reworded(error, message);
         }
+        kind = kind.or_else(|| {
+            current
+                .downcast_ref::<HWIDeviceError>()
+                .and_then(HWIDeviceError::kind)
+        });
         source = current.source();
     }
-    false
+    common::Error::new(kind.unwrap_or(ErrorKind::Other), message)
 }
 
-/// A caller-facing classification of a device-operation failure.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum DeviceErrorKind {
-    /// The user cancelled the operation.
-    UserCancelled,
-    /// Required command information is absent or address display is unsupported.
-    UnsupportedCommand,
-    /// Input or a reported device error was classified as invalid.
-    InvalidInput,
-    /// The device reports that it is locked.
-    NotReady,
-    /// The device reports that PIN submission is unnecessary or already complete.
-    AlreadyUnlocked,
-    /// No recognized typed error or message was found.
-    Unclassified,
+fn reworded(error: &common::Error, message: String) -> common::Error {
+    if error.to_string() == message {
+        return error.clone();
+    }
+    let inner = error.to_string();
+    let message = if message.contains(&inner) {
+        message
+            .replace(&inner, error.message())
+            .trim_end_matches(": ")
+            .to_owned()
+    } else if message.contains(error.message()) {
+        message
+    } else {
+        format!("{message}: {}", error.message())
+    };
+    let mut outer = common::Error::new(error.kind(), message);
+    if let Some(code) = error.device_code() {
+        outer = outer.with_device_code(code);
+    }
+    if let Some(data) = error.data() {
+        outer = outer.with_data(data.to_vec());
+    }
+    outer
 }
-
-/// A device error's classification and display message.
-#[derive(Debug, Clone)]
-pub struct ClassifiedDeviceError {
-    /// The recognized error category.
-    pub kind: DeviceErrorKind,
-    /// The selected error message.
-    pub message: String,
-}
-
-/// Classifies recognized errors in the source chain, then falls back to message matching.
-pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ClassifiedDeviceError {
-    let mut source = Some(err);
-    while let Some(current) = source {
-        if let Some(error) = current.downcast_ref::<bhwi::common::Error>() {
-            use bhwi::common::Error as CommonError;
-            let kind = match error {
-                CommonError::UserCancelled => DeviceErrorKind::UserCancelled,
-                CommonError::MissingCommandInfo(_) | CommonError::UnsupportedDisplayAddress(_) => {
-                    DeviceErrorKind::UnsupportedCommand
-                }
-                CommonError::InvalidInput(_) | CommonError::Device(_) => {
-                    DeviceErrorKind::InvalidInput
-                }
-                _ => break,
-            };
-            return ClassifiedDeviceError {
-                kind,
-                message: error.to_string(),
-            };
-        }
-        // KeepKey re-exports this type, so both devices land here.
-        #[cfg(any(feature = "keepkey", feature = "trezor"))]
-        if let Some(error) = current.downcast_ref::<bhwi::trezor::TrezorError>() {
-            use bhwi::trezor::TrezorError;
-            if matches!(
-                error,
-                TrezorError::NonNumericPin
-                    | TrezorError::PassphraseTooLong
-                    | TrezorError::InvalidInput(_)
-            ) {
-                return ClassifiedDeviceError {
-                    kind: DeviceErrorKind::InvalidInput,
-                    message: error.to_string(),
-                };
-            }
-        }
-        source = current.source();
-    }
-    classify_message(err.to_string())
-}
-
-/// Classifies known locked or already-unlocked messages, preserving other messages.
-pub fn classify_message(message: String) -> ClassifiedDeviceError {
-    #[cfg(feature = "trezor")]
-    if message.contains(LOCKED_MESSAGE) {
-        return ClassifiedDeviceError {
-            kind: DeviceErrorKind::NotReady,
-            message: LOCKED_MESSAGE.to_owned(),
-        };
-    }
-    #[cfg(feature = "keepkey")]
-    if message.contains(KEEPKEY_LOCKED_MESSAGE) {
-        return ClassifiedDeviceError {
-            kind: DeviceErrorKind::NotReady,
-            message: KEEPKEY_LOCKED_MESSAGE.to_owned(),
-        };
-    }
-    #[cfg(any(feature = "keepkey", feature = "trezor"))]
-    for unlocked in [
-        bhwi::trezor::TrezorError::NO_PIN_NEEDED,
-        bhwi::trezor::TrezorError::PIN_ALREADY_SENT,
-    ] {
-        if message.contains(unlocked) {
-            return ClassifiedDeviceError {
-                kind: DeviceErrorKind::AlreadyUnlocked,
-                message: unlocked.to_owned(),
-            };
-        }
-    }
-    ClassifiedDeviceError {
-        kind: DeviceErrorKind::Unclassified,
-        message,
-    }
-}
-
-/// The Trezor locked-device message recognized by [`classify_message`].
-#[cfg(feature = "trezor")]
-pub const LOCKED_MESSAGE: &str = bhwi::trezor::TrezorError::LOCKED;
-
-/// The KeepKey locked-device message recognized by [`classify_message`].
-#[cfg(feature = "keepkey")]
-pub const KEEPKEY_LOCKED_MESSAGE: &str = bhwi::keepkey::KEEPKEY_LOCKED;
 
 /// A candidate rejected during opening, selection, or probing.
 #[derive(Debug, Clone)]
@@ -572,10 +515,8 @@ pub struct SkippedDevice {
     pub model: String,
     /// The discovery path.
     pub path: String,
-    /// The classified error's display message.
-    pub error: String,
-    /// The classified error category.
-    pub kind: DeviceErrorKind,
+    /// The classified error.
+    pub error: common::Error,
 }
 
 /// A successfully opened device or a rejected candidate.
@@ -600,13 +541,11 @@ impl SkippedDevice {
         path: impl Into<String>,
         error: &(dyn std::error::Error + 'static),
     ) -> Self {
-        let ClassifiedDeviceError { kind, message } = classify_error(error);
         Self {
             device_type,
             model: model.into(),
             path: path.into(),
-            error: message,
-            kind,
+            error: classify_error(error),
         }
     }
 }
@@ -895,12 +834,22 @@ mod tests {
     const REFUSING: [u8; 4] = [0xaa; 4];
     const UNLOCKED: [u8; 4] = [0xbb; 4];
 
+    #[derive(Debug, thiserror::Error)]
+    #[error("device went away")]
+    struct Unplugged;
+
+    impl ErrorKindOf for Unplugged {
+        fn error_kind(&self) -> ErrorKind {
+            ErrorKind::Disconnected
+        }
+    }
+
     /// A wallet that refuses authentication, then one that unlocks.
     struct Wallets(DeviceType);
 
     #[async_trait(?Send)]
     impl DeviceSource for Wallets {
-        type Error = std::io::Error;
+        type Error = Unplugged;
 
         async fn list(&self, _: &DeviceSelector) -> Result<Vec<DeviceCandidate>, Self::Error> {
             Ok(["refusing", "unlocked"]
@@ -1010,38 +959,238 @@ mod tests {
     #[test]
     fn an_interpreter_error_reads_as_its_cause() {
         let wrapped: crate::Error<std::io::Error, std::io::Error> = crate::Error::Interpreter(
-            bhwi::common::Error::InvalidInput("Passphrase too long".into()),
+            bhwi::common::Error::new(ErrorKind::InvalidInput, "Passphrase too long"),
         );
-        assert_eq!(wrapped.to_string(), "invalid input: Passphrase too long");
+        assert_eq!(wrapped.to_string(), "[InvalidInput] Passphrase too long");
         assert_eq!(
             std::error::Error::source(&wrapped)
                 .expect("the cause is kept")
                 .to_string(),
-            "invalid input: Passphrase too long"
+            "[InvalidInput] Passphrase too long"
         );
 
         let skipped = SkippedDevice::new(DeviceType::KeepKey, "keepkey", "udp:11044", &wrapped);
-        assert_eq!(skipped.error, "invalid input: Passphrase too long");
-        assert!(matches!(skipped.kind, DeviceErrorKind::InvalidInput));
-    }
-
-    #[cfg(any(feature = "keepkey", feature = "trezor"))]
-    #[test]
-    fn a_raw_pin_error_is_classified_without_the_trezor_feature() {
-        let error = bhwi::trezor::TrezorError::NonNumericPin;
-        let classified = classify_error(&error);
-        assert_eq!(classified.message, error.to_string());
-        assert!(matches!(classified.kind, DeviceErrorKind::InvalidInput));
+        assert_eq!(
+            skipped.error,
+            bhwi::common::Error::new(ErrorKind::InvalidInput, "Passphrase too long")
+        );
+        assert_eq!(
+            skipped.error.to_string(),
+            "[InvalidInput] Passphrase too long"
+        );
     }
 
     #[test]
     fn a_transport_error_keeps_the_layer_that_carries_its_meaning() {
-        let wrapped: crate::Error<std::io::Error, std::io::Error> =
-            crate::Error::Transport(std::io::Error::other("Broken pipe"));
+        let wrapped = HWIDeviceError::with_kind(
+            crate::Error::<std::io::Error, std::io::Error>::Transport {
+                kind: ErrorKind::Transport,
+                error: std::io::Error::other("Broken pipe"),
+            },
+            ErrorKind::Transport,
+        );
 
         let skipped = SkippedDevice::new(DeviceType::KeepKey, "keepkey", "udp:11044", &wrapped);
-        assert_eq!(skipped.error, "transport error: Broken pipe");
-        assert!(matches!(skipped.kind, DeviceErrorKind::Unclassified));
+        assert_eq!(skipped.error.kind(), ErrorKind::Transport);
+        assert_eq!(
+            skipped.error.to_string(),
+            "[Transport] transport error: Broken pipe"
+        );
+    }
+
+    #[cfg(feature = "trezor")]
+    struct Replies(std::collections::VecDeque<Result<Vec<u8>, std::io::Error>>);
+
+    #[cfg(feature = "trezor")]
+    impl Replies {
+        fn new(replies: impl IntoIterator<Item = Result<Vec<u8>, std::io::Error>>) -> Self {
+            Self(replies.into_iter().collect())
+        }
+    }
+
+    #[cfg(feature = "trezor")]
+    #[async_trait(?Send)]
+    impl crate::Transport for Replies {
+        type Error = std::io::Error;
+
+        async fn exchange(&mut self, _: &[u8], _: bool) -> Result<Vec<u8>, Self::Error> {
+            self.0.pop_front().expect("a scripted reply")
+        }
+
+        fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+            crate::transport::io_error_kind(error)
+        }
+    }
+
+    #[cfg(feature = "trezor")]
+    fn raised<F>(error: &HWIDeviceError) -> common::Error
+    where
+        F: std::error::Error + 'static,
+    {
+        match std::error::Error::source(error)
+            .and_then(|source| source.downcast_ref::<crate::Error<std::io::Error, F>>())
+        {
+            Some(crate::Error::Interpreter(error)) => error.clone(),
+            other => panic!("expected an interpreter error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "trezor")]
+    fn assert_kept_whole(error: &HWIDeviceError, raised: &common::Error) {
+        assert_eq!(classify_error(error), *raised);
+        let skipped = SkippedDevice::new(DeviceType::Trezor, "trezor_one", "udp:21324", error);
+        assert_eq!(skipped.error, *raised);
+        assert_eq!(skipped.error.to_string(), error.to_string());
+    }
+
+    #[cfg(feature = "trezor")]
+    fn trezor_reply(
+        message_type: bhwi::trezor::api::MessageType,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, std::io::Error> {
+        Ok(bhwi::trezor::api::frame(message_type as u16, payload))
+    }
+
+    #[cfg(feature = "trezor")]
+    #[test]
+    fn a_trezor_failure_keeps_its_kind_code_and_message() {
+        use bhwi::trezor::{TrezorError, api::MessageType};
+
+        // `Failure`: field 1 is the code (7, PIN invalid), field 2 the message.
+        let mut failure = vec![0x08, 0x07, 0x12, 0x0b];
+        failure.extend_from_slice(b"PIN invalid");
+        let mut trezor =
+            crate::Trezor::new(Replies::new([trezor_reply(MessageType::Failure, &failure)]));
+
+        let error = block_on(HWIDevice::get_master_fingerprint(&mut trezor))
+            .expect_err("the device reports a failure");
+
+        let raised = raised::<TrezorError>(&error);
+        assert_eq!(raised.kind(), ErrorKind::WrongPin);
+        assert_eq!(raised.device_code(), Some(common::DeviceCode::Trezor(7)));
+        assert_eq!(raised.message(), "PIN invalid");
+        assert_kept_whole(&error, &raised);
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("getting fingerprint failed")]
+        struct Context(#[source] crate::HWIDeviceError);
+        let classified = classify_error(&Context(error));
+        assert_eq!(classified.kind(), ErrorKind::WrongPin);
+        assert_eq!(
+            classified.message(),
+            "getting fingerprint failed: PIN invalid"
+        );
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("getting fingerprint failed: {0}")]
+        struct Quoting(#[source] common::Error);
+        let quoted = classify_error(&Quoting(common::Error::new(
+            ErrorKind::WrongPin,
+            "PIN invalid",
+        )));
+        assert_eq!(
+            quoted.to_string(),
+            "[WrongPin] getting fingerprint failed: PIN invalid"
+        );
+    }
+
+    #[cfg(feature = "trezor")]
+    #[test]
+    fn a_disconnect_keeps_the_kind_recorded_by_the_device_error() {
+        let mut trezor = crate::Trezor::new(Replies::new([Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "device went away",
+        ))]));
+
+        let error = block_on(HWIDevice::get_master_fingerprint(&mut trezor))
+            .expect_err("the transport fails");
+
+        let classified = classify_error(&error);
+        assert_eq!(classified.kind(), ErrorKind::Disconnected);
+        assert_eq!(classified.device_code(), None);
+        assert_eq!(classified.data(), None);
+        assert_eq!(
+            classified.to_string(),
+            "[Disconnected] transport error: device went away"
+        );
+        let skipped = SkippedDevice::new(DeviceType::Trezor, "trezor_one", "udp:21324", &error);
+        assert_eq!(skipped.error, classified);
+        assert!(!is_user_cancelled(&error));
+    }
+
+    #[cfg(feature = "trezor")]
+    struct CancellingTrezor;
+
+    #[cfg(feature = "trezor")]
+    #[async_trait(?Send)]
+    impl DeviceSource for CancellingTrezor {
+        type Error = Unplugged;
+
+        async fn list(&self, _: &DeviceSelector) -> Result<Vec<DeviceCandidate>, Self::Error> {
+            Ok(vec![DeviceCandidate {
+                device_type: DeviceType::Trezor,
+                name: "trezor".to_owned(),
+                model: "trezor_one".to_owned(),
+                path: "udp:21324".to_owned(),
+                is_emulated: true,
+            }])
+        }
+
+        async fn open(
+            &self,
+            candidate: &DeviceCandidate,
+            _: &DeviceSelector,
+            _: Option<&PairingCodePrompt>,
+            _: Option<&HostInteractionFactory>,
+        ) -> Result<Device, Self::Error> {
+            use bhwi::trezor::api::MessageType;
+            // `Failure`: field 1 is the code (4, action cancelled), field 2 the message.
+            let mut failure = vec![0x08, 0x04, 0x12, 0x18];
+            failure.extend_from_slice(b"Action cancelled by user");
+            let replies = Replies::new([
+                trezor_reply(MessageType::Features, &[]),
+                trezor_reply(MessageType::Failure, &failure),
+            ]);
+            Ok(Device::new(
+                &candidate.name,
+                candidate.device_type,
+                &candidate.path,
+                &candidate.model,
+                Box::new(crate::Trezor::new(replies)),
+                candidate.is_emulated,
+            ))
+        }
+    }
+
+    #[cfg(feature = "trezor")]
+    #[test]
+    fn a_cancel_on_the_device_ends_selection_instead_of_skipping_it() {
+        let selector = DeviceSelector {
+            fingerprint: Some(Fingerprint::from(UNLOCKED)),
+            ..DeviceSelector::default()
+        };
+        let err = block_on(DeviceManager::new(CancellingTrezor, selector).select())
+            .err()
+            .expect("the cancel is reported");
+
+        let SelectError::Device(err) = err else {
+            panic!("expected the device error, got {err:?}");
+        };
+        assert_eq!(err.kind(), Some(ErrorKind::UserCancelled));
+        let raised = raised::<bhwi::trezor::TrezorError>(&err);
+        assert_eq!(raised.device_code(), Some(common::DeviceCode::Trezor(4)));
+
+        let built = crate::HWIDeviceError::new(common::Error::new(
+            ErrorKind::UserCancelled,
+            "action canceled by the user",
+        ));
+        assert_eq!(built.kind(), Some(ErrorKind::UserCancelled));
+        let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(common::Error::new(
+            ErrorKind::UserCancelled,
+            "action canceled by the user",
+        ));
+        let converted = crate::HWIDeviceError::from(boxed);
+        assert_eq!(converted.kind(), Some(ErrorKind::UserCancelled));
     }
 
     #[test]

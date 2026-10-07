@@ -120,17 +120,24 @@ impl<T: Transport> BitBox<T> {
         let exchange = transport
             .exchange(&transmit.payload, transmit.encrypted)
             .await
-            .map_err(|e| BitBoxError::Transport(format!("{e:?}")))?;
+            .map_err(|e| transport_error(transport.error_kind(&e), format!("{e:?}")))?;
         let mut next = interpreter.exchange(exchange)?;
         while let Some(t) = next {
             // BitBox02 never talks to a pin server; every transmit targets the device.
             let exchange = transport
                 .exchange(&t.payload, t.encrypted)
                 .await
-                .map_err(|e| BitBoxError::Transport(format!("{e:?}")))?;
+                .map_err(|e| transport_error(transport.error_kind(&e), format!("{e:?}")))?;
             next = interpreter.exchange(exchange)?;
         }
         interpreter.end()
+    }
+}
+
+fn transport_error(kind: common::ErrorKind, message: String) -> BitBoxError {
+    match kind {
+        common::ErrorKind::Disconnected => BitBoxError::Disconnected(message),
+        _ => BitBoxError::Transport(message),
     }
 }
 

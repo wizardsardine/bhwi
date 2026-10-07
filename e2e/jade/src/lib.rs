@@ -261,7 +261,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("unsupported display address"));
+        assert!(err.to_string().contains("[UnsupportedDisplayAddress]"));
     }
 
     #[tokio::test]

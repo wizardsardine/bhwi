@@ -20,6 +20,8 @@ use async_trait::async_trait;
 
 pub use bhwi::device::DeviceId;
 
+use crate::ErrorKind;
+
 /// Asynchronous packet I/O supplied to device-specific framing adapters.
 ///
 /// Futures need not be `Send`; implementations choose their I/O runtime and
@@ -30,4 +32,18 @@ pub trait Channel {
     async fn send(&self, data: &[u8]) -> Result<usize, std::io::Error>;
     /// Receives bytes into `data` and returns the number read.
     async fn receive(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error>;
+}
+
+/// Returns [`ErrorKind::Disconnected`] for I/O errors that mean the device went away,
+/// and [`ErrorKind::Transport`] otherwise.
+pub fn io_error_kind(error: &std::io::Error) -> ErrorKind {
+    use std::io::ErrorKind as Io;
+    match error.kind() {
+        Io::BrokenPipe
+        | Io::UnexpectedEof
+        | Io::NotConnected
+        | Io::ConnectionReset
+        | Io::ConnectionAborted => ErrorKind::Disconnected,
+        _ => ErrorKind::Transport,
+    }
 }

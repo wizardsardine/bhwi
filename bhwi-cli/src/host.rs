@@ -97,7 +97,7 @@ fn read_host_response(
         write_prompt(&host_prompt(request)).map_err(host_io_error)?;
         let response = read()
             .map_err(host_io_error)?
-            .ok_or(common::Error::UserCancelled)?;
+            .ok_or_else(|| common::Error::new(common::ErrorKind::UserCancelled, ""))?;
         if let Some(response) = parse_host_response(request, response) {
             return Ok(response);
         }
@@ -154,9 +154,12 @@ fn host_io_error(error: io::Error) -> common::Error {
         error.kind(),
         io::ErrorKind::UnexpectedEof | io::ErrorKind::Interrupted
     ) {
-        common::Error::UserCancelled
+        common::Error::new(common::ErrorKind::UserCancelled, "")
     } else {
-        common::Error::Device(format!("host interaction failed: {error}"))
+        common::Error::new(
+            common::ErrorKind::Rejected,
+            format!("host interaction failed: {error}"),
+        )
     }
 }
 
@@ -227,7 +230,7 @@ mod tests {
         };
         assert!(matches!(
             read_host_response(&request, || Ok(None), |_| Ok(())),
-            Err(common::Error::UserCancelled)
+            Err(e) if e.kind() == common::ErrorKind::UserCancelled
         ));
     }
 }

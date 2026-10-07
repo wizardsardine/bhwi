@@ -27,7 +27,8 @@ pub fn trezor_pin_context(pin: bhwi::trezor::HostPin) -> DeviceContext {
 pub fn trezor_pin_context_from_positions(
     positions: String,
 ) -> Result<DeviceContext, crate::HWIDeviceError> {
-    let pin = bhwi::trezor::HostPin::new(positions).map_err(crate::HWIDeviceError::new)?;
+    let pin = bhwi::trezor::HostPin::new(positions)
+        .map_err(|e| crate::HWIDeviceError::with_kind(e, crate::ErrorKind::InvalidInput))?;
     Ok(trezor_pin_context(pin))
 }
 
@@ -89,7 +90,8 @@ pub fn keepkey_pin_context(pin: bhwi::keepkey::HostPin) -> DeviceContext {
 pub fn keepkey_pin_context_from_positions(
     positions: String,
 ) -> Result<DeviceContext, crate::HWIDeviceError> {
-    let pin = bhwi::keepkey::HostPin::new(positions).map_err(crate::HWIDeviceError::new)?;
+    let pin = bhwi::keepkey::HostPin::new(positions)
+        .map_err(|e| crate::HWIDeviceError::with_kind(e, crate::ErrorKind::InvalidInput))?;
     Ok(keepkey_pin_context(pin))
 }
 

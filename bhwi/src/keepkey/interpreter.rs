@@ -9,7 +9,7 @@ use prost::Message;
 
 use crate::Interpreter;
 use crate::common::HostRequest;
-use crate::keepkey::{KEEPKEY_LOCKED, api, proto};
+use crate::keepkey::{KEEPKEY_LOCKED, KeepKeyError, api, proto};
 use crate::miniscript::descriptor::DescriptorPublicKey;
 use crate::passphrase::HostPassphrase;
 use crate::trezor::error::TrezorError;
@@ -148,6 +148,8 @@ impl Profile for KeepKeyProfile {
     // messages.options: PassphraseAck.passphrase max_size:51, one byte of
     // which is the NUL terminator.
     const MAX_PASSPHRASE_BYTES: usize = 50;
+    /// `compute_address` fails, answered as Failure_Other "Can't encode address".
+    const KEY_MISMATCH_FAILURES: &'static [i32] = &[9];
     fn pin_failure_needs_features(failure: &pb::Failure) -> bool {
         failure.code == Some(pb::failure::FailureType::FailureUnexpectedMessage as i32)
     }
@@ -348,7 +350,7 @@ where
     C: TryInto<KeepKeyCommand, Error = TrezorError>,
     T: From<Vec<u8>> + From<HostRequest>,
     R: From<TrezorResponse>,
-    E: From<TrezorError>,
+    E: From<KeepKeyError>,
 {
     type Command = C;
     type Transmit = T;
@@ -356,15 +358,16 @@ where
     type Error = E;
 
     fn start(&mut self, command: C) -> Result<T, E> {
-        let command = command.try_into().map_err(E::from)?;
-        Ok(match self.engine.start(command.into()).map_err(E::from)? {
+        let command = command.try_into().map_err(keepkey_error)?;
+        let transmit = self.engine.start(command.into()).map_err(keepkey_error)?;
+        Ok(match transmit {
             EngineTransmit::Device(bytes) => T::from(bytes),
             EngineTransmit::Host(request) => T::from(request),
         })
     }
 
     fn exchange(&mut self, data: Vec<u8>) -> Result<Option<T>, E> {
-        Ok(match self.engine.exchange(data).map_err(E::from)? {
+        Ok(match self.engine.exchange(data).map_err(keepkey_error)? {
             Some(EngineTransmit::Device(bytes)) => Some(T::from(bytes)),
             Some(EngineTransmit::Host(request)) => Some(T::from(request)),
             None => None,
@@ -372,16 +375,20 @@ where
     }
 
     fn end(self) -> Result<R, E> {
-        self.engine.end().map(R::from).map_err(E::from)
+        self.engine.end().map(R::from).map_err(keepkey_error)
     }
+}
+
+fn keepkey_error<E: From<KeepKeyError>>(error: TrezorError) -> E {
+    E::from(KeepKeyError(error))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::{
-        self, Command, DeviceContext, DisplayAddress, Error, HostResponse, MultisigAddressType,
-        MultisigDisplayAddress, Recipient, Response, Transmit,
+        self, Command, DeviceCode, DeviceContext, DisplayAddress, Error, ErrorKind, HostResponse,
+        MultisigAddressType, MultisigDisplayAddress, Recipient, Response, Transmit,
     };
     use crate::keepkey::ManagementContext;
     use crate::trezor::proto::{common as pb, management as mgmt};
@@ -499,8 +506,8 @@ mod tests {
         wrong.vendor = Some("trezor.io".into());
         assert!(matches!(
             bad.exchange(framed(api::MessageType::Features, &wrong)),
-            Err(Error::InvalidInput(message))
-                if message == "device features vendor is not KeepKey"
+            Err(e) if e.kind() == ErrorKind::InvalidInput
+                && e.message() == "device features vendor is not KeepKey"
         ));
     }
 
@@ -711,8 +718,8 @@ mod tests {
             if word == 0 {
                 assert!(matches!(
                     interp.exchange(vec![b'A']),
-                    Err(Error::InvalidInput(message))
-                        if message == "invalid recovery cipher response"
+                    Err(e) if e.kind() == ErrorKind::InvalidInput
+                        && e.message() == "invalid recovery cipher response"
                 ));
                 request = host_request(
                     interp
@@ -821,18 +828,18 @@ mod tests {
             pb::PinMatrixAck::decode(payload.as_slice()).unwrap().pin,
             "123"
         );
-        assert!(
+        assert!(matches!(
             send.exchange(framed(
                 api::MessageType::Failure,
                 &pb::Failure {
                     code: Some(pb::failure::FailureType::FailurePinInvalid as i32),
                     message: Some("bad pin".into()),
                 },
-            ))
-            .unwrap()
-            .is_none()
-        );
-        assert!(matches!(send.end().unwrap(), Response::DeviceAction(false)));
+            )),
+            Err(e) if e.kind() == ErrorKind::WrongPin
+                && e.device_code() == Some(DeviceCode::KeepKey(7))
+                && e.message() == "bad pin"
+        ));
     }
 
     #[test]
@@ -852,7 +859,7 @@ mod tests {
         };
         assert!(matches!(
             interp.exchange(framed(api::MessageType::Failure, &failure)),
-            Err(Error::Device(message)) if message == KEEPKEY_LOCKED
+            Err(e) if e.kind() == ErrorKind::Locked && e.message() == KEEPKEY_LOCKED
         ));
     }
 
@@ -884,7 +891,7 @@ mod tests {
                 },
                 None,
             )),
-            Err(Error::UnsupportedDisplayAddress(_))
+            Err(e) if e.kind() == ErrorKind::UnsupportedDisplayAddress
         ));
 
         let xonly = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -919,7 +926,7 @@ mod tests {
         );
         assert!(matches!(
             input.exchange(master_public_key(0x0102_0304)),
-            Err(Error::MissingCommandInfo(_))
+            Err(e) if e.kind() == ErrorKind::Unsupported
         ));
 
         let mut change = empty_psbt(TxOut {
@@ -932,7 +939,7 @@ mod tests {
         output.start(Command::SignTx(change, None)).unwrap();
         assert!(matches!(
             output.exchange(master_public_key(0x0102_0304)),
-            Err(Error::MissingCommandInfo(_))
+            Err(e) if e.kind() == ErrorKind::Unsupported
         ));
     }
 
@@ -1091,7 +1098,7 @@ mod tests {
     fn only_sorted_fully_derived_multisig_display_is_transmitted() {
         assert!(matches!(
             Interp::default().start(bare_multisig(false)),
-            Err(Error::UnsupportedDisplayAddress(_))
+            Err(e) if e.kind() == ErrorKind::UnsupportedDisplayAddress
         ));
         assert_eq!(
             device_frame(Interp::default().start(bare_multisig(true)).unwrap()).0,
@@ -1138,7 +1145,7 @@ mod tests {
         );
         assert!(matches!(
             Interp::default().start(xpub),
-            Err(Error::UnsupportedDisplayAddress(_))
+            Err(e) if e.kind() == ErrorKind::UnsupportedDisplayAddress
         ));
     }
 
@@ -1152,7 +1159,7 @@ mod tests {
         };
         assert!(matches!(
             interp.exchange(framed(api::MessageType::Failure, &failure)),
-            Err(Error::AuthenticationRefused)
+            Err(e) if e.kind() == ErrorKind::UserCancelled
         ));
     }
 

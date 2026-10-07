@@ -370,13 +370,14 @@ impl KeepKeyHostInteraction {
         &mut self,
         request: &HostRequest,
     ) -> Result<HostResponse, common::Error> {
-        let state = self
-            .debug
-            .state()
-            .await
-            .map_err(|_| common::Error::Request("KeepKey debuglink state unavailable"))?;
+        let state = self.debug.state().await.map_err(|_| {
+            common::Error::new(
+                common::ErrorKind::Protocol,
+                "KeepKey debuglink state unavailable",
+            )
+        })?;
         map_host_response(&self.pin, &self.mnemonic, request, &state)
-            .map_err(|error| common::Error::InvalidInput(error.to_string()))
+            .map_err(|error| common::Error::new(common::ErrorKind::InvalidInput, error.to_string()))
     }
 
     pub async fn response_line(&mut self, request: &HostRequest) -> Result<String, common::Error> {

@@ -689,12 +689,11 @@ impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
         let response = pb::Response::decode(decrypted.as_slice())?;
         match response.response {
             Some(pb::response::Response::Success(_)) => Ok(true),
-            Some(pb::response::Response::Error(pb::Error { code, .. })) => {
-                let error = BitBoxDeviceError::from_code(code);
-                if error == BitBoxDeviceError::Generic {
+            Some(pb::response::Response::Error(pb::Error { code, message })) => {
+                if BitBoxDeviceError::from_code(code) == BitBoxDeviceError::Generic {
                     Ok(false)
                 } else {
-                    Err(error.into())
+                    Err(BitBoxError::from_reply(code, message))
                 }
             }
             _ => Err(BitBoxError::UnexpectedResponse),
@@ -1236,10 +1235,7 @@ where
                     _ => return Err(BitBoxError::UnexpectedResponse.into()),
                 };
                 if info.initialized {
-                    return Err(BitBoxError::InvalidInput(
-                        "The BitBox02 must be wiped before setup.",
-                    )
-                    .into());
+                    return Err(BitBoxError::AlreadyInitialized.into());
                 }
                 if setup.label.is_empty() {
                     let bytes = self.start_setup_initialization(setup)?;
@@ -1291,10 +1287,7 @@ where
                     _ => return Err(BitBoxError::UnexpectedResponse.into()),
                 };
                 if !info.initialized {
-                    return Err(BitBoxError::InvalidInput(
-                        "The BitBox02 must be initialized first.",
-                    )
-                    .into());
+                    return Err(BitBoxError::NotInitialized.into());
                 }
                 let bytes = self.build_encrypted(api::reset_request())?;
                 self.state = State::WipeWaitReset;
@@ -1312,10 +1305,7 @@ where
                     _ => return Err(BitBoxError::UnexpectedResponse.into()),
                 };
                 if info.initialized {
-                    return Err(BitBoxError::InvalidInput(
-                        "The BitBox02 must be wiped before setup.",
-                    )
-                    .into());
+                    return Err(BitBoxError::AlreadyInitialized.into());
                 }
                 if restore.label.is_empty() {
                     let bytes = self.build_encrypted(api::restore_from_mnemonic_request(
@@ -1358,10 +1348,7 @@ where
                     _ => return Err(BitBoxError::UnexpectedResponse.into()),
                 };
                 if !info.initialized {
-                    return Err(BitBoxError::InvalidInput(
-                        "The BitBox02 must be initialized first.",
-                    )
-                    .into());
+                    return Err(BitBoxError::NotInitialized.into());
                 }
                 let bytes = self.build_encrypted(api::set_mnemonic_passphrase_enabled_request(
                     !info.mnemonic_passphrase_enabled,

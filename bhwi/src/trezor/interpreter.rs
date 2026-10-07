@@ -283,7 +283,7 @@ enum State {
     AwaitPinPromptFeatures,
     AwaitPinMatrix,
     AwaitPinResult,
-    AwaitPinFailureFeatures,
+    AwaitPinFailureFeatures(Box<TrezorError>),
     AwaitSetupFeatures(Box<SetupCtx>),
     AwaitRestoreFeatures(Box<RestoreCtx>),
     AwaitEntropyRequest([u8; 32]),
@@ -351,6 +351,8 @@ pub(crate) trait Profile {
     const DEFAULT_ON_DEVICE_PASSPHRASE: bool;
 
     const MAX_PASSPHRASE_BYTES: usize;
+    /// Failure codes a multisig `GetAddress` answers when the path's key is not a cosigner.
+    const KEY_MISMATCH_FAILURES: &'static [i32];
 
     fn coin_name(network: Network) -> String;
     fn decode_features(payload: &[u8]) -> Result<DeviceFeatures, TrezorError>;
@@ -408,6 +410,8 @@ impl Profile for TrezorProfile {
     // legacy/firmware/protect.h MAX_PASSPHRASE_LEN, and core checks
     // len(passphrase.encode()) against the same 50.
     const MAX_PASSPHRASE_BYTES: usize = 50;
+    const KEY_MISMATCH_FAILURES: &'static [i32] =
+        &[pb::failure::FailureType::FailureDataError as i32];
 
     fn coin_name(network: Network) -> String {
         coin_name(network)
@@ -671,7 +675,11 @@ impl<P: Profile> Engine<P> {
         if msg_type == MessageType::Failure as u16 && !matches!(self.state, State::AwaitPinResult) {
             let failure: pb::Failure = api::decode(&payload)?;
             let error = failure_error(failure);
-            if matches!(error, TrezorError::ActionCancelled) {
+            let key_mismatch = matches!(
+                &error,
+                TrezorError::Failure(Some(code), _) if P::KEY_MISMATCH_FAILURES.contains(code)
+            );
+            if !key_mismatch {
                 return Err(error);
             }
             if let State::AwaitMultisigAddress(ctx) = &mut self.state
@@ -686,11 +694,6 @@ impl<P: Profile> Engine<P> {
                 );
                 ctx.next += 1;
                 return Ok(Some(EngineTransmit::Device(bytes)));
-            }
-            if matches!(self.state, State::AwaitMultisigAddress(_)) {
-                return Err(TrezorError::InvalidInput(
-                    "No path supplied matched device keys".into(),
-                ));
             }
             return Err(error);
         }
@@ -852,26 +855,28 @@ impl<P: Profile> Engine<P> {
                     let failure: pb::Failure = api::decode(&payload)?;
                     let needs_features = P::pin_failure_needs_features(&failure);
                     let error = failure_error(failure);
-                    if matches!(error, TrezorError::ActionCancelled) {
-                        return Err(error);
-                    }
-                    if needs_features {
-                        self.state = State::AwaitPinFailureFeatures;
+                    if needs_features && !matches!(error, TrezorError::ActionCancelled(..)) {
+                        self.state = State::AwaitPinFailureFeatures(Box::new(error));
                         return Ok(Some(EngineTransmit::Device(api::get_features())));
                     }
-                    TrezorResponse::DeviceAction(false)
+                    return Err(error);
                 } else {
                     TrezorResponse::DeviceAction(true)
                 }
             }
-            State::AwaitPinFailureFeatures => {
+            State::AwaitPinFailureFeatures(_) => {
+                let State::AwaitPinFailureFeatures(rejected) =
+                    core::mem::replace(&mut self.state, State::New)
+                else {
+                    unreachable!("state checked above")
+                };
                 let features = expect_features::<P>(
                     msg_type,
                     &payload,
                     "reading features after a rejected PIN",
                 )?;
                 check_device_pin_needed(&features)?;
-                TrezorResponse::DeviceAction(false)
+                return Err(*rejected);
             }
             State::AwaitSuccess | State::AwaitToggleSuccess | State::AwaitRecovery => {
                 let _: pb::Success = expect(
@@ -1142,11 +1147,14 @@ fn failure_error(failure: pb::Failure) -> TrezorError {
     let cancelled = pb::failure::FailureType::FailureActionCancelled as i32;
     let pin_cancelled = pb::failure::FailureType::FailurePinCancelled as i32;
     match failure.code {
-        Some(code) if code == cancelled || code == pin_cancelled => TrezorError::ActionCancelled,
+        Some(code) if code == cancelled || code == pin_cancelled => TrezorError::ActionCancelled(
+            code,
+            failure.message.filter(|message| !message.is_empty()),
+        ),
         code => {
             let message = failure.message.unwrap_or_default();
             TrezorError::Failure(
-                code.unwrap_or(0),
+                code,
                 if message.is_empty() {
                     "device reported a failure".into()
                 } else {
@@ -2005,7 +2013,9 @@ fn coin_name(network: Network) -> String {
 mod tests {
     use super::*;
     use crate::common;
-    use crate::common::{Command, DisplayAddress, Error, Response, Transmit};
+    use crate::common::{
+        Command, DeviceCode, DisplayAddress, Error, ErrorKind, Response, Transmit,
+    };
     use prost::Message;
 
     const XPUB: &str = "xpub6CLSXAha9gjRDyBn9wvyegsMdWKwengbdwY838GnzdyUxXfL9w7YKhczFkTuW4VaApKBw7UYVzbddataVrzYNjK8LWcyBy7MSHfwi15HnZS";
@@ -2550,8 +2560,8 @@ mod tests {
 
     fn refuse_path(interp: &mut Interp) -> Option<btc::GetAddress> {
         let failure = pb::Failure {
-            code: Some(pb::failure::FailureType::FailureProcessError as i32),
-            message: Some("Failed to derive scriptPubKey".to_string()),
+            code: Some(pb::failure::FailureType::FailureDataError as i32),
+            message: Some("Can't encode address".to_string()),
         };
         interp
             .exchange(framed(MessageType::Failure, &failure))
@@ -2729,6 +2739,23 @@ mod tests {
     }
 
     #[test]
+    fn multisig_probe_propagates_failures_that_are_not_key_mismatches() {
+        let mut interp = Interp::default().with_network(Network::Testnet);
+        start_multisig(&mut interp, multisig_address(false));
+        assert!(refuse_path(&mut interp).is_some());
+
+        let failure = pb::Failure {
+            code: Some(pb::failure::FailureType::FailurePinExpected as i32),
+            message: Some("PIN expected".to_string()),
+        };
+        assert!(matches!(
+            interp.exchange(framed(MessageType::Failure, &failure)),
+            Err(e) if e.kind() == ErrorKind::Locked
+                && e.device_code() == Some(DeviceCode::Trezor(5))
+        ));
+    }
+
+    #[test]
     fn display_address_by_multisig_reports_when_no_path_matches() {
         let mut interp = Interp::default().with_network(Network::Testnet);
         start_multisig(&mut interp, multisig_address(false));
@@ -2736,12 +2763,13 @@ mod tests {
         assert!(refuse_path(&mut interp).is_some());
 
         let failure = pb::Failure {
-            code: Some(pb::failure::FailureType::FailureProcessError as i32),
-            message: Some("Failed to derive scriptPubKey".to_string()),
+            code: Some(pb::failure::FailureType::FailureDataError as i32),
+            message: Some("Can't encode address".to_string()),
         };
         assert!(matches!(
             interp.exchange(framed(MessageType::Failure, &failure)),
-            Err(Error::InvalidInput(_))
+            Err(e) if e.device_code() == Some(DeviceCode::Trezor(3))
+                && e.message() == "Can't encode address"
         ));
     }
 
@@ -2754,7 +2782,10 @@ mod tests {
             message: Some("boom".to_string()),
         };
         let frame = framed(MessageType::Failure, &failure);
-        assert!(matches!(interp.exchange(frame), Err(Error::Rpc(_, _))));
+        assert!(matches!(
+            interp.exchange(frame),
+            Err(e) if matches!(e.device_code(), Some(DeviceCode::Trezor(_)))
+        ));
     }
 
     fn locked_features() -> mgmt::Features {
@@ -2817,7 +2848,8 @@ mod tests {
         };
         assert!(matches!(
             interp.exchange(framed(MessageType::Features, &features)),
-            Err(Error::DeviceAlreadyUnlocked(TrezorError::NO_PIN_NEEDED))
+            Err(e) if e.kind() == ErrorKind::AlreadyUnlocked
+                && e.message() == TrezorError::NO_PIN_NEEDED
         ));
     }
 
@@ -2832,7 +2864,8 @@ mod tests {
         };
         assert!(matches!(
             interp.exchange(framed(MessageType::Features, &features)),
-            Err(Error::DeviceAlreadyUnlocked(TrezorError::PIN_ALREADY_SENT))
+            Err(e) if e.kind() == ErrorKind::AlreadyUnlocked
+                && e.message() == TrezorError::PIN_ALREADY_SENT
         ));
     }
 
@@ -2866,7 +2899,8 @@ mod tests {
             };
             assert!(matches!(
                 interp.exchange(framed(MessageType::Failure, &failure)),
-                Err(Error::AuthenticationRefused)
+                Err(e) if e.kind() == ErrorKind::UserCancelled
+                    && e.device_code() == Some(DeviceCode::Trezor(code as i32))
             ));
         }
 
@@ -2883,15 +2917,10 @@ mod tests {
         let (msg_type, _) = decode_transmit::<mgmt::GetFeatures>(transmit);
         assert_eq!(msg_type, MessageType::GetFeatures as u16);
 
-        assert!(
-            interp
-                .exchange(framed(MessageType::Features, &locked_features()))
-                .unwrap()
-                .is_none()
-        );
         assert!(matches!(
-            interp.end().unwrap(),
-            Response::DeviceAction(false)
+            interp.exchange(framed(MessageType::Features, &locked_features())),
+            Err(e) if e.kind() == ErrorKind::WrongPin
+                && e.device_code() == Some(DeviceCode::Trezor(7))
         ));
     }
 
@@ -2910,7 +2939,8 @@ mod tests {
         };
         assert!(matches!(
             interp.exchange(framed(MessageType::Features, &features)),
-            Err(Error::DeviceAlreadyUnlocked(TrezorError::PIN_ALREADY_SENT))
+            Err(e) if e.kind() == ErrorKind::AlreadyUnlocked
+                && e.message() == TrezorError::PIN_ALREADY_SENT
         ));
     }
 
@@ -2957,11 +2987,12 @@ mod tests {
                 message: None,
             },
         );
-        let Err(Error::Device(message)) = interp.exchange(failure) else {
+        let Err(e) = interp.exchange(failure) else {
             panic!("expected a locked-device error");
         };
+        assert_eq!(e.kind(), ErrorKind::Locked);
         assert_eq!(
-            message,
+            e.message(),
             "Trezor is locked. Unlock by using 'promptpin' and then 'sendpin'."
         );
     }
@@ -3013,7 +3044,7 @@ mod tests {
     fn send_pin_without_context_is_rejected() {
         assert!(matches!(
             TrezorCommand::try_from(Command::SendPin(None)),
-            Err(TrezorError::Unsupported(_))
+            Err(TrezorError::MissingContext(_))
         ));
     }
 
@@ -3068,7 +3099,7 @@ mod tests {
         );
         assert!(matches!(
             interp.start(display),
-            Err(Error::UnsupportedDisplayAddress(_))
+            Err(e) if e.kind() == ErrorKind::UnsupportedDisplayAddress
         ));
     }
 
@@ -3085,7 +3116,7 @@ mod tests {
         );
         assert!(matches!(
             interp.exchange(wrong),
-            Err(Error::UnexpectedResult(..))
+            Err(e) if e.kind() == ErrorKind::UnexpectedResponse
         ));
     }
 
@@ -3095,7 +3126,7 @@ mod tests {
         interp.start(Command::GetMasterFingerprint).unwrap();
         assert!(matches!(
             interp.exchange(vec![0, 1, 2]),
-            Err(Error::Serialization(_))
+            Err(e) if e.kind() == ErrorKind::Serialization
         ));
     }
 
@@ -3105,7 +3136,7 @@ mod tests {
         let frame = framed(MessageType::Features, &mgmt::Features::default());
         assert!(matches!(
             interp.exchange(frame),
-            Err(Error::UnexpectedResult(..))
+            Err(e) if e.kind() == ErrorKind::UnexpectedResponse
         ));
     }
 
@@ -3121,7 +3152,8 @@ mod tests {
         let reply = framed(MessageType::PublicKey, &public_key(XPUB, None));
         assert!(matches!(
             interp.exchange(reply),
-            Err(Error::InvalidInput(_))
+            Err(e) if e.kind() == ErrorKind::WrongNetwork
+                && e.message() == "device returned a key for the wrong network"
         ));
     }
 
@@ -3237,7 +3269,7 @@ mod tests {
         );
         assert!(matches!(
             interp.exchange(failure),
-            Err(Error::InvalidInput(_))
+            Err(e) if e.kind() == ErrorKind::InvalidInput
         ));
 
         let mut ok = Interp::default()
@@ -3277,7 +3309,7 @@ mod tests {
                 crate::common::RestoreOptions::default(),
                 None
             )),
-            Err(Error::MissingCommandInfo(_))
+            Err(e) if e.kind() == ErrorKind::MissingContext
         ));
     }
 

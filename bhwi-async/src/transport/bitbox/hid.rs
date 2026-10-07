@@ -1,4 +1,7 @@
-use crate::{Transport, transport::Channel};
+use crate::{
+    ErrorKind, Transport,
+    transport::{Channel, io_error_kind},
+};
 use async_trait::async_trait;
 
 use bhwi::bitbox::u2f::{MAX_LEN, U2fHid};
@@ -163,6 +166,16 @@ impl<C: Channel> Transport for BitBoxTransportHID<C> {
 
     fn is_post_write_disconnect(&self, error: &Self::Error) -> bool {
         matches!(error, BitBoxHIDError::Read(_))
+    }
+
+    fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+        match error {
+            BitBoxHIDError::Write(error) | BitBoxHIDError::Read(error) => io_error_kind(error),
+            BitBoxHIDError::Comm(_)
+            | BitBoxHIDError::Nack
+            | BitBoxHIDError::Busy
+            | BitBoxHIDError::U2f => ErrorKind::Transport,
+        }
     }
 }
 

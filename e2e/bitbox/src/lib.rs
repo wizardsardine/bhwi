@@ -103,7 +103,7 @@ mod tests {
         // `InvalidState` — treat that as "already seeded" and carry on.
         match dev.restore_from_mnemonic(1_601_450_521, 0).await {
             Ok(()) => {}
-            Err(BitBoxError::Device(BitBoxDeviceError::InvalidState)) => {}
+            Err(BitBoxError::Device(BitBoxDeviceError::InvalidState, _)) => {}
             Err(e) => panic!("seed simulator mnemonic: {e:?}"),
         }
         dev

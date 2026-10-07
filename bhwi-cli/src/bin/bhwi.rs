@@ -21,7 +21,7 @@ use bhwi_cli::{
     device_manager,
     get_descriptors::GetKeypoolOptions,
     hwi::{PIN_MATRIX_DESCRIPTION, SEND_PIN_INSTRUCTION},
-    is_user_cancelled, networks_string, select_device, warn_skipped,
+    networks_string, select_device, warn_skipped,
 };
 use bhwi_cli::{address::AddressOutput, get_descriptors::DescriptorOutput};
 
@@ -378,7 +378,7 @@ async fn run() -> Result<()> {
                     device.path().to_string(),
                 );
                 let mut skip = |err: HWIDeviceError| -> anyhow::Result<()> {
-                    if is_user_cancelled(&err) {
+                    if err.kind() == Some(bhwi::common::ErrorKind::UserCancelled) {
                         return Err(err.into());
                     }
                     skipped.push(SkippedDevice::new(device_type, &model, &path, &err));

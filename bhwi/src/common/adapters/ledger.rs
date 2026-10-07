@@ -1,8 +1,8 @@
 use crate::common::{
-    Command, DeviceContext, DisplayAddress, Error, Info, Recipient, Response, Transmit,
-    WalletRegistration,
+    Command, DeviceCode, DeviceContext, DisplayAddress, Error, ErrorKind, Info, Recipient,
+    Response, Transmit, WalletRegistration,
 };
-use crate::ledger::apdu::ApduCommand;
+use crate::ledger::apdu::{ApduCommand, ApduError, StatusWord};
 use crate::ledger::store::StoreError;
 use crate::ledger::{
     LedgerCommand, LedgerDisplayAddress, LedgerError, LedgerResponse, LedgerWalletPolicy, Version,
@@ -126,31 +126,91 @@ impl From<LedgerResponse> for Response {
 impl From<LedgerError> for Error {
     fn from(error: LedgerError) -> Self {
         match error {
-            LedgerError::MissingCommandInfo(error) => Self::MissingCommandInfo(error),
-            LedgerError::NoErrorOrResult => Self::NoErrorOrResult,
-            LedgerError::Apdu(error) => Self::Serialization(format!("{error:?}")),
-            LedgerError::Store(error) => Self::Request(match error {
-                StoreError::EmptyInput => "Store operation failed: empty request",
-                StoreError::UnknownCommand(_) => "Store operation failed: unknown command",
-                StoreError::UnsupportedRequest(_) => "Store operation failed: unsupported request",
-                StoreError::InvalidIndexOrSize => {
-                    "Store operation failed: invalid Merkle index or size"
-                }
-                StoreError::UnknownHash => "Store operation failed: unknown hash",
-                StoreError::UnknownMerkleRoot => "Store operation failed: unknown Merkle root",
-                StoreError::UnexpectedQueue => "Store operation failed: unexpected queue state",
-            }),
-            LedgerError::Wallet(_) => Self::Request("Wallet operation failed"),
-            LedgerError::Interrupted => Self::Request("Operation interrupted"),
-            LedgerError::UnexpectedResult(data, context) => Self::unexpected_result(data, context),
-            LedgerError::UnsupportedDisplayAddress(context) => {
-                Self::UnsupportedDisplayAddress(context)
+            LedgerError::MissingCommandInfo(error) => Self::new(ErrorKind::Unsupported, error),
+            LedgerError::NoErrorOrResult => {
+                Self::new(ErrorKind::UnexpectedResponse, "no error or result returned")
             }
-            LedgerError::FailedToOpenApp(_) => Self::AuthenticationRefused,
-            LedgerError::InvalidPsbt(error) => Self::Serialization(error),
-            LedgerError::UserCancelled => Self::UserCancelled,
+            LedgerError::Apdu(ApduError::StatusWordUnknown(status)) => unknown_status(status),
+            LedgerError::Apdu(error) => Self::new(ErrorKind::Serialization, error.to_string()),
+            LedgerError::Store(error) => Self::new(
+                ErrorKind::Protocol,
+                match error {
+                    StoreError::EmptyInput => "Store operation failed: empty request",
+                    StoreError::UnknownCommand(_) => "Store operation failed: unknown command",
+                    StoreError::UnsupportedRequest(_) => {
+                        "Store operation failed: unsupported request"
+                    }
+                    StoreError::InvalidIndexOrSize => {
+                        "Store operation failed: invalid Merkle index or size"
+                    }
+                    StoreError::UnknownHash => "Store operation failed: unknown hash",
+                    StoreError::UnknownMerkleRoot => "Store operation failed: unknown Merkle root",
+                    StoreError::UnexpectedQueue => "Store operation failed: unexpected queue state",
+                },
+            ),
+            LedgerError::Wallet(_) => Self::new(ErrorKind::Protocol, "Wallet operation failed"),
+            LedgerError::Interrupted => Self::new(ErrorKind::Protocol, "Operation interrupted"),
+            LedgerError::UnexpectedResult(data, context) => Self::new(
+                ErrorKind::UnexpectedResponse,
+                format!("unexpected response to {context}"),
+            )
+            .with_data(data),
+            LedgerError::UnsupportedDisplayAddress(context) => {
+                Self::new(ErrorKind::UnsupportedDisplayAddress, context)
+            }
+            LedgerError::FailedToOpenApp(_) => {
+                Self::new(ErrorKind::NotReady, "Bitcoin app could not be opened")
+            }
+            LedgerError::Status(status, context) => Self::new(
+                status_kind(status),
+                LedgerError::Status(status, context).to_string(),
+            )
+            .with_device_code(DeviceCode::Ledger(status as u16)),
+            LedgerError::AppNotReady(status, context) => Self::new(
+                ErrorKind::NotReady,
+                LedgerError::AppNotReady(status, context).to_string(),
+            )
+            .with_device_code(DeviceCode::Ledger(status as u16)),
+            LedgerError::InvalidPsbt(error) => Self::new(ErrorKind::Serialization, error),
+            LedgerError::UserCancelled(status) => Self::new(ErrorKind::UserCancelled, "")
+                .with_device_code(DeviceCode::Ledger(status as u16)),
         }
     }
+}
+
+/// A refusal reaches here only from a command that never asks the user, so it is not a cancel.
+fn status_kind(status: StatusWord) -> ErrorKind {
+    match status {
+        StatusWord::IncorrectData => ErrorKind::InvalidInput,
+        StatusWord::NotSupported | StatusWord::InsNotSupported => ErrorKind::Unsupported,
+        StatusWord::WrongP1P2 | StatusWord::WrongDataLength | StatusWord::BadState => {
+            ErrorKind::Protocol
+        }
+        StatusWord::ClaNotSupported => ErrorKind::NotReady,
+        StatusWord::SignatureFail => ErrorKind::DeviceFailure,
+        StatusWord::Deny
+        | StatusWord::SecurityStatusNotSatisfied
+        | StatusWord::UserRefusedOnDevice
+        | StatusWord::CommandNotAllowed => ErrorKind::Rejected,
+        StatusWord::OK | StatusWord::InterruptedExecution => ErrorKind::Protocol,
+    }
+}
+
+/// Status words from the Ledger OS rather than the Bitcoin app, so absent from its table.
+fn unknown_status(status: u16) -> Error {
+    let (kind, message) = match status {
+        0x5515 => (ErrorKind::Locked, "Ledger device is locked".to_owned()),
+        0x6511 | 0x6D02 | 0x6E01 => (ErrorKind::NotReady, "Bitcoin app is not open".to_owned()),
+        0x6807 => (
+            ErrorKind::NotReady,
+            "Bitcoin app is not installed".to_owned(),
+        ),
+        _ => (
+            ErrorKind::Other,
+            format!("unknown status word 0x{status:04x}"),
+        ),
+    };
+    Error::new(kind, message).with_device_code(DeviceCode::Ledger(status))
 }
 
 impl From<ApduCommand> for Transmit {
@@ -286,7 +346,99 @@ mod tests {
                 Err(err) => err,
                 Ok(_) => panic!("expected an error"),
             };
-            assert!(matches!(err, Error::UserCancelled), "{err:?}");
+            assert_eq!(err.kind(), ErrorKind::UserCancelled, "{err:?}");
+            assert_eq!(
+                err.device_code(),
+                Some(DeviceCode::Ledger(u16::from_be_bytes(status)))
+            );
+        }
+    }
+
+    fn status_error(command: Command, replies: &[Vec<u8>], status: u16) -> Error {
+        let mut interpreter = LedgerInterpreter::default();
+        interpreter.start(command).unwrap();
+        for reply in replies {
+            interpreter.exchange(reply.clone()).unwrap();
+        }
+        match interpreter.exchange(status.to_be_bytes().to_vec()) {
+            Err(err) => err,
+            Ok(_) => panic!("{status:#06x}: expected an error"),
+        }
+    }
+
+    #[test]
+    fn every_failed_status_keeps_its_word_and_kind() {
+        let path = |s: &str| DerivationPath::from_str(s).unwrap();
+        let by_path = move || {
+            Command::DisplayAddress(
+                DisplayAddress::ByPath {
+                    path: path("m/84'/1'/0'/0/0"),
+                    display: true,
+                    address_format: None,
+                },
+                None,
+            )
+        };
+        let fingerprint = vec![0xf5, 0xac, 0xc2, 0xfd, 0x90, 0x00];
+        let mut xpub = KEY.split(']').nth(1).unwrap().as_bytes().to_vec();
+        xpub.extend([0x90, 0x00]);
+        type Case = (&'static str, Box<dyn Fn() -> Command>, Vec<Vec<u8>>);
+        let commands: Vec<Case> = vec![
+            (
+                "fingerprint",
+                Box::new(|| Command::GetMasterFingerprint),
+                vec![],
+            ),
+            (
+                "silent xpub",
+                Box::new(move || Command::GetXpub {
+                    path: path("m/84'/1'/0'"),
+                    display: false,
+                }),
+                vec![],
+            ),
+            ("address fingerprint step", Box::new(by_path), vec![]),
+            (
+                "address xpub step",
+                Box::new(by_path),
+                vec![fingerprint.clone()],
+            ),
+            ("address step", Box::new(by_path), vec![fingerprint, xpub]),
+            (
+                "sign message",
+                Box::new(move || Command::SignMessage {
+                    message: b"hello".to_vec(),
+                    path: path("m/84'/1'/0'/0/0"),
+                }),
+                vec![],
+            ),
+            (
+                "register",
+                Box::new(|| Command::RegisterWallet {
+                    name: "wallet".into(),
+                    policy: wallet_policy(),
+                }),
+                vec![],
+            ),
+        ];
+        for (name, command, replies) in commands {
+            for (status, kind) in [
+                (0x6A80, ErrorKind::InvalidInput),
+                (0x6A82, ErrorKind::Unsupported),
+                (0x6A86, ErrorKind::Protocol),
+                (0x6A87, ErrorKind::Protocol),
+                (0x6D00, ErrorKind::Unsupported),
+                (0xB007, ErrorKind::Protocol),
+                (0x6901, ErrorKind::Rejected),
+            ] {
+                if name == "silent xpub" && status == 0x6A82 {
+                    continue;
+                }
+                let err = status_error(command(), &replies, status);
+                assert_eq!(err.kind(), kind, "{name} {status:#06x}: {err:?}");
+                assert_eq!(err.device_code(), Some(DeviceCode::Ledger(status)));
+                assert!(err.message().contains(&format!("{status:#06x}")), "{err}");
+            }
         }
     }
 
@@ -312,7 +464,7 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("expected an error"),
         };
-        assert!(matches!(err, Error::UserCancelled), "{err:?}");
+        assert_eq!(err.kind(), ErrorKind::UserCancelled, "{err:?}");
     }
 
     #[test]
@@ -353,7 +505,7 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("expected an error"),
         };
-        assert!(matches!(err, Error::UserCancelled), "{err:?}");
+        assert_eq!(err.kind(), ErrorKind::UserCancelled, "{err:?}");
     }
 
     #[test]

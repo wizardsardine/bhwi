@@ -6,8 +6,11 @@ use crate::NativeResult;
 use crate::serial::{is_macos_dialin, require_tty_sysfs};
 use async_trait::async_trait;
 use bhwi_async::{
-    HttpClient, Jade, Transport,
-    transport::jade::{CborStream, JADE_DEVICE_IDS, tcp::TcpTransport},
+    ErrorKind, HttpClient, Jade, Transport,
+    transport::{
+        io_error_kind,
+        jade::{CborStream, JADE_DEVICE_IDS, tcp::TcpTransport},
+    },
 };
 use bitcoin::Network;
 use futures::{TryStreamExt, stream::iter};
@@ -68,6 +71,10 @@ impl Transport for SerialTransport {
     async fn exchange(&mut self, command: &[u8], _encrypted: bool) -> Result<Vec<u8>, Self::Error> {
         self.write_all(command).await?;
         self.read_cbor_message().await
+    }
+
+    fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+        io_error_kind(error)
     }
 }
 

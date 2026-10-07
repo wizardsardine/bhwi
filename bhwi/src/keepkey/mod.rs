@@ -12,11 +12,16 @@ use crate::device::DeviceId;
 
 /// KeepKey reuses the Trezor V1 wire format, so these are the same types.
 pub use crate::trezor::{
-    HostPin, TrezorDeviceInfo as KeepKeyDeviceInfo, TrezorError as KeepKeyError,
+    HostPin, TrezorDeviceInfo as KeepKeyDeviceInfo,
     TrezorMultisigAddress as KeepKeyMultisigAddress,
     TrezorMultisigAddressType as KeepKeyMultisigAddressType, TrezorResponse as KeepKeyResponse,
 };
 pub use interpreter::{KeepKeyCommand, KeepKeyInterpreter};
+
+/// A Trezor-engine error from a KeepKey, whose failure codes use KeepKey's numbering.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct KeepKeyError(#[from] pub crate::trezor::TrezorError);
 
 /// KeepKey USB vendor identifier.
 pub const KEEPKEY_VID: u16 = 0x2b24;

@@ -12,7 +12,7 @@ use std::{
 use async_trait::async_trait;
 use bhwi::specter::{MAX_RESPONSE_FRAME_SIZE, ResponseDecoder, SpecterError};
 
-use crate::Transport;
+use crate::{ErrorKind, Transport};
 
 /// Default limit for an on-device confirmation after a request is sent.
 pub const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -193,6 +193,20 @@ impl<S: SpecterStream> Transport for SpecterTransport<S> {
             }
         }
     }
+
+    fn error_kind(&self, error: &Self::Error) -> ErrorKind {
+        match error {
+            SpecterTransportError::Disconnected => ErrorKind::Disconnected,
+            SpecterTransportError::Protocol(error) => {
+                bhwi::common::Error::from(error.clone()).kind()
+            }
+            SpecterTransportError::ResponseTooLarge => ErrorKind::Serialization,
+            SpecterTransportError::Cancelled => ErrorKind::Transport,
+            SpecterTransportError::Io(_)
+            | SpecterTransportError::Timeout
+            | SpecterTransportError::Poisoned => ErrorKind::Transport,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +311,18 @@ mod tests {
                 _ => panic!("unexpected transport error"),
             }
         }
+
+        let transport = transport([Err(SpecterStreamError::Timeout)]);
+        assert_eq!(
+            transport.error_kind(&SpecterTransportError::ResponseTooLarge),
+            ErrorKind::Serialization
+        );
+        assert_eq!(
+            transport.error_kind(&SpecterTransportError::Protocol(
+                SpecterError::MalformedFraming("bad frame")
+            )),
+            ErrorKind::Serialization
+        );
     }
 
     #[test]

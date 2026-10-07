@@ -6,8 +6,8 @@ use crate::bitbox::policy;
 use crate::bitbox::proto as pb;
 use crate::bitbox::{BitBoxCommand, BitBoxResponse, BitBoxTransmit, ManagementContext};
 use crate::common::{
-    Command, DeviceBackup, DeviceContext, DisplayAddress, Error, Info, Recipient, Response,
-    Transmit, WalletRegistration,
+    Command, DeviceBackup, DeviceCode, DeviceContext, DisplayAddress, Error, ErrorKind, Info,
+    Recipient, Response, Transmit, WalletRegistration,
 };
 
 impl TryFrom<Command> for BitBoxCommand {
@@ -27,7 +27,7 @@ impl TryFrom<Command> for BitBoxCommand {
                     timezone_offset,
                 })) = context
                 else {
-                    return Err(BitBoxError::InvalidInput(
+                    return Err(BitBoxError::MissingContext(
                         "BitBox setup requires DeviceContext::BitBoxManagement",
                     ));
                 };
@@ -45,7 +45,7 @@ impl TryFrom<Command> for BitBoxCommand {
                     timezone_offset,
                 })) = context
                 else {
-                    return Err(BitBoxError::InvalidInput(
+                    return Err(BitBoxError::MissingContext(
                         "BitBox restore requires DeviceContext::BitBoxManagement",
                     ));
                 };
@@ -56,7 +56,7 @@ impl TryFrom<Command> for BitBoxCommand {
                 })
             }
             Command::TogglePassphrase => Ok(Self::TogglePassphrase),
-            Command::PromptPin | Command::SendPin(_) => Err(BitBoxError::InvalidInput(
+            Command::PromptPin | Command::SendPin(_) => Err(BitBoxError::Unsupported(
                 "PIN entry from the host not needed by BitBox02",
             )),
             Command::Unlock { .. } => Ok(Self::UnlockAndPair),
@@ -92,7 +92,7 @@ impl TryFrom<Command> for BitBoxCommand {
                         policy::Policy::from_wallet_policy(&policy)?
                     }
                     _ => {
-                        return Err(BitBoxError::InvalidInput(
+                        return Err(BitBoxError::MissingContext(
                             "BitBox requires DeviceContext::BitBox for descriptor address display",
                         ));
                     }
@@ -105,7 +105,7 @@ impl TryFrom<Command> for BitBoxCommand {
                 })
             }
             Command::DisplayAddress(DisplayAddress::ByMultisig(_), _) => Err(
-                BitBoxError::InvalidInput("BitBox raw multisig display is not implemented"),
+                BitBoxError::Unsupported("BitBox raw multisig display is not implemented"),
             ),
             Command::RegisterWallet { name, policy } => Ok(Self::RegisterScriptConfig {
                 policy: policy::Policy::from_wallet_policy(&policy)?,
@@ -120,7 +120,7 @@ impl TryFrom<Command> for BitBoxCommand {
                         Some(policy::Policy::from_wallet_policy(&policy)?)
                     }
                     Some(_) => {
-                        return Err(BitBoxError::InvalidInput(
+                        return Err(BitBoxError::MissingContext(
                             "BitBox requires DeviceContext::BitBox for policy signing",
                         ));
                     }
@@ -199,16 +199,55 @@ impl From<BitBoxResponse> for Response {
 
 impl From<BitBoxError> for Error {
     fn from(error: BitBoxError) -> Self {
+        let message = error.to_string();
         match error {
-            BitBoxError::Device(BitBoxDeviceError::UserAbort) => Self::UserCancelled,
-            BitBoxError::NoisePairingRejected => Self::AuthenticationRefused,
-            BitBoxError::UnsupportedDisplayAddress(message) => {
-                Self::UnsupportedDisplayAddress(message.to_string())
+            BitBoxError::Device(BitBoxDeviceError::UserAbort, text) => {
+                Self::new(ErrorKind::UserCancelled, text.unwrap_or_default())
+                    .with_device_code(DeviceCode::BitBox(104))
+            }
+            BitBoxError::Device(device, text) => {
+                let kind = match device {
+                    BitBoxDeviceError::InvalidInput => ErrorKind::InvalidInput,
+                    BitBoxDeviceError::Memory | BitBoxDeviceError::Generic => {
+                        ErrorKind::DeviceFailure
+                    }
+                    BitBoxDeviceError::UserAbort => ErrorKind::UserCancelled,
+                    BitBoxDeviceError::InvalidState => ErrorKind::NotReady,
+                    BitBoxDeviceError::Disabled => ErrorKind::Unsupported,
+                    BitBoxDeviceError::Duplicate => ErrorKind::Duplicate,
+                    BitBoxDeviceError::NoiseEncrypt | BitBoxDeviceError::NoiseDecrypt => {
+                        ErrorKind::Encryption
+                    }
+                    BitBoxDeviceError::Unknown(_) => ErrorKind::Other,
+                };
+                Self::new(kind, text.unwrap_or(message))
+                    .with_device_code(DeviceCode::BitBox(device.code()))
+            }
+            BitBoxError::NoisePairingRejected => Self::new(ErrorKind::AuthenticationRefused, ""),
+            BitBoxError::Noise("not paired") => Self::new(ErrorKind::NotReady, message),
+            BitBoxError::Noise(_)
+            | BitBoxError::Framing(_)
+            | BitBoxError::AntiKlepto(_)
+            | BitBoxError::BtcSign(_) => Self::new(ErrorKind::Protocol, message),
+            BitBoxError::NoiseConfig(_) => Self::new(ErrorKind::Other, message),
+            BitBoxError::Version(_) => Self::new(ErrorKind::Unsupported, message),
+            BitBoxError::UnexpectedResponse | BitBoxError::InvalidSignature => {
+                Self::new(ErrorKind::UnexpectedResponse, message)
             }
             BitBoxError::ProtobufDecode(error) | BitBoxError::ProtobufEncode(error) => {
-                Self::Serialization(error)
+                Self::new(ErrorKind::Serialization, error)
             }
-            other => Self::Serialization(other.to_string()),
+            BitBoxError::Psbt(error) => Self::new(ErrorKind::InvalidInput, error),
+            BitBoxError::InvalidInput(error) => Self::new(ErrorKind::InvalidInput, error),
+            BitBoxError::MissingContext(error) => Self::new(ErrorKind::MissingContext, error),
+            BitBoxError::Unsupported(error) => Self::new(ErrorKind::Unsupported, error),
+            BitBoxError::AlreadyInitialized => Self::new(ErrorKind::AlreadyInitialized, message),
+            BitBoxError::NotInitialized => Self::new(ErrorKind::NotInitialized, message),
+            BitBoxError::UnsupportedDisplayAddress(error) => {
+                Self::new(ErrorKind::UnsupportedDisplayAddress, error)
+            }
+            BitBoxError::Transport(_) => Self::new(ErrorKind::Transport, message),
+            BitBoxError::Disconnected(_) => Self::new(ErrorKind::Disconnected, message),
         }
     }
 }
@@ -231,7 +270,7 @@ mod tests {
 
     use super::*;
     use crate::bitbox::{SetupEntropy, SetupMode};
-    use crate::common::{RestoreOptions, SetupOptions};
+    use crate::common::{ErrorKind, RestoreOptions, SetupOptions};
 
     fn simple(path: &str) -> pb::btc_script_config::SimpleType {
         simple_type_from_path(&DerivationPath::from_str(path).unwrap())
@@ -315,7 +354,10 @@ mod tests {
     fn setup_requires_context_and_rejects_passphrase() {
         let missing_context =
             BitBoxCommand::try_from(Command::Setup(SetupOptions::default(), None));
-        assert!(matches!(missing_context, Err(BitBoxError::InvalidInput(_))));
+        assert!(matches!(
+            missing_context,
+            Err(BitBoxError::MissingContext(_))
+        ));
 
         let passphrase = BitBoxCommand::try_from(Command::Setup(
             SetupOptions {
@@ -377,7 +419,7 @@ mod tests {
     fn restore_requires_context() {
         assert!(matches!(
             BitBoxCommand::try_from(Command::Restore(RestoreOptions::default(), None)),
-            Err(BitBoxError::InvalidInput(_))
+            Err(BitBoxError::MissingContext(_))
         ));
     }
 
@@ -404,15 +446,15 @@ mod tests {
             BitBoxDeviceError::from_code(104),
             BitBoxDeviceError::UserAbort
         ));
-        assert!(matches!(
-            Error::from(BitBoxError::Device(BitBoxDeviceError::UserAbort)),
-            Error::UserCancelled
-        ));
+        assert_eq!(
+            Error::from(BitBoxError::from(BitBoxDeviceError::UserAbort)).kind(),
+            ErrorKind::UserCancelled
+        );
         // Pairing rejection stays an authentication refusal.
-        assert!(matches!(
-            Error::from(BitBoxError::NoisePairingRejected),
-            Error::AuthenticationRefused
-        ));
+        assert_eq!(
+            Error::from(BitBoxError::NoisePairingRejected).kind(),
+            ErrorKind::AuthenticationRefused
+        );
     }
 
     #[test]
