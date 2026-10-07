@@ -103,23 +103,72 @@
         "type": "github"
       }
     },
+    "keepkey-device-protocol": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1738790162,
+        "narHash": "sha256-Eef2GrgKYBgR82q1pOrk+RT1aPPJ0jENTLWnYW7h4gk=",
+        "owner": "keepkey",
+        "repo": "device-protocol",
+        "rev": "323802f17dd44165a5100357df771348c8b49672",
+        "type": "github"
+      },
+      "original": {
+        "owner": "keepkey",
+        "repo": "device-protocol",
+        "rev": "323802f17dd44165a5100357df771348c8b49672",
+        "type": "github"
+      }
+    },
+    "keepkey-ethereum-lists": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1680815412,
+        "narHash": "sha256-z7bFQtMApDkHoHCyGCiFTyHEz+H5JX52BRQ1pUWz6Sg=",
+        "owner": "keepkey",
+        "repo": "ethereum-lists",
+        "rev": "89a64f717e1690bb31adb3e4c38e23640357333c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "keepkey",
+        "repo": "ethereum-lists",
+        "rev": "89a64f717e1690bb31adb3e4c38e23640357333c",
+        "type": "github"
+      }
+    },
     "keepkey-firmware": {
       "flake": false,
       "locked": {
         "lastModified": 1739317963,
-        "narHash": "sha256-sYramzOpi8sDt0ENIp5xYbZPmBlw+jmk7Vp5hOOeovk=",
-        "ref": "refs/heads/master",
+        "narHash": "sha256-AMFuoY3ZSO/Q0x/9wrSva/Y3HkLPfojUHgaFuJnT6n8=",
+        "owner": "keepkey",
+        "repo": "keepkey-firmware",
         "rev": "d54797ee604f12c82ac6e5e02490b62dc04bf2dd",
-        "revCount": 4450,
-        "submodules": true,
-        "type": "git",
-        "url": "https://github.com/keepkey/keepkey-firmware"
+        "type": "github"
       },
       "original": {
+        "owner": "keepkey",
+        "repo": "keepkey-firmware",
         "rev": "d54797ee604f12c82ac6e5e02490b62dc04bf2dd",
-        "submodules": true,
-        "type": "git",
-        "url": "https://github.com/keepkey/keepkey-firmware"
+        "type": "github"
+      }
+    },
+    "keepkey-googletest": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1522345832,
+        "narHash": "sha256-INVFeC8jZ0mB9m6N4secyYMtAzbwWTLBV+wYl9FxVkE=",
+        "owner": "google",
+        "repo": "googletest",
+        "rev": "7888184f28509dba839e3683409443e0b5bb8948",
+        "type": "github"
+      },
+      "original": {
+        "owner": "google",
+        "repo": "googletest",
+        "rev": "7888184f28509dba839e3683409443e0b5bb8948",
+        "type": "github"
       }
     },
     "keepkey-nanopb": {
@@ -136,6 +185,74 @@
         "owner": "nanopb",
         "repo": "nanopb",
         "rev": "493adf3616bee052649c63c473f8355630c2797f",
+        "type": "github"
+      }
+    },
+    "keepkey-python": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1738791572,
+        "narHash": "sha256-A8rSuLrGZK81e5IcrjP1csnCK4lP/Ij8sB1h4tODI/o=",
+        "owner": "keepkey",
+        "repo": "python-keepkey",
+        "rev": "9e4b4f0b14a6ea966fecfe31d8e2706abe7b405c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "keepkey",
+        "repo": "python-keepkey",
+        "rev": "9e4b4f0b14a6ea966fecfe31d8e2706abe7b405c",
+        "type": "github"
+      }
+    },
+    "keepkey-qr-code-generator": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1581529532,
+        "narHash": "sha256-CEbXcJ0mVwoP+sXsL7o+F6/xNqSGoYaYylsTiNNlA0I=",
+        "owner": "keepkey",
+        "repo": "QR-Code-generator",
+        "rev": "6dfbfdad5d9303ed190d1c3cb7bec34b565b6ce8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "keepkey",
+        "repo": "QR-Code-generator",
+        "rev": "6dfbfdad5d9303ed190d1c3cb7bec34b565b6ce8",
+        "type": "github"
+      }
+    },
+    "keepkey-secaes": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1581444312,
+        "narHash": "sha256-piECeeYKzpVScPaPO0YN0mtCkdIA5r34XvGgsapAQxc=",
+        "owner": "keepkey",
+        "repo": "SecAESSTM32",
+        "rev": "71d356a1141624994cf613bd2d2583892e8e6d5a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "keepkey",
+        "repo": "SecAESSTM32",
+        "rev": "71d356a1141624994cf613bd2d2583892e8e6d5a",
+        "type": "github"
+      }
+    },
+    "keepkey-trezor-crypto": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1738796293,
+        "narHash": "sha256-IwifISL4Po9K15iihsJqBE4aSEFnwl/yjCwjsZlf2BE=",
+        "owner": "keepkey",
+        "repo": "trezor-firmware",
+        "rev": "03d8a55a832fb61bb89477ef7239a80ecb367080",
+        "type": "github"
+      },
+      "original": {
+        "owner": "keepkey",
+        "repo": "trezor-firmware",
+        "rev": "03d8a55a832fb61bb89477ef7239a80ecb367080",
         "type": "github"
       }
     },
@@ -228,8 +345,15 @@
         "flake-utils": "flake-utils",
         "jade-firmware": "jade-firmware",
         "jade-pinserver": "jade-pinserver",
+        "keepkey-device-protocol": "keepkey-device-protocol",
+        "keepkey-ethereum-lists": "keepkey-ethereum-lists",
         "keepkey-firmware": "keepkey-firmware",
+        "keepkey-googletest": "keepkey-googletest",
         "keepkey-nanopb": "keepkey-nanopb",
+        "keepkey-python": "keepkey-python",
+        "keepkey-qr-code-generator": "keepkey-qr-code-generator",
+        "keepkey-secaes": "keepkey-secaes",
+        "keepkey-trezor-crypto": "keepkey-trezor-crypto",
         "nixpkgs": "nixpkgs",
         "nixpkgs-coldcard": "nixpkgs-coldcard",
         "nixpkgs-esp-dev": "nixpkgs-esp-dev",

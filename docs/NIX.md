@@ -3,9 +3,9 @@
 BHWI uses Nix flake outputs to run emulator-backed e2e tests for its supported
 devices.
 
-Most emulator outputs build on `x86_64-linux` and `aarch64-darwin` (Apple
-Silicon). KeepKey's source-built emulator outputs are currently
-`x86_64-linux` only. All are intended for GitHub Actions first, with the same
+Most emulator outputs, including KeepKey's source-built launcher, initializer,
+and development shell, are available on `x86_64-linux` and `aarch64-darwin`
+(Apple Silicon). All are intended for GitHub Actions first, with the same
 commands available locally.
 
 ## Platforms
@@ -15,7 +15,7 @@ The `nix run` and `nix develop` commands below are identical on every platform.
 On macOS the device simulators have no prebuilt binaries, so they build from
 source on first run under `$XDG_CACHE_HOME/bhwi`:
 
-- Coldcard and Jade build natively.
+- Coldcard, Jade, and KeepKey build natively.
 - BitBox02 builds from source with `make simulator`. Linux keeps the prebuilt
   release binary.
 - Ledger runs the `arm64` variant of the multi-arch app-builder container
@@ -27,9 +27,8 @@ Linux-only outputs:
 - `bitbox02-simulator` (the prebuilt release binary).
 - The HWI parity and upstream suites (`hwi-parity-*`, `hwi-upstream-*`), which
   need Linux emulator toolchains.
-- `keepkey`, `keepkey-init`, `hwi-parity-keepkey`,
-  `hwi-upstream-keepkey`, and the `keepkey` development shell and package
-  outputs additionally require `x86_64-linux`.
+- `hwi-parity-keepkey` and `hwi-upstream-keepkey` additionally require
+  `x86_64-linux`.
 
 The macOS emulator run is not part of PR CI and is intended for a separate
 on-demand workflow.
@@ -217,6 +216,16 @@ timeout 20m nix run .#hwi-parity-trezor -- -- --test-threads=1
 ```
 
 KeepKey. The main and debug UDP endpoints are 11044 and 11045.
+
+KeepKey's firmware source is assembled by Nix from flat, pinned GitHub inputs
+for the parent and seven required dependencies, including the nested Ethereum
+token lists. It preserves the existing Ethereum generators and full emulator
+build while avoiding unused recursive Trezor/MicroPython downloads (notably
+Savannah lwIP). nanopb remains a separate pinned input; patching, compilation,
+and runtime preparation remain in the existing launcher. Its build-cache key
+already includes the assembled source store path, so dependency or assembly
+changes invalidate the cache even when the parent revision is unchanged.
+See [KEEPKEY.md](KEEPKEY.md) for exact destinations, pins, and cache details.
 
 ```sh
 # Terminal 1

@@ -19,12 +19,40 @@
       url = "github:Blockstream/blind_pin_server/0205d38e75cb47f187db2efda5846cc898a85039";
       flake = false;
     };
+    keepkey-device-protocol = {
+      url = "github:keepkey/device-protocol/323802f17dd44165a5100357df771348c8b49672";
+      flake = false;
+    };
+    keepkey-ethereum-lists = {
+      url = "github:keepkey/ethereum-lists/89a64f717e1690bb31adb3e4c38e23640357333c";
+      flake = false;
+    };
     keepkey-firmware = {
-      url = "git+https://github.com/keepkey/keepkey-firmware?rev=d54797ee604f12c82ac6e5e02490b62dc04bf2dd&submodules=1";
+      url = "github:keepkey/keepkey-firmware/d54797ee604f12c82ac6e5e02490b62dc04bf2dd";
+      flake = false;
+    };
+    keepkey-googletest = {
+      url = "github:google/googletest/7888184f28509dba839e3683409443e0b5bb8948";
       flake = false;
     };
     keepkey-nanopb = {
       url = "github:nanopb/nanopb/493adf3616bee052649c63c473f8355630c2797f";
+      flake = false;
+    };
+    keepkey-python = {
+      url = "github:keepkey/python-keepkey/9e4b4f0b14a6ea966fecfe31d8e2706abe7b405c";
+      flake = false;
+    };
+    keepkey-qr-code-generator = {
+      url = "github:keepkey/QR-Code-generator/6dfbfdad5d9303ed190d1c3cb7bec34b565b6ce8";
+      flake = false;
+    };
+    keepkey-secaes = {
+      url = "github:keepkey/SecAESSTM32/71d356a1141624994cf613bd2d2583892e8e6d5a";
+      flake = false;
+    };
+    keepkey-trezor-crypto = {
+      url = "github:keepkey/trezor-firmware/03d8a55a832fb61bb89477ef7239a80ecb367080";
       flake = false;
     };
     python-hwi = {
@@ -54,8 +82,15 @@
     coldcard-firmware,
     jade-firmware,
     jade-pinserver,
+    keepkey-device-protocol,
+    keepkey-ethereum-lists,
     keepkey-firmware,
+    keepkey-googletest,
     keepkey-nanopb,
+    keepkey-python,
+    keepkey-qr-code-generator,
+    keepkey-secaes,
+    keepkey-trezor-crypto,
     python-hwi,
     specter-diy,
     trezor-firmware,
@@ -372,13 +407,31 @@
           export LDFLAGS="-L${coldcardPkgs.pcsclite}/lib ''${LDFLAGS:-}"
           export RUST_TEST_THREADS=1
         '';
+        # ponytail: assemble only emulator dependencies; keep their upstream trees intact.
+        keepkeyFirmwareSource = pkgs.runCommand "keepkey-firmware-source" {} ''
+          mkdir -p "$out"
+          cp -R ${keepkey-firmware}/. "$out"/
+          find "$out" -type d -exec chmod u+w {} +
+          mkdir -p "$out/deps/device-protocol" "$out/deps/crypto/trezor-firmware" \
+            "$out/deps/googletest" "$out/deps/python-keepkey" \
+            "$out/deps/qrenc/QR-Code-generator" "$out/deps/sca-hardening/SecAESSTM32"
+          cp -R ${keepkey-device-protocol}/. "$out/deps/device-protocol"/
+          cp -R ${keepkey-trezor-crypto}/. "$out/deps/crypto/trezor-firmware"/
+          cp -R ${keepkey-googletest}/. "$out/deps/googletest"/
+          cp -R ${keepkey-python}/. "$out/deps/python-keepkey"/
+          cp -R ${keepkey-qr-code-generator}/. "$out/deps/qrenc/QR-Code-generator"/
+          cp -R ${keepkey-secaes}/. "$out/deps/sca-hardening/SecAESSTM32"/
+          find "$out/deps/python-keepkey" -type d -exec chmod u+w {} +
+          mkdir -p "$out/deps/python-keepkey/keepkeylib/eth/ethereum-lists"
+          cp -R ${keepkey-ethereum-lists}/. "$out/deps/python-keepkey/keepkeylib/eth/ethereum-lists"/
+        '';
         keepkeyBuildEnv = ''
           export PATH="${hwiPython}/bin:$PATH"
           export PYTHONPATH="${python-hwi}:''${PYTHONPATH:-}"
           export KEEPKEY_BUILD_TOOLCHAIN="${pkgs.runtimeShell}:${pkgs.lib.makeBinPath [
             pkgs.cmake pkgs.gcc pkgs.gnumake pkgs.patch pkgs.protobuf hwiPython
           ]}"
-          export KEEPKEY_FIRMWARE_SRC="${keepkey-firmware}"
+          export KEEPKEY_FIRMWARE_SRC="${keepkeyFirmwareSource}"
           export KEEPKEY_FIRMWARE_REV="${keepkey-firmware.rev or "d54797ee604f12c82ac6e5e02490b62dc04bf2dd"}"
           export KEEPKEY_NANOPB_SRC="${keepkey-nanopb}"
           export KEEPKEY_NANOPB_REV="${keepkey-nanopb.rev or "493adf3616bee052649c63c473f8355630c2797f"}"
