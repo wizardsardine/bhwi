@@ -164,8 +164,8 @@
 ## Pull Requests
 
 - Follow [`.agents/templates/pr-description.md`](.agents/templates/pr-description.md). Read it before opening a PR.
-- Descriptions are facts for a reviewer: what changed, what behavior changed, what was run. No prose narration of the work.
-- Call out blockers, public API changes, CLI output changes, and new dependencies explicitly.
+- Descriptions are facts for a reviewer: behavior-first change bullets, with actual public API, CLI, dependency, and compatibility changes folded into those bullets. No prose narration of the work.
+- Omit unchanged behavior, absent additions, CI mentions or links, and passing checks or test summaries. Mention only material gaps: blockers, unrun required checks, or missing requested work, with their concrete impact.
 
 ## Definition Of Done
 
