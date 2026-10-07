@@ -50,6 +50,9 @@ impl NoiseConfigData {
 /// A synchronous callback for displaying a newly available pairing code.
 ///
 /// Invoked before the interpreter requests pairing confirmation on the device.
+#[cfg(not(target_arch = "wasm32"))]
+pub type PairingCodeHook = Box<dyn FnMut(&str) + Send>;
+#[cfg(target_arch = "wasm32")]
 pub type PairingCodeHook = Box<dyn FnMut(&str)>;
 
 /// Noise session state retained by callers across interpreter operations.
@@ -286,5 +289,29 @@ mod tests {
         assert_eq!(base32_rfc4648(b"fo"), "MZXQ====");
         assert_eq!(base32_rfc4648(b"foo"), "MZXW6===");
         assert_eq!(base32_rfc4648(b"foobar"), "MZXW6YTBOI======");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pairing_callback_survives_moving_noise_state_to_thread() {
+        let (send, recv) = std::sync::mpsc::channel();
+        let mut calls = 0;
+        let mut noise = NoiseState::new(None);
+        noise.set_pairing_code_hook(Box::new(move |code| {
+            calls += 1;
+            send.send((calls, code.to_owned())).unwrap();
+        }));
+        let code = NoiseState::pairing_code_from_hash(&[0; 32]);
+        let expected = code.clone();
+        std::thread::spawn(move || {
+            noise.on_pairing_code(&code);
+            noise.on_pairing_code(&code);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            recv.into_iter().collect::<Vec<_>>(),
+            vec![(1, expected.clone()), (2, expected)]
+        );
     }
 }

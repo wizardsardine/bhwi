@@ -20,6 +20,15 @@ the only difference from the USB HID path is the underlying byte channel (a TCP
 stream). The simulator auto-confirms Noise pairing, so no on-device button press
 is required.
 
+## Pairing callbacks
+
+Noise pairing invokes the pairing-code hook synchronously; callbacks should
+return promptly without blocking. The native core hook requires `Send`.
+
+The shared `bhwi-async` device-manager API uses
+`PairingCodePrompt = Arc<dyn Fn(&str) + Send + Sync>` on every target, including
+WASM. Direct WASM Noise hooks remain non-`Send` and can capture browser values.
+
 ## CLI e2e
 
 The `bhwi` CLI reaches the simulator over TCP through the BitBox02 emulator path

@@ -1,5 +1,6 @@
 use core::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bhwi::bitcoin::{Network, bip32::Fingerprint};
@@ -132,7 +133,7 @@ impl DeviceSelector {
 }
 
 /// A callback that presents a BitBox02 pairing code to the user.
-pub type PairingCodePrompt = Rc<dyn Fn(&str)>;
+pub type PairingCodePrompt = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// A device found on a bus but not yet opened.
 #[derive(Debug, Clone)]
