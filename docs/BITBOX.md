@@ -20,6 +20,38 @@ the only difference from the USB HID path is the underlying byte channel (a TCP
 stream). The simulator auto-confirms Noise pairing, so no on-device button press
 is required.
 
+## Pairing callbacks
+
+Noise pairing invokes the pairing-code hook synchronously; callbacks should
+return promptly without blocking. The native core hook requires `Send`.
+
+The shared `bhwi-async` device-manager API uses
+`PairingCodePrompt = Arc<dyn Fn(&str) + Send + Sync>` on every target, including
+WASM. Direct WASM Noise hooks remain non-`Send` and can capture browser values.
+
+The e2e helper asserts real firmware callback delivery during unlock, including
+the focused `can_get_master_fingerprint` test.
+
+## Sorted multisig policies
+
+Canonical `wsh(sortedmulti(...))` and `sh(wsh(sortedmulti(...)))` use the
+firmware's native BIP67 multisig config, not its Miniscript policy parser.
+Registration, lookup, address display and signing share the verified account
+path and xpub index. Ownership requires both the actual root fingerprint and
+the complete network-aware account xpub; ambiguous accounts are rejected.
+Keys require public origins and exactly `/<0;1>/*`; legacy wrappers, duplicate
+xpubs and custom or hardened child derivations are unsupported.
+Other Miniscript policies and no-policy singlesig signing keep their existing routes.
+
+The firmware regression checks both wrappers/networks and owned-key indices,
+exact receive/change addresses, both cosigner orders, preserved partials and
+cryptographic verification/finalization:
+
+```sh
+nix develop .#bitbox -c cargo test -p bhwi-e2e-bitbox \
+  can_register_display_and_sign_canonical_sorted_multisig -- --test-threads=1
+```
+
 ## CLI e2e
 
 The `bhwi` CLI reaches the simulator over TCP through the BitBox02 emulator path

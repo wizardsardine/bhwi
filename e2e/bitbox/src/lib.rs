@@ -17,14 +17,20 @@
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use bhwi::Interpreter;
     use bhwi::bitbox::error::{BitBoxDeviceError, BitBoxError};
+    use bhwi::bitbox::{
+        BitBoxCommand, BitBoxResponse, BitBoxTransmit, policy::Policy as BitBoxPolicy,
+    };
     use bhwi::miniscript::descriptor::{
         DefiniteDescriptorKey, Descriptor, DescriptorPublicKey, WalletPolicy,
     };
-    use bhwi::miniscript::psbt::{PsbtInputExt, PsbtOutputExt};
+    use bhwi::miniscript::psbt::{PsbtExt, PsbtInputExt, PsbtOutputExt};
     use bhwi_async::transport::Channel;
     use bhwi_async::transport::bitbox::hid::BitBoxTransportHID;
-    use bhwi_async::{DeviceBackup, DeviceContext, DisplayAddress, HWI, bitbox::BitBox};
+    use bhwi_async::{
+        CommonInterface, DeviceBackup, DeviceContext, DisplayAddress, HWI, bitbox::BitBox,
+    };
     use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
     use bitcoin::hashes::{Hash, sha256d};
     use bitcoin::psbt::Psbt;
@@ -34,6 +40,7 @@ mod tests {
         TxOut, Witness, absolute::LockTime, transaction::Version as TxVersion,
     };
     use std::str::FromStr;
+    use std::sync::mpsc;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -94,10 +101,19 @@ mod tests {
     async fn device() -> SimDevice {
         let stream = connect().await;
         let mut dev = BitBox::new(BitBoxTransportHID::new(TcpChannel::new(stream)), None);
+        let (pairing_code_tx, pairing_code_rx) = mpsc::channel();
+        dev.set_pairing_code_hook(Box::new(move |code| {
+            pairing_code_tx.send(code.to_owned()).unwrap();
+        }));
         // The simulator auto-confirms pairing (no user present).
         dev.unlock(Network::Bitcoin)
             .await
             .expect("pair with simulator");
+        let code = pairing_code_rx
+            .try_recv()
+            .expect("pairing callback during simulator unlock");
+        assert!(!code.is_empty());
+        assert_eq!(dev.pairing_code(), Some(code.as_str()));
         // Seed the fixed simulator mnemonic so derived keys are deterministic. The simulator
         // process persists across tests, so once it is seeded a further restore reports
         // `InvalidState` — treat that as "already seeded" and carry on.
@@ -116,6 +132,35 @@ mod tests {
     /// Expected xpub at `path`, derived host-side from the known simulator seed.
     fn expected_xpub(secp: &Secp256k1<All>, path: &DerivationPath) -> Xpub {
         Xpub::from_priv(secp, &simulator_xprv().derive_priv(secp, path).unwrap())
+    }
+    struct RawCommand(BitBoxCommand);
+
+    impl TryFrom<RawCommand> for BitBoxCommand {
+        type Error = BitBoxError;
+
+        fn try_from(command: RawCommand) -> Result<Self, Self::Error> {
+            Ok(command.0)
+        }
+    }
+
+    async fn run_native(dev: &mut SimDevice, command: BitBoxCommand) -> BitBoxResponse {
+        let (transport, _http, _host, mut interpreter) = <SimDevice as CommonInterface<
+            RawCommand,
+            BitBoxTransmit,
+            BitBoxResponse,
+            BitBoxError,
+        >>::components(dev);
+        let mut transmit = interpreter.start(RawCommand(command)).unwrap();
+        loop {
+            let response = transport
+                .exchange(&transmit.payload, transmit.encrypted)
+                .await
+                .unwrap();
+            match interpreter.exchange(response).unwrap() {
+                Some(next) => transmit = next,
+                None => return interpreter.end().unwrap(),
+            }
+        }
     }
 
     #[tokio::test]
@@ -231,9 +276,12 @@ mod tests {
             .await
             .unwrap();
 
-        // The address is deterministic; pin the exact value once observed against the
-        // simulator. For now assert it is a well-formed mainnet P2WSH address.
-        assert!(address.starts_with("bc1"), "unexpected address: {address}");
+        let expected = definite_address(&policy, false, 0)
+            .derived_descriptor(&secp)
+            .address(Network::Bitcoin)
+            .unwrap()
+            .to_string();
+        assert_eq!(address, expected);
     }
 
     #[tokio::test]
@@ -290,6 +338,7 @@ mod tests {
                 .contains_key(&receive_pubkey(&secp, &our_xpub)),
             "device key signature missing"
         );
+        verify_partials(&secp, &signed);
     }
 
     #[tokio::test]
@@ -345,6 +394,7 @@ mod tests {
                 .contains_key(&receive_pubkey(&secp, &our_xpub)),
             "device key signature missing"
         );
+        verify_partials(&secp, &signed);
     }
 
     #[tokio::test]
@@ -398,6 +448,197 @@ mod tests {
             "device key-path signature missing"
         );
     }
+    #[tokio::test]
+    async fn can_register_display_and_sign_canonical_sorted_multisig() {
+        let secp = Secp256k1::new();
+        for network in [Network::Bitcoin, Network::Testnet] {
+            let mut dev = device().await.with_network(network);
+            for wrapped in [false, true] {
+                let coin = u32::from(network != Network::Bitcoin);
+                let script_type = if wrapped { 1 } else { 2 };
+                let account: DerivationPath =
+                    format!("m/48'/{coin}'/0'/{script_type}'").parse().unwrap();
+                let fingerprint = dev.get_master_fingerprint().await.unwrap();
+                let our_xpub = dev
+                    .get_extended_pubkey(account.clone(), false)
+                    .await
+                    .unwrap();
+                let mut root = simulator_xprv();
+                root.network = network.into();
+                assert_eq!(
+                    our_xpub,
+                    Xpub::from_priv(&secp, &root.derive_priv(&secp, &account).unwrap())
+                );
+                let foreign_root = Xpriv::new_master(network, &[42; 32]).unwrap();
+                let foreign_fp = foreign_root.fingerprint(&secp);
+                let foreign_xpub =
+                    Xpub::from_priv(&secp, &foreign_root.derive_priv(&secp, &account).unwrap());
+                let ours = format!("[{fingerprint}/{account}]{our_xpub}/<0;1>/*");
+                let foreign = format!("[{foreign_fp}/{account}]{foreign_xpub}/<0;1>/*");
+                for owned_index in [0, 1] {
+                    let keys = if owned_index == 0 {
+                        [&ours, &foreign]
+                    } else {
+                        [&foreign, &ours]
+                    };
+                    let descriptor = format!("wsh(sortedmulti(2,{},{}))", keys[0], keys[1]);
+                    let descriptor = if wrapped {
+                        format!("sh({descriptor})")
+                    } else {
+                        descriptor
+                    };
+                    let name = format!("bhwi-sorted-{coin}-{script_type}");
+                    let wallet = WalletPolicy::from_str(&descriptor).unwrap();
+                    let bitbox_policy = BitBoxPolicy::from_wallet_policy(&wallet).unwrap();
+                    dev.register_wallet(&name, &descriptor)
+                        .await
+                        .expect("register canonical sorted 2-of-2");
+                    assert!(matches!(
+                        run_native(
+                            &mut dev,
+                            BitBoxCommand::IsScriptConfigRegistered {
+                                policy: bitbox_policy.clone(),
+                            }
+                        )
+                        .await,
+                        BitBoxResponse::IsRegistered(true)
+                    ));
+                    for (change, index) in [(false, 0), (false, 7), (true, 0), (true, 7)] {
+                        let expected = definite_address(&descriptor, change, index)
+                            .derived_descriptor(&secp)
+                            .address(network)
+                            .unwrap()
+                            .to_string();
+                        let address = dev
+                            .display_address(
+                                DisplayAddress::ByDescriptor {
+                                    index,
+                                    change,
+                                    display: true,
+                                    descriptor_name: name.clone(),
+                                },
+                                Some(DeviceContext::BitBox {
+                                    policy: wallet.clone(),
+                                }),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(address, expected);
+                        let keypath = account.extend([
+                            ChildNumber::Normal {
+                                index: u32::from(change),
+                            },
+                            ChildNumber::Normal { index },
+                        ]);
+                        assert!(
+                            matches!(run_native(&mut dev, BitBoxCommand::ShowPolicyAddress {
+                            policy: bitbox_policy.clone(), keypath, display: true,
+                        }).await, BitBoxResponse::Address(address) if address == expected)
+                        );
+                    }
+
+                    let receive = definite_address(&descriptor, false, 0);
+                    let change = definite_address(&descriptor, true, 7);
+                    let original = build_psbt(&secp, &receive, &change);
+                    for foreign_first in [false, true] {
+                        let mut request = original.clone();
+                        if foreign_first {
+                            request
+                                .sign(&foreign_root, &secp)
+                                .expect("real foreign partial signature");
+                        }
+                        let previous = request.inputs[0].partial_sigs.clone();
+                        let mut signed = dev
+                            .sign_tx(
+                                request,
+                                Some(DeviceContext::BitBox {
+                                    policy: wallet.clone(),
+                                }),
+                            )
+                            .await
+                            .expect("sign canonical sorted multisig");
+                        let partials = std::mem::take(&mut signed.inputs[0].partial_sigs);
+                        assert_eq!(signed, original);
+                        signed.inputs[0].partial_sigs = partials;
+                        for (key, signature) in previous {
+                            assert_eq!(signed.inputs[0].partial_sigs.get(&key), Some(&signature));
+                        }
+                        let our_key = receive_pubkey(&secp, &our_xpub);
+                        let device_signature = *signed.inputs[0]
+                            .partial_sigs
+                            .get(&our_key)
+                            .expect("device signature");
+                        assert_eq!(
+                            signed.inputs[0].partial_sigs.len(),
+                            if foreign_first { 2 } else { 1 }
+                        );
+                        verify_partials(&secp, &signed);
+                        if !foreign_first {
+                            signed
+                                .sign(&foreign_root, &secp)
+                                .expect("foreign cosigner after device");
+                            assert_eq!(
+                                signed.inputs[0].partial_sigs.get(&our_key),
+                                Some(&device_signature)
+                            );
+                        }
+                        assert_eq!(signed.inputs[0].partial_sigs.len(), 2);
+                        verify_partials(&secp, &signed);
+                        signed
+                            .finalize_mut(&secp)
+                            .expect("both signatures finalize");
+                        let mut tx = PsbtExt::extract(&signed, &secp)
+                            .expect("Miniscript interpreter verifies final spend");
+                        for input in &mut tx.input {
+                            input.script_sig = ScriptBuf::new();
+                            input.witness = Witness::new();
+                        }
+                        assert_eq!(tx, original.unsigned_tx);
+                    }
+
+                    // A real fingerprint with the wrong account origin is not ownership.
+                    let wrong_origin = descriptor.replace(
+                        &format!("[{fingerprint}/{account}]"),
+                        &format!("[{fingerprint}/48'/{coin}'/1'/{script_type}']"),
+                    );
+                    assert!(
+                        dev.register_wallet("bhwi-invalid-origin", &wrong_origin)
+                            .await
+                            .is_err()
+                    );
+                }
+            }
+        }
+    }
+
+    fn verify_partials(secp: &Secp256k1<All>, psbt: &Psbt) {
+        let mut cache = bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
+        for (index, input) in psbt.inputs.iter().enumerate() {
+            let (message, sighash) = psbt.sighash_ecdsa(index, &mut cache).unwrap();
+            assert_eq!(sighash, bitcoin::sighash::EcdsaSighashType::All);
+            for (pubkey, signature) in &input.partial_sigs {
+                assert_eq!(signature.sighash_type, sighash);
+                secp.verify_ecdsa(&message, &signature.signature, &pubkey.inner)
+                    .expect("valid real signature");
+            }
+        }
+    }
+
+    fn definite_address(
+        descriptor: &str,
+        change: bool,
+        index: u32,
+    ) -> Descriptor<DefiniteDescriptorKey> {
+        Descriptor::<DescriptorPublicKey>::from_str(descriptor)
+            .unwrap()
+            .into_single_descriptors()
+            .unwrap()
+            .into_iter()
+            .nth(usize::from(change))
+            .unwrap()
+            .derive_at_index(index)
+            .unwrap()
+    }
 
     /// Value of the single input the sign test spends (must equal the witness UTXO).
     const INPUT_VALUE: Amount = Amount::from_sat(50_000);
@@ -412,13 +653,9 @@ mod tests {
         Descriptor<DefiniteDescriptorKey>,
         Descriptor<DefiniteDescriptorKey>,
     ) {
-        let desc = Descriptor::<DescriptorPublicKey>::from_str(descriptor).unwrap();
-        let mut branches = desc.into_single_descriptors().unwrap().into_iter();
-        let receive = branches.next().expect("receive branch");
-        let change = branches.next().expect("change branch");
         (
-            receive.derive_at_index(0).unwrap(),
-            change.derive_at_index(0).unwrap(),
+            definite_address(descriptor, false, 0),
+            definite_address(descriptor, true, 0),
         )
     }
 

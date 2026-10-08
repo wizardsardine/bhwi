@@ -85,9 +85,8 @@ pub enum BitBoxCommand {
         /// Message bytes to sign.
         message: Vec<u8>,
     },
-    /// Requests a policy address at a receive or change index.
-    ///
-    /// Resolves the account path from the policy origin matching the device fingerprint.
+    /// Requests a policy address at a receive or change index. Native sorted multisig
+    /// resolves ownership against the device's full account xpub before using its origin.
     ShowDescriptorAddress {
         /// Registered wallet policy containing the device key origin.
         policy: policy::Policy,
@@ -229,6 +228,8 @@ enum State {
     },
     // Descriptor address: first fetch our fingerprint to resolve the account keypath.
     ShowAddrWaitFingerprint(ShowAddrInit),
+    NativePolicyWaitFingerprint(NativePolicyInit),
+    NativePolicyWaitXpub(NativePolicyResolution),
     // Stateful setup flow.
     SetupWaitInfo(SetupInit),
     SetupWaitName(SetupInit),
@@ -272,6 +273,34 @@ struct ShowAddrInit {
     change: bool,
     index: u32,
     display: bool,
+}
+struct NativePolicyInit {
+    policy: policy::Policy,
+    action: NativePolicyAction,
+}
+
+enum NativePolicyAction {
+    Register {
+        name: String,
+    },
+    IsRegistered,
+    Address {
+        keypath: DerivationPath,
+        display: bool,
+    },
+    DescriptorAddress {
+        change: bool,
+        index: u32,
+        display: bool,
+    },
+    Sign {
+        psbt: Box<Psbt>,
+    },
+}
+
+struct NativePolicyResolution {
+    init: NativePolicyInit,
+    resolver: policy::AccountResolver,
 }
 
 /// Context threaded through every round of the `btc_sign` loop.
@@ -443,7 +472,7 @@ fn policy_script_config(
         "device key has no origin path in descriptor policy",
     ))?;
     Ok(pb::BtcScriptConfigWithKeypath {
-        script_config: Some(policy.clone().into()),
+        script_config: Some(policy.clone().into_script_config(None)?),
         keypath: account.to_u32_vec(),
     })
 }
@@ -463,6 +492,121 @@ fn decode_sign_next(
 }
 
 impl<C, T, R, E> BitBoxInterpreter<'_, C, T, R, E> {
+    fn start_native_policy(&mut self, init: NativePolicyInit) -> Result<Vec<u8>, BitBoxError> {
+        let bytes = self.build_encrypted(api::root_fingerprint_request())?;
+        self.state = State::NativePolicyWaitFingerprint(init);
+        Ok(bytes)
+    }
+
+    fn native_xpub_request(
+        &mut self,
+        pending: &NativePolicyResolution,
+    ) -> Result<Vec<u8>, BitBoxError> {
+        let key = pending.resolver.current_key(&pending.init.policy);
+        let path = key
+            .path
+            .as_ref()
+            .ok_or(BitBoxError::InvalidInput("missing multisig origin"))?;
+        self.build_encrypted(api::xpub_request(
+            api::coin_from_network(self.network),
+            path,
+            api::xpub_type_from_network(self.network),
+            false,
+        ))
+    }
+
+    fn resolve_native_policy(
+        &mut self,
+        init: NativePolicyInit,
+        fingerprint: Fingerprint,
+    ) -> Result<Vec<u8>, BitBoxError> {
+        let resolver = policy::AccountResolver::new(&init.policy, fingerprint, self.network)?;
+        let pending = NativePolicyResolution { init, resolver };
+        let bytes = self.native_xpub_request(&pending)?;
+        self.state = State::NativePolicyWaitXpub(pending);
+        Ok(bytes)
+    }
+
+    fn start_psbt_sign(
+        &mut self,
+        psbt: Box<Psbt>,
+        fingerprint: &[u8],
+        config: Option<pb::BtcScriptConfigWithKeypath>,
+        account: Option<&policy::OwnedAccount>,
+    ) -> Result<Vec<u8>, BitBoxError> {
+        let (transaction, our_keys) =
+            Transaction::from_psbt_with_account(fingerprint, &psbt, config, account)?;
+        let bytes = self.build_encrypted(build_sign_init_request(
+            api::coin_from_network(self.network),
+            &transaction,
+        ))?;
+        self.state = State::SignPsbtWaitNext(Box::new(SignCtx {
+            psbt,
+            transaction,
+            our_keys,
+            sigs: Vec::new(),
+            is_inputs_pass2: false,
+            phase: SignPhase::ExpectNext,
+        }));
+        Ok(bytes)
+    }
+
+    fn complete_native_policy(
+        &mut self,
+        action: NativePolicyAction,
+        config: pb::BtcScriptConfig,
+        account: policy::OwnedAccount,
+    ) -> Result<Vec<u8>, BitBoxError> {
+        let coin = api::coin_from_network(self.network);
+        match action {
+            NativePolicyAction::Register { name } => self.start_encrypted_query(
+                api::register_script_config_request(
+                    coin,
+                    config,
+                    Some(&account.path),
+                    pb::btc_register_script_config_request::XPubType::AutoXpubTpub,
+                    Some(&name),
+                ),
+                EncryptedContext::RegisterScriptConfig,
+            ),
+            NativePolicyAction::IsRegistered => self.start_encrypted_query(
+                api::is_script_config_registered_request(coin, config, Some(&account.path)),
+                EncryptedContext::IsRegistered,
+            ),
+            NativePolicyAction::DescriptorAddress {
+                change,
+                index,
+                display,
+            } => {
+                let keypath = account.address_path(change, index)?;
+                self.complete_native_policy(
+                    NativePolicyAction::Address { keypath, display },
+                    config,
+                    account,
+                )
+            }
+            NativePolicyAction::Address { keypath, display } => {
+                account.validate_address_path(&keypath)?;
+                self.start_encrypted_query(
+                    api::address_request(coin, &keypath, config, display),
+                    EncryptedContext::Address,
+                )
+            }
+            NativePolicyAction::Sign { psbt } => {
+                let forced = pb::BtcScriptConfigWithKeypath {
+                    script_config: Some(config),
+                    keypath: account.path.to_u32_vec(),
+                };
+                self.start_psbt_sign(
+                    psbt,
+                    account.fingerprint.as_bytes(),
+                    Some(forced),
+                    Some(&account),
+                )
+            }
+        }
+    }
+
     fn drive_sign(
         &mut self,
         mut ctx: Box<SignCtx>,
@@ -845,8 +989,15 @@ where
                 if !self.noise.is_paired() {
                     return Err(BitBoxError::Noise("not paired").into());
                 }
+                if policy.is_native_multisig() {
+                    let bytes = self.start_native_policy(NativePolicyInit {
+                        policy,
+                        action: NativePolicyAction::Address { keypath, display },
+                    })?;
+                    return Ok(encrypted_transmit(bytes).into());
+                }
                 let coin = api::coin_from_network(self.network);
-                let script_config: pb::BtcScriptConfig = policy.into();
+                let script_config = policy.into_script_config(None)?;
                 let bytes = self.start_encrypted_query(
                     api::address_request(coin, &keypath, script_config, display),
                     EncryptedContext::Address,
@@ -857,8 +1008,15 @@ where
                 if !self.noise.is_paired() {
                     return Err(BitBoxError::Noise("not paired").into());
                 }
+                if policy.is_native_multisig() {
+                    let bytes = self.start_native_policy(NativePolicyInit {
+                        policy,
+                        action: NativePolicyAction::IsRegistered,
+                    })?;
+                    return Ok(encrypted_transmit(bytes).into());
+                }
                 let coin = api::coin_from_network(self.network);
-                let script_config: pb::BtcScriptConfig = policy.into();
+                let script_config = policy.into_script_config(None)?;
                 let bytes = self.start_encrypted_query(
                     api::is_script_config_registered_request(coin, script_config, None),
                     EncryptedContext::IsRegistered,
@@ -869,8 +1027,15 @@ where
                 if !self.noise.is_paired() {
                     return Err(BitBoxError::Noise("not paired").into());
                 }
+                if policy.is_native_multisig() {
+                    let bytes = self.start_native_policy(NativePolicyInit {
+                        policy,
+                        action: NativePolicyAction::Register { name },
+                    })?;
+                    return Ok(encrypted_transmit(bytes).into());
+                }
                 let coin = api::coin_from_network(self.network);
-                let script_config: pb::BtcScriptConfig = policy.into();
+                let script_config = policy.into_script_config(None)?;
                 let bytes = self.start_encrypted_query(
                     api::register_script_config_request(
                         coin,
@@ -891,6 +1056,22 @@ where
                 if !self.noise.is_paired() {
                     return Err(BitBoxError::Noise("not paired").into());
                 }
+                let policy = match policy {
+                    Some(policy) if policy.is_native_multisig() => {
+                        if force_script_config.is_some() {
+                            return Err(BitBoxError::InvalidInput(
+                                "native multisig policy cannot override its script config",
+                            )
+                            .into());
+                        }
+                        let bytes = self.start_native_policy(NativePolicyInit {
+                            policy,
+                            action: NativePolicyAction::Sign { psbt },
+                        })?;
+                        return Ok(encrypted_transmit(bytes).into());
+                    }
+                    policy => policy,
+                };
                 // Fetch our master fingerprint before doing the PSBT lowering.
                 let bytes = self.build_encrypted(api::root_fingerprint_request())?;
                 self.state = State::SignPsbtWaitFingerprint(SignInit {
@@ -1115,28 +1296,12 @@ where
                     force_script_config,
                     policy,
                 } = init;
-                // A registered policy needs the device fingerprint (only known now) to resolve
-                // the account keypath, so build the forced script config here rather than at
-                // command-conversion time.
                 let force_script_config = match (force_script_config, policy) {
                     (Some(config), _) => Some(config),
                     (None, Some(policy)) => Some(policy_script_config(&policy, &fingerprint)?),
                     (None, None) => None,
                 };
-                let (transaction, our_keys) =
-                    Transaction::from_psbt(&fingerprint, &psbt, force_script_config)?;
-                let coin = api::coin_from_network(self.network);
-
-                let init_request = build_sign_init_request(coin, &transaction);
-                let bytes = self.build_encrypted(init_request)?;
-                self.state = State::SignPsbtWaitNext(Box::new(SignCtx {
-                    psbt,
-                    transaction,
-                    our_keys,
-                    sigs: Vec::new(),
-                    is_inputs_pass2: false,
-                    phase: SignPhase::ExpectNext,
-                }));
+                let bytes = self.start_psbt_sign(psbt, &fingerprint, force_script_config, None)?;
                 Ok(Some(encrypted_transmit(bytes).into()))
             }
             State::SignPsbtWaitNext(ctx) => match self.drive_sign(ctx, data)? {
@@ -1197,6 +1362,39 @@ where
                 self.state = State::Finished(BitBoxResponse::Signature(header, sig));
                 Ok(None)
             }
+            State::NativePolicyWaitFingerprint(init) => {
+                let fingerprint = match self.decode_encrypted_response(data)? {
+                    pb::response::Response::Fingerprint(f) => {
+                        let bytes: [u8; 4] = f
+                            .fingerprint
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| BitBoxError::UnexpectedResponse)?;
+                        Fingerprint::from(bytes)
+                    }
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                };
+                let bytes = self.resolve_native_policy(init, fingerprint)?;
+                Ok(Some(encrypted_transmit(bytes).into()))
+            }
+            State::NativePolicyWaitXpub(mut pending) => {
+                let xpub: Xpub = match self.decode_encrypted_response(data)? {
+                    pb::response::Response::Pub(p) => p
+                        .r#pub
+                        .parse()
+                        .map_err(|_| BitBoxError::UnexpectedResponse)?,
+                    _ => return Err(BitBoxError::UnexpectedResponse.into()),
+                };
+                let bytes = if pending.resolver.accept_xpub(&pending.init.policy, xpub)? {
+                    let (config, account) = pending.resolver.finish(pending.init.policy)?;
+                    self.complete_native_policy(pending.init.action, config, account)?
+                } else {
+                    let bytes = self.native_xpub_request(&pending)?;
+                    self.state = State::NativePolicyWaitXpub(pending);
+                    bytes
+                };
+                Ok(Some(encrypted_transmit(bytes).into()))
+            }
             State::ShowAddrWaitFingerprint(init) => {
                 let body = expect_success(&data)?;
                 let decrypted = self.noise.decrypt(body)?;
@@ -1216,9 +1414,23 @@ where
                     index,
                     display,
                 } = init;
+                if policy.is_native_multisig() {
+                    let bytes = self.resolve_native_policy(
+                        NativePolicyInit {
+                            policy,
+                            action: NativePolicyAction::DescriptorAddress {
+                                change,
+                                index,
+                                display,
+                            },
+                        },
+                        Fingerprint::from(fp),
+                    )?;
+                    return Ok(Some(encrypted_transmit(bytes).into()));
+                }
                 let keypath = descriptor_keypath(&policy, Fingerprint::from(&fp), change, index)?;
                 let coin = api::coin_from_network(self.network);
-                let script_config: pb::BtcScriptConfig = policy.into();
+                let script_config = policy.into_script_config(None)?;
                 let bytes = self.build_encrypted(api::address_request(
                     coin,
                     &keypath,
