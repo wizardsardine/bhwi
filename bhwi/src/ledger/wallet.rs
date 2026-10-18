@@ -8,7 +8,7 @@ use bitcoin::{
     hashes::{Hash, HashEngine, sha256},
 };
 
-use miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, WalletPolicyError};
+use miniscript::descriptor::{KeyInfo, WalletPolicy, WalletPolicyError};
 
 use super::{merkle::MerkleTree, store::DelegatedStore};
 
@@ -169,16 +169,13 @@ pub fn singlesig_wallet_policy(
 
     let mut policy = WalletPolicy::from_str(descriptor_template)?;
 
-    let xpub_str = format!(
-        "[{fingerprint}/{}]{}",
-        account_derivation.to_string().trim_start_matches('m'),
-        xpub,
-    );
-    let descriptor_key =
-        DescriptorPublicKey::from_str(&xpub_str).map_err(|_| WalletError::InvalidPolicy)?;
+    let key_info = KeyInfo {
+        origin: Some((fingerprint, account_derivation)),
+        xkey: xpub,
+    };
 
     policy
-        .set_key_info(&[descriptor_key])
+        .set_key_info(vec![key_info])
         .map_err(WalletError::WalletPolicy)?;
 
     Ok(policy)

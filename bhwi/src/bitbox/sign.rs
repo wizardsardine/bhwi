@@ -711,8 +711,8 @@ mod tests {
             .unwrap()
             .into_single_descriptors()
             .unwrap();
-        let receive = branches[0].derive_at_index(7).unwrap();
-        let change = branches[1].derive_at_index(9).unwrap();
+        let receive = branches[0].at_derivation_index(7).unwrap();
+        let change = branches[1].at_derivation_index(9).unwrap();
         let previous = bitcoin::Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: bitcoin::absolute::LockTime::ZERO,

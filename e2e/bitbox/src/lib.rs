@@ -636,7 +636,7 @@ mod tests {
             .into_iter()
             .nth(usize::from(change))
             .unwrap()
-            .derive_at_index(index)
+            .at_derivation_index(index)
             .unwrap()
     }
 

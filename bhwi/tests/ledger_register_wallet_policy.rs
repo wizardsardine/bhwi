@@ -24,9 +24,8 @@ fn taptree_display_round_trips() {
 // with several multipath derivations. A template whose placeholder indices reach
 // past the key vector is rejected by the device with `IncorrectData`.
 //
-// The fork's `WalletPolicy::from_str` cannot round-trip this template: its
-// validation rejects interleaved placeholder reuse (`@0,@1,@0,...`), which
-// BIP-388 and the Ledger app both accept.
+// BIP-388 and the Ledger app accept interleaved placeholder reuse
+// (`@0,@1,@0,...`); extraction must preserve it.
 #[test]
 fn register_wallet_template_reuses_placeholders_per_key_info() {
     let policy = WalletPolicy::from_str(DESC).unwrap();

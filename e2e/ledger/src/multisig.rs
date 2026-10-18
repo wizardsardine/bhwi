@@ -171,8 +171,8 @@ fn definite_branches(
     let receive = branches.next().expect("receive branch");
     let change = branches.next().expect("change branch");
     (
-        receive.derive_at_index(0).unwrap(),
-        change.derive_at_index(0).unwrap(),
+        receive.at_derivation_index(0).unwrap(),
+        change.at_derivation_index(0).unwrap(),
     )
 }
 

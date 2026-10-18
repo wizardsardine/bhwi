@@ -238,7 +238,7 @@ mod tests {
             .next()
             .expect("receive branch");
         let expected = receive
-            .derive_at_index(0)
+            .at_derivation_index(0)
             .unwrap()
             .derived_descriptor(&secp)
             .address(Network::Testnet)

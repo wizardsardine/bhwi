@@ -1,8 +1,9 @@
 //! BitBox02 wallet policy templates and key origins.
 
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub};
-use miniscript::Terminal;
-use miniscript::descriptor::{Descriptor, DescriptorPublicKey, ShInner, WalletPolicy, Wildcard};
+use miniscript::descriptor::{
+    Descriptor, DescriptorPublicKey, ShInner, WalletPolicy, Wildcard, WshInner,
+};
 
 use super::error::BitBoxError;
 use super::proto as pb;
@@ -170,33 +171,28 @@ impl Policy {
             .into_descriptor()
             .map_err(|_| BitBoxError::InvalidInput("invalid wallet policy"))?;
         let native = match &descriptor {
-            Descriptor::Wsh(wsh) => match &wsh.as_inner().node {
-                Terminal::SortedMulti(threshold) => Some((
+            Descriptor::Wsh(wsh) => match wsh.as_inner() {
+                WshInner::SortedMulti(threshold) => Some((
                     threshold,
                     pb::btc_script_config::multisig::ScriptType::P2wsh,
                 )),
                 _ => None,
             },
             Descriptor::Sh(sh) => match sh.as_inner() {
-                ShInner::Wsh(wsh) => match &wsh.as_inner().node {
-                    Terminal::SortedMulti(threshold) => Some((
+                ShInner::Wsh(wsh) => match wsh.as_inner() {
+                    WshInner::SortedMulti(threshold) => Some((
                         threshold,
                         pb::btc_script_config::multisig::ScriptType::P2wshP2sh,
                     )),
                     _ => None,
                 },
-                ShInner::Ms(ms) if matches!(ms.node, Terminal::SortedMulti(_)) => {
+                ShInner::SortedMulti(_) => {
                     return Err(BitBoxError::InvalidInput(
                         "legacy sorted multisig is unsupported",
                     ));
                 }
                 _ => None,
             },
-            Descriptor::Bare(bare) if matches!(bare.as_inner().node, Terminal::SortedMulti(_)) => {
-                return Err(BitBoxError::InvalidInput(
-                    "bare sorted multisig is unsupported",
-                ));
-            }
             _ => None,
         };
         if let Some((threshold, script_type)) = native {
@@ -206,7 +202,7 @@ impl Policy {
                 ));
             }
             let mut pubkeys: Vec<KeyInfo> = Vec::with_capacity(threshold.n());
-            for key in threshold.data() {
+            for key in threshold.pks() {
                 let DescriptorPublicKey::MultiXPub(key) = key else {
                     return Err(BitBoxError::InvalidInput(
                         "multisig requires origin-bearing account xpubs",

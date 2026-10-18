@@ -303,9 +303,9 @@ fn has_hardened_child_after_unhardened(path: &DerivationPath) -> bool {
 
 fn bip44_purpose(desc_type: DescriptorType) -> Result<u32, DescriptorError> {
     Ok(match desc_type {
-        DescriptorType::Sh | DescriptorType::Pkh => 44,
-        DescriptorType::Wpkh | DescriptorType::Wsh => 84,
-        DescriptorType::ShWsh | DescriptorType::ShWpkh => 49,
+        DescriptorType::Sh | DescriptorType::Pkh | DescriptorType::ShSortedMulti => 44,
+        DescriptorType::Wpkh | DescriptorType::Wsh | DescriptorType::WshSortedMulti => 84,
+        DescriptorType::ShWsh | DescriptorType::ShWpkh | DescriptorType::ShWshSortedMulti => 49,
         DescriptorType::Tr => 86,
         DescriptorType::Bare => return Err(DescriptorError::BarePk),
     })
@@ -322,6 +322,19 @@ mod tests {
     use bhwi::bitcoin::bip32::DerivationPath;
 
     use super::{keypool_descriptor_path, validate_keypool_range};
+
+    #[test]
+    fn sortedmulti_purposes_match_their_script_wrappers() {
+        use bhwi::miniscript::descriptor::DescriptorType;
+
+        for (descriptor_type, expected) in [
+            (DescriptorType::ShSortedMulti, 44),
+            (DescriptorType::WshSortedMulti, 84),
+            (DescriptorType::ShWshSortedMulti, 49),
+        ] {
+            assert_eq!(super::bip44_purpose(descriptor_type).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn device_errors_are_not_double_prefixed() {

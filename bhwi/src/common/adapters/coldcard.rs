@@ -2,8 +2,8 @@ use bitcoin::PublicKey;
 use bitcoin::bip32::{ChildNumber, DerivationPath};
 use bitcoin::secp256k1::Secp256k1;
 use miniscript::{
-    Descriptor, Miniscript, ScriptContext, Terminal,
-    descriptor::{DescriptorPublicKey, ShInner, SinglePubKey, WalletPolicy, Wildcard},
+    Descriptor,
+    descriptor::{DescriptorPublicKey, ShInner, SinglePubKey, WalletPolicy, Wildcard, WshInner},
 };
 
 use crate::coldcard::api;
@@ -155,34 +155,24 @@ enum ColdcardRegistrationClass {
 fn coldcard_registration_class(
     descriptor: &Descriptor<DescriptorPublicKey>,
 ) -> Option<ColdcardRegistrationClass> {
-    let sortedmulti = |size: Option<(usize, usize)>| {
-        size.map(
-            |(threshold, signer_count)| ColdcardRegistrationClass::SortedMulti {
-                threshold,
-                signer_count,
-            },
-        )
+    let sortedmulti = |threshold, signer_count| ColdcardRegistrationClass::SortedMulti {
+        threshold,
+        signer_count,
     };
     match descriptor {
         Descriptor::Sh(sh) => match sh.as_inner() {
-            ShInner::Ms(miniscript) => sortedmulti(sortedmulti_size(miniscript)),
-            ShInner::Wsh(wsh) => sortedmulti(sortedmulti_size(wsh.as_inner())),
-            ShInner::Wpkh(_) => None,
+            ShInner::SortedMulti(multisig) => Some(sortedmulti(multisig.k(), multisig.n())),
+            ShInner::Wsh(wsh) => match wsh.as_inner() {
+                WshInner::SortedMulti(multisig) => Some(sortedmulti(multisig.k(), multisig.n())),
+                WshInner::Ms(_) => None,
+            },
+            ShInner::Ms(_) | ShInner::Wpkh(_) => None,
         },
-        Descriptor::Wsh(wsh) => Some(
-            sortedmulti(sortedmulti_size(wsh.as_inner()))
-                .unwrap_or(ColdcardRegistrationClass::Miniscript),
-        ),
+        Descriptor::Wsh(wsh) => Some(match wsh.as_inner() {
+            WshInner::SortedMulti(multisig) => sortedmulti(multisig.k(), multisig.n()),
+            WshInner::Ms(_) => ColdcardRegistrationClass::Miniscript,
+        }),
         Descriptor::Tr(_) => Some(ColdcardRegistrationClass::Miniscript),
-        _ => None,
-    }
-}
-
-fn sortedmulti_size<Ctx: ScriptContext>(
-    miniscript: &Miniscript<DescriptorPublicKey, Ctx>,
-) -> Option<(usize, usize)> {
-    match &miniscript.node {
-        Terminal::SortedMulti(threshold) => Some((threshold.k(), threshold.n())),
         _ => None,
     }
 }
@@ -369,6 +359,29 @@ mod tests {
     use super::*;
 
     const REGISTRATION_POLICY: &str = "wsh(sortedmulti(2,[f5acc2fd/48'/1'/0'/2']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/<0;1>/*,[00000000/48'/1'/0'/2']tpubDDtb2WPYwEWw2WWDV7reLV348iJHw2HmhzvPysKKrJw3hYmvrd4jasyoioVPdKGQqjyaBMEvTn1HvHWDSVqQ6amyyxRZ5YjpPBBGjJ8yu8S/<0;1>/*))";
+
+    #[test]
+    fn registration_classifies_all_sortedmulti_wrappers() {
+        let inner = REGISTRATION_POLICY
+            .strip_prefix("wsh(")
+            .unwrap()
+            .strip_suffix(')')
+            .unwrap();
+        for descriptor in [
+            format!("sh({inner})"),
+            REGISTRATION_POLICY.to_string(),
+            format!("sh({REGISTRATION_POLICY})"),
+        ] {
+            let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&descriptor).unwrap();
+            assert!(matches!(
+                coldcard_registration_class(&descriptor),
+                Some(ColdcardRegistrationClass::SortedMulti {
+                    threshold: 2,
+                    signer_count: 2,
+                })
+            ));
+        }
+    }
 
     #[test]
     fn registration_payload_contains_name_and_full_descriptor() {

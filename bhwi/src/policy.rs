@@ -10,13 +10,11 @@ use miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, WalletPolicyErro
 
 /// Extracts the BIP-388 template and ordered per-placeholder keys from a wallet policy.
 ///
-/// The returned keys are index-aligned with the template's `@i` placeholders. Miniscript's
-/// `WalletPolicy` assigns a distinct placeholder to each unique key expression (key info plus
-/// derivation), while BIP-388 numbers placeholders by key info alone, reusing the same `@i`
-/// for a key that appears with several multipath derivations. Keys are deduplicated by key
-/// info in first-occurrence order and the template placeholders are renumbered to match:
-/// `Display` renders placeholders left to right in the same order `iter_pk()` yields keys, so
-/// the n-th `@i` token corresponds to the n-th key occurrence.
+/// The returned keys are deduplicated by key info in first-occurrence order and
+/// index-aligned with the template's `@i` placeholders. A key used with several
+/// multipath derivations reuses the same placeholder. Template display and
+/// descriptor key iteration visit key occurrences in the same order, allowing
+/// placeholders to be renumbered to match the returned keys.
 ///
 /// # Errors
 ///

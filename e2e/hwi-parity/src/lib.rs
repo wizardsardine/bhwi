@@ -3969,8 +3969,9 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         ] {
             let account_path = DerivationPath::from_str(&format!("m/{origin_path}"))?;
             let device_xpub = reference_xpub(device_type, &format!("m/{origin_path}"))?;
-            let mut registration_keys =
-                vec![format!("[{fingerprint}/{origin_path}]{device_xpub}/0/*")];
+            let mut registration_keys = vec![format!(
+                "[{fingerprint}/{origin_path}]{device_xpub}/<0;1>/*"
+            )];
             let device_child = device_xpub.derive_pub(&secp, &child_path)?;
             let mut display_keys = vec![format!(
                 "[{fingerprint}/{origin_path}/0/0]{}",
@@ -3982,7 +3983,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 let account_xpriv = master.derive_priv(&secp, &account_path)?;
                 let account_xpub = Xpub::from_priv(&secp, &account_xpriv);
                 registration_keys.push(format!(
-                    "[{cosigner_fingerprint}/{origin_path}]{account_xpub}/0/*"
+                    "[{cosigner_fingerprint}/{origin_path}]{account_xpub}/<0;1>/*"
                 ));
                 let child = account_xpub.derive_pub(&secp, &child_path)?;
                 display_keys.push(format!(
