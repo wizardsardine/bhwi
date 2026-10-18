@@ -2269,7 +2269,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
 
     fn assert_signmessage_parity(args: Vec<String>, case: &SignMessageCase) -> Result<()> {
         let device_type = arg_value(&args, "--device-type").map(str::to_owned);
-        let approval = prepare_signmessage_run(&args)?;
+        let approval = prepare_signmessage_run(&args, true)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
         drop(approval);
         assert_success("reference", &reference)?;
@@ -2278,7 +2278,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         signature::verify_message_signature(&case.pubkey, case.message, &reference_payload)
             .context("reference hwi signmessage signature failed cryptographic verification")?;
 
-        let approval = prepare_signmessage_run(&args)?;
+        let approval = prepare_signmessage_run(&args, false)?;
         let candidate = HwiBinary::candidate()?.run(args)?;
         drop(approval);
         assert_success("candidate", &candidate)?;
@@ -2304,7 +2304,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
     }
 
     fn assert_displayaddress_parity(case: &DisplayAddressCase) -> Result<()> {
-        let approval = prepare_displayaddress_case_run(case)?;
+        let approval = prepare_displayaddress_case_run(case, true)?;
         let reference = HwiBinary::reference()?.run(case.args.clone())?;
         drop(approval);
         assert_displayaddress_result(
@@ -2317,7 +2317,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             },
         )?;
 
-        let approval = prepare_displayaddress_case_run(case)?;
+        let approval = prepare_displayaddress_case_run(case, false)?;
         let candidate = HwiBinary::candidate()?.run(case.args.clone())?;
         drop(approval);
         if let Some(expected) = case.candidate_only_error {
@@ -2361,7 +2361,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
     }
 
     fn assert_signtx_parity(args: Vec<String>, case: &SigntxCase) -> Result<()> {
-        let approval = prepare_signtx_run(&args, case)?;
+        let approval = prepare_signtx_run(&args, case, true)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
         drop(approval);
         assert_success("reference", &reference)?;
@@ -2371,7 +2371,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             separate_keepkey_signtx_runs()?;
         }
 
-        let approval = prepare_signtx_run(&args, case)?;
+        let approval = prepare_signtx_run(&args, case, false)?;
         let candidate = HwiBinary::candidate()?.run(args)?;
         drop(approval);
         assert_success("candidate", &candidate)?;
@@ -2408,7 +2408,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 .value = Amount::from_sat(value);
             separator.psbt = separator.original.to_string();
             let args = signtx_args("keepkey", &separator.psbt);
-            let approval = prepare_signtx_run(&args, &separator)?;
+            let approval = prepare_signtx_run(&args, &separator, false)?;
             let output = HwiBinary::candidate()?.run(args);
             drop(approval);
             let output = output?;
@@ -4044,7 +4044,9 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         ])
     }
 
-    fn prepare_signmessage_run(args: &[String]) -> Result<Option<TrezorApproval>> {
+    // Reference HWI's Trezor DebugUI approves its own prompts. An extra sender can
+    // inject tiny-only debug decisions into normal message framing between prompts.
+    fn prepare_signmessage_run(args: &[String], reference: bool) -> Result<Option<TrezorApproval>> {
         let Some(device_type) = arg_value(args, "--device-type") else {
             return Ok(None);
         };
@@ -4054,7 +4056,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 spawn_coldcard_approval();
                 Ok(None)
             }
-            "trezor" => Ok(Some(spawn_trezor_approval())),
+            "trezor" if !reference => Ok(Some(spawn_trezor_approval())),
             "keepkey" => Ok(Some(spawn_debug_approval(
                 KEEPKEY_DEBUGLINK_ADDR,
                 DebugButton::Yes,
@@ -4064,7 +4066,10 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         }
     }
 
-    fn prepare_displayaddress_run(args: &[String]) -> Result<Option<TrezorApproval>> {
+    fn prepare_displayaddress_run(
+        args: &[String],
+        reference: bool,
+    ) -> Result<Option<TrezorApproval>> {
         let Some(device_type) = arg_value(args, "--device-type") else {
             return Ok(None);
         };
@@ -4074,7 +4079,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 spawn_coldcard_approval();
                 Ok(None)
             }
-            "trezor" => Ok(Some(spawn_trezor_approval())),
+            "trezor" if !reference => Ok(Some(spawn_trezor_approval())),
             "keepkey" => Ok(Some(spawn_debug_approval(
                 KEEPKEY_DEBUGLINK_ADDR,
                 DebugButton::Yes,
@@ -4086,6 +4091,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
 
     fn prepare_displayaddress_case_run(
         case: &DisplayAddressCase,
+        reference: bool,
     ) -> Result<Option<TrezorApproval>> {
         match &case.coldcard_setup {
             ColdcardDisplaySetup::None => {}
@@ -4093,7 +4099,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             ColdcardDisplaySetup::Unregistered => reset_coldcard_multisig()?,
         }
         if matches!(case.expect, ExpectedResult::Success) {
-            return prepare_displayaddress_run(&case.args);
+            return prepare_displayaddress_run(&case.args, reference);
         }
         Ok(None)
     }
@@ -4183,7 +4189,11 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         String::from_utf8(value.to_vec()).context("Coldcard multisig settings were not UTF-8")
     }
 
-    fn prepare_signtx_run(args: &[String], case: &SigntxCase) -> Result<Option<TrezorApproval>> {
+    fn prepare_signtx_run(
+        args: &[String],
+        case: &SigntxCase,
+        reference: bool,
+    ) -> Result<Option<TrezorApproval>> {
         let Some(device_type) = arg_value(args, "--device-type") else {
             return Ok(None);
         };
@@ -4193,7 +4203,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 spawn_coldcard_approval();
                 Ok(None)
             }
-            "trezor" => Ok(Some(spawn_trezor_approval())),
+            "trezor" if !reference => Ok(Some(spawn_trezor_approval())),
             "keepkey" => Ok(Some(spawn_debug_approval(
                 KEEPKEY_DEBUGLINK_ADDR,
                 DebugButton::Yes,
