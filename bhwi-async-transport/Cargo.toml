@@ -1,10 +1,12 @@
 [package]
 name = "bhwi-async-transport"
-version = "0.0.1"
-edition = "2024"
+version = "0.1.0"
+edition.workspace = true
 authors.workspace = true
-repository = "https://github.com/wizardsardine/bhwi"
+repository.workspace = true
 license-file.workspace = true
+readme = "../README.md"
+keywords = ["bitcoin", "miniscript", "hardware-wallet"]
 description = "Native device channels and discovery for bhwi"
 
 [features]

@@ -1,15 +1,13 @@
 [package]
 name = "bhwi-async"
-version = "0.0.1"
-edition = "2024"
+version = "0.1.0"
+edition.workspace = true
 authors.workspace = true
-repository = "https://github.com/wizardsardine/bhwi"
+repository.workspace = true
 license-file.workspace = true
-keywords = ["bitcoin",  "miniscript"]
-description = "development kit"
-
-# See more keys and their definitions at
-# https://doc.rust-lang.org/cargo/reference/manifest.html
+readme = "../README.md"
+keywords = ["bitcoin", "miniscript", "hardware-wallet"]
+description = "Async HWI trait over the bhwi sans-IO Bitcoin hardware wallet interpreters"
 
 [features]
 default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "specter", "trezor"]

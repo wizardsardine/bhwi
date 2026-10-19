@@ -250,7 +250,7 @@ checksum = "d965446196e3b7decd44aa7ee49e31d630118f90ef12f97900f262eb915c951d"
 
 [[package]]
 name = "bhwi"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "aes",
  "base64ct",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "bhwi-async"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bhwi",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "bhwi-async-transport"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-hid",
  "async-trait",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "bhwi-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "bhwi-wasm"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bhwi",
