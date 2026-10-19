@@ -662,7 +662,7 @@ pub(crate) fn descriptor_address(
         ));
     }
     let derivation = paths.join(",");
-    let derived = descriptor.derive_at_index(index).map_err(|error| {
+    let derived = descriptor.at_derivation_index(index).map_err(|error| {
         SpecterError::UnsupportedDisplayAddress(format!(
             "descriptor must have one unhardened wildcard: {error}"
         ))
@@ -895,15 +895,11 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_change_requires_an_explicit_change_branch() {
-        let policy = WalletPolicy::from_str(
+    fn wallet_policy_parsing_rejects_a_missing_change_branch() {
+        assert!(WalletPolicy::from_str(
             "wpkh([f5acc2fd/84'/1'/0']tpubDCbK3Ysvk8HjcF6mPyrgMu3KgLiaaP19RjKpNezd8GrbAbNg6v5BtWLaCt8FNm6QkLseopKLf5MNYQFtochDTKHdfgG6iqJ8cqnLNAwtXuP/0/*)",
         )
-        .unwrap();
-        assert!(matches!(
-            descriptor_address(&policy, true, 0),
-            Err(SpecterError::UnsupportedDisplayAddress(_))
-        ));
+        .is_err());
     }
 
     #[test]

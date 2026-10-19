@@ -235,8 +235,11 @@ The differential suite covers the read, sign, and display command set.
 legacy P2SH, wrapped P2WSH-P2SH, and native P2WSH.
 `tests::candidate_displayaddress_matches_reference` covers all three wrappers,
 both `sortedmulti` and deliberately reverse-ordered `multi`, and both fully
-derived public keys and account xpubs with concrete child suffixes. Commands
-needing on-device confirmation are driven by a debuglink button presser.
+derived public keys and account xpubs with concrete child suffixes. Candidate
+commands needing on-device confirmation use the harness's debuglink button
+presser. Reference HWI already confirms its own prompts through its `DebugUI`;
+the harness must not run a second presser alongside it. Unsolicited decisions
+between prompts can disrupt Trezor One's normal message framing.
 
 Ordinary management methods are outside the differential suite. The upstream
 Trezor One gate runs `TestTrezorManCommands`; upstream does not run that class

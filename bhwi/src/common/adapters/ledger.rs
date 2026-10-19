@@ -229,7 +229,7 @@ mod tests {
 
     use bitcoin::Network;
     use bitcoin::bip32::DerivationPath;
-    use miniscript::descriptor::{DescriptorPublicKey, WalletPolicy};
+    use miniscript::descriptor::{KeyInfo, WalletPolicy};
 
     use super::*;
     use crate::Interpreter;
@@ -530,8 +530,8 @@ mod tests {
 
     fn wallet_policy() -> WalletPolicy {
         let mut policy = WalletPolicy::from_str("wpkh(@0/**)").unwrap();
-        let key = DescriptorPublicKey::from_str(KEY).unwrap();
-        policy.set_key_info(&[key]).unwrap();
+        let key = KeyInfo::from_str(KEY).unwrap();
+        policy.set_key_info(vec![key]).unwrap();
         policy
     }
 

@@ -927,7 +927,7 @@ mod tests {
             device.display_address(xpub_multisig, None).await,
             "[UnsupportedDisplayAddress] KeepKey multisig address display requires fully-derived public keys",
         );
-        let policy = format!("wpkh([{FINGERPRINT}/84'/1'/0']{XPUB_84}/0/*)");
+        let policy = format!("wpkh([{FINGERPRINT}/84'/1'/0']{XPUB_84}/<0;1>/*)");
         assert_error(
             device.register_wallet("keepkey-e2e", &policy).await,
             "[Unsupported] register_wallet is not supported",

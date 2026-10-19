@@ -188,9 +188,6 @@
         };
         cargoLock = {
           lockFile = ./Cargo.lock;
-          outputHashes = {
-            "miniscript-13.0.0" = "sha256-y3USlIiZcMl1gtj8foLIo+G96ZlYiKx4rx5nQuv0K68=";
-          };
         };
         bhwi-wasm-pkg = rustPlatformWasm.buildRustPackage {
           name = "bhwi-wasm-pkg";

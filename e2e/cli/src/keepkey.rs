@@ -635,11 +635,11 @@ fn keepkey_unsupported_paths_are_exact() -> Result<()> {
     let device_xpub = cli.run_ok(["xpub", "get", "m/48'/1'/0'/0'"])?;
     for descriptor in [
         format!(
-            "wsh(sortedmulti(2,[{FINGERPRINT}/48'/1'/0'/0']{}/0/*,[{cosigner_fingerprint}/48'/1'/0'/0']{cosigner_xpub}/0/*))",
+            "wsh(sortedmulti(2,[{FINGERPRINT}/48'/1'/0'/0']{}/<0;1>/*,[{cosigner_fingerprint}/48'/1'/0'/0']{cosigner_xpub}/<0;1>/*))",
             device_xpub.trim()
         ),
         format!(
-            "wsh(multi(2,[{FINGERPRINT}/48'/1'/0'/0']{}/0/*,[{cosigner_fingerprint}/48'/1'/0'/0']{cosigner_xpub}/0/*))",
+            "wsh(multi(2,[{FINGERPRINT}/48'/1'/0'/0']{}/<0;1>/*,[{cosigner_fingerprint}/48'/1'/0'/0']{cosigner_xpub}/<0;1>/*))",
             device_xpub.trim()
         ),
     ] {

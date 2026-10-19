@@ -244,7 +244,7 @@ mod tests {
             let cosigner_xpriv = cosigner_master.derive_priv(&secp, &account_path).unwrap();
             let cosigner_xpub = Xpub::from_priv(&secp, &cosigner_xpriv);
             let policy_keys = format!(
-                "[{device_fingerprint}/{account_path}]{device_xpub}/0/*,[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/0/*"
+                "[{device_fingerprint}/{account_path}]{device_xpub}/<0;1>/*,[{cosigner_fingerprint}/{account_path}]{cosigner_xpub}/<0;1>/*"
             );
             let policy = multisig_descriptor(address_type, &policy_keys);
             register_wallet_and_wait(&mut dev, &mut control, name, &policy).await;
