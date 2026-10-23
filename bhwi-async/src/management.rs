@@ -3,10 +3,29 @@ use bhwi::bitbox::{ManagementContext, SetupMode};
 #[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 use bhwi::common::DeviceContext;
 
+#[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
+use rand_core::{OsRng, RngCore};
+
 #[cfg(feature = "bitbox")]
 pub use bhwi::bitbox::SetupEntropy;
 #[cfg(feature = "trezor")]
 pub use bhwi::trezor::HostPin;
+
+/// No fallback: a seed is only as strong as this.
+#[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
+pub fn host_entropy() -> Result<[u8; 32], HostEntropyError> {
+    let mut entropy = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut entropy)
+        .map_err(HostEntropyError)?;
+    Ok(entropy)
+}
+
+/// The operating system could not supply entropy for device setup.
+#[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
+#[derive(Debug, thiserror::Error)]
+#[error("the operating system has no entropy available: {0}")]
+pub struct HostEntropyError(rand_core::Error);
 
 /// Creates Trezor setup context with 32 bytes of caller-generated entropy.
 #[cfg(feature = "trezor")]
@@ -99,4 +118,17 @@ pub fn keepkey_pin_context_from_positions(
 #[cfg(feature = "keepkey")]
 pub fn keepkey_restore_context(u2f_counter: u32) -> DeviceContext {
     DeviceContext::KeepKeyManagement(bhwi::keepkey::ManagementContext::Restore { u2f_counter })
+}
+
+#[cfg(all(test, any(feature = "bitbox", feature = "keepkey", feature = "trezor")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_entropy_is_fresh_on_every_call() {
+        let first = host_entropy().unwrap();
+        let second = host_entropy().unwrap();
+        assert_ne!(first, [0u8; 32]);
+        assert_ne!(first, second);
+    }
 }

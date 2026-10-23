@@ -11,17 +11,18 @@ description = "Async HWI trait over the bhwi sans-IO Bitcoin hardware wallet int
 
 [features]
 default = ["bitbox", "coldcard", "jade", "keepkey", "ledger", "specter", "trezor"]
-bitbox = ["bhwi/bitbox"]
+bitbox = ["bhwi/bitbox", "dep:rand_core"]
 coldcard = ["bhwi/coldcard"]
 jade = ["bhwi/jade", "serde_cbor"]
-keepkey = ["bhwi/keepkey"]
+keepkey = ["bhwi/keepkey", "dep:rand_core"]
 ledger = ["bhwi/ledger"]
 specter = ["bhwi/specter"]
-trezor = ["bhwi/trezor"]
+trezor = ["bhwi/trezor", "dep:rand_core"]
 
 [dependencies]
 async-trait.workspace = true
 bhwi.workspace = true
+rand_core = { workspace = true, features = ["getrandom"], optional = true }
 serde_cbor = { workspace = true, optional = true }
 thiserror.workspace = true
 

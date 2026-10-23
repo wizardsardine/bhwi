@@ -8,7 +8,9 @@ use bhwi::common::{self, ErrorKind};
 #[cfg(any(feature = "trezor", feature = "keepkey"))]
 use bhwi::passphrase::HostPassphrase;
 
-use crate::{ErrorKindOf, HWIDevice, HWIDeviceError, Info};
+use crate::{
+    DeviceContext, ErrorKindOf, HWIDevice, HWIDeviceError, Info, RestoreOptions, SetupOptions,
+};
 
 /// A supported hardware-wallet family, independent of enabled backend features.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -87,6 +89,14 @@ pub fn reports_device_info(device_type: DeviceType) -> bool {
     matches!(device_type, DeviceType::KeepKey | DeviceType::Trezor)
 }
 
+/// These take setup, restore, wipe and passphrase toggling from the host.
+pub fn supports_device_management(device_type: DeviceType) -> bool {
+    matches!(
+        device_type,
+        DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
+    )
+}
+
 /// Filters discovery candidates and optionally selects a wallet by fingerprint.
 #[derive(Debug, Clone)]
 pub struct DeviceSelector {
@@ -134,6 +144,18 @@ impl DeviceSelector {
 
 /// A callback that presents a BitBox02 pairing code to the user.
 pub type PairingCodePrompt = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Asks the user for a locked Trezor's or KeepKey's PIN during device selection.
+#[cfg(any(feature = "trezor", feature = "keepkey"))]
+#[async_trait(?Send)]
+pub trait PinPrompt {
+    /// Positions on the device's scrambled keypad, not the PIN digits themselves.
+    async fn request_pin(&self) -> Result<String, HWIDeviceError>;
+}
+
+/// A shared PIN prompt.
+#[cfg(any(feature = "trezor", feature = "keepkey"))]
+pub type PinPrompter = Rc<dyn PinPrompt>;
 
 /// A device found on a bus but not yet opened.
 #[derive(Debug, Clone)]
@@ -215,6 +237,8 @@ pub struct DeviceManager<S> {
     source: S,
     pairing_code: Option<PairingCodePrompt>,
     host_interaction: Option<HostInteractionFactory>,
+    #[cfg(any(feature = "trezor", feature = "keepkey"))]
+    pin: Option<PinPrompter>,
 }
 
 impl<S: DeviceSource> DeviceManager<S> {
@@ -225,6 +249,8 @@ impl<S: DeviceSource> DeviceManager<S> {
             source,
             pairing_code: None,
             host_interaction: None,
+            #[cfg(any(feature = "trezor", feature = "keepkey"))]
+            pin: None,
         }
     }
 
@@ -237,6 +263,13 @@ impl<S: DeviceSource> DeviceManager<S> {
     /// Sets the factory used to attach host-input handlers to opened devices.
     pub fn with_host_interaction(mut self, factory: HostInteractionFactory) -> Self {
         self.host_interaction = Some(factory);
+        self
+    }
+
+    /// Sets the prompt that unlocks a locked Trezor or KeepKey during selection.
+    #[cfg(any(feature = "trezor", feature = "keepkey"))]
+    pub fn with_pin_prompt(mut self, prompt: PinPrompter) -> Self {
+        self.pin = Some(prompt);
         self
     }
 
@@ -284,10 +317,90 @@ impl<S: DeviceSource> DeviceManager<S> {
     pub async fn select(
         &self,
     ) -> Result<(Option<Device>, Vec<SkippedDevice>), SelectError<S::Error>> {
+        let (device, skipped) = self.select_reserved(|_| Some(())).await?;
+        Ok((device.map(|(device, ())| device), skipped))
+    }
+
+    /// Offers each candidate to `reserve` before opening it, so a device someone
+    /// else holds is never contacted.
+    pub async fn select_reserved<R>(
+        &self,
+        reserve: impl Fn(&str) -> Option<R>,
+    ) -> Result<(Option<(Device, R)>, Vec<SkippedDevice>), SelectError<S::Error>> {
+        let (device, skipped) = self.select_once(&reserve).await?;
+        if device.is_some() {
+            return Ok((device, skipped));
+        }
+        #[cfg(any(feature = "trezor", feature = "keepkey"))]
+        if self.send_pin_to_locked_device(&skipped, &reserve).await? {
+            return self.select_once(&reserve).await;
+        }
+        Ok((device, skipped))
+    }
+
+    #[cfg(any(feature = "trezor", feature = "keepkey"))]
+    async fn send_pin_to_locked_device<R>(
+        &self,
+        skipped: &[SkippedDevice],
+        reserve: &impl Fn(&str) -> Option<R>,
+    ) -> Result<bool, SelectError<S::Error>> {
+        let Some(prompt) = self.pin.as_ref() else {
+            return Ok(false);
+        };
+        let Some(locked) = skipped.iter().find(|entry| {
+            matches!(entry.device_type, DeviceType::Trezor | DeviceType::KeepKey)
+                && entry.error.kind() == ErrorKind::Locked
+                && entry.error.device_code().is_none()
+        }) else {
+            return Ok(false);
+        };
+
+        // Listing sends nothing, so the keypad on screen survives.
+        let candidates = self.list().await.map_err(SelectError::Source)?;
+        let Some(candidate) = candidates
+            .into_iter()
+            .find(|candidate| candidate.path == locked.path)
+        else {
+            return Ok(false);
+        };
+        let Some(_reservation) = reserve(&candidate.path) else {
+            return Ok(false);
+        };
+        let mut device = match self.open(&candidate).await {
+            Ok(device) => device,
+            Err(_) => return Ok(false),
+        };
+        enter_pin(prompt, &mut device).await?;
+        Ok(true)
+    }
+
+    #[cfg(any(feature = "trezor", feature = "keepkey"))]
+    async fn unlock_with_pin(&self, device: &mut Device) -> Result<(), HWIDeviceError> {
+        let Some(prompt) = self.pin.as_ref() else {
+            return Ok(());
+        };
+        let device_type = device.device_type();
+        if device_type != DeviceType::Trezor && device_type != DeviceType::KeepKey {
+            return Ok(());
+        }
+        if device.device().get_info().await?.needs_pin_sent != Some(true) {
+            return Ok(());
+        }
+        enter_pin(prompt, device).await
+    }
+
+    async fn select_once<R>(
+        &self,
+        reserve: &impl Fn(&str) -> Option<R>,
+    ) -> Result<(Option<(Device, R)>, Vec<SkippedDevice>), SelectError<S::Error>> {
         let candidates = self.list().await.map_err(SelectError::Source)?;
         let mut skipped = Vec::new();
         let mut target_dev = None;
         for candidate in candidates {
+            let Some(reservation) = reserve(&candidate.path) else {
+                skipped.push(skipped_candidate(&candidate, &device_in_use()));
+                continue;
+            };
             let mut d = match self.open(&candidate).await {
                 Ok(device) => device,
                 Err(err) => {
@@ -308,12 +421,15 @@ impl<S: DeviceSource> DeviceManager<S> {
             }
 
             let Some(fingerprint) = self.selector.fingerprint else {
-                target_dev = Some(d);
+                // A locked wallet would otherwise fail only on its first command.
+                #[cfg(any(feature = "trezor", feature = "keepkey"))]
+                self.unlock_with_pin(&mut d).await?;
+                target_dev = Some((d, reservation));
                 break;
             };
             match d.fingerprint().await {
                 Ok(found) if found == fingerprint => {
-                    target_dev = Some(d);
+                    target_dev = Some((d, reservation));
                     break;
                 }
                 Ok(_) => {}
@@ -325,14 +441,14 @@ impl<S: DeviceSource> DeviceManager<S> {
                 }
             }
         }
-        let Some(dev) = target_dev else {
+        let Some((dev, reservation)) = target_dev else {
             return Ok((None, skipped));
         };
         #[cfg(all(feature = "bitbox", any(feature = "trezor", feature = "keepkey")))]
         if self.selector.passphrase.is_some() && dev.device_type() == DeviceType::BitBox02 {
             return Err(SelectError::HostPassphraseRejected);
         }
-        Ok((Some(dev), skipped))
+        Ok((Some((dev, reservation)), skipped))
     }
 
     /// Opens and probes candidates, caching information and initialized-wallet fingerprints.
@@ -342,9 +458,24 @@ impl<S: DeviceSource> DeviceManager<S> {
     /// device-side cancellations mapped to authentication refusals, are collected
     /// as skipped devices.
     pub async fn scan(&self) -> Result<DeviceScan, SelectError<S::Error>> {
+        Ok(self.scan_reserved(|_| Some(())).await?.0)
+    }
+
+    /// The reservations come back with the scan because its devices are open
+    /// and must stay claimed for as long as the caller holds them.
+    pub async fn scan_reserved<R>(
+        &self,
+        reserve: impl Fn(&str) -> Option<R>,
+    ) -> Result<(DeviceScan, Vec<R>), SelectError<S::Error>> {
         let candidates = self.list().await.map_err(SelectError::Source)?;
         let mut scan = DeviceScan::default();
+        let mut reservations = Vec::new();
         for candidate in candidates {
+            let Some(reservation) = reserve(&candidate.path) else {
+                scan.skipped
+                    .push(skipped_candidate(&candidate, &device_in_use()));
+                continue;
+            };
             let mut device = match self.open(&candidate).await {
                 Ok(device) => device,
                 Err(err) => {
@@ -353,12 +484,15 @@ impl<S: DeviceSource> DeviceManager<S> {
                 }
             };
             match probe(&mut device, self.selector.network).await {
-                Ok(()) => scan.devices.push(device),
+                Ok(()) => {
+                    scan.devices.push(device);
+                    reservations.push(reservation);
+                }
                 Err(err) if err.kind() == Some(ErrorKind::UserCancelled) => return Err(err.into()),
                 Err(err) => scan.skipped.push(skipped_candidate(&candidate, &err)),
             }
         }
-        Ok(scan)
+        Ok((scan, reservations))
     }
 
     /// Selects a wallet, returning an error if all candidates were skipped.
@@ -424,6 +558,10 @@ fn skipped_candidate(
     )
 }
 
+fn device_in_use() -> common::Error {
+    common::Error::new(ErrorKind::Busy, "the device is held by another caller")
+}
+
 fn unopened_candidate<E>(candidate: &DeviceCandidate, error: &E) -> SkippedDevice
 where
     E: std::error::Error + ErrorKindOf + 'static,
@@ -442,6 +580,34 @@ async fn probe(device: &mut Device, network: Network) -> Result<(), HWIDeviceErr
     let info = device.info().await?;
     if info.initialized != Some(false) {
         device.fingerprint().await?;
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "trezor", feature = "keepkey"))]
+fn pin_error(message: &str) -> HWIDeviceError {
+    HWIDeviceError::new(common::Error::new(ErrorKind::InvalidInput, message))
+}
+
+#[cfg(any(feature = "trezor", feature = "keepkey"))]
+async fn enter_pin(prompt: &PinPrompter, device: &mut Device) -> Result<(), HWIDeviceError> {
+    if !device.device().prompt_pin().await? {
+        return Err(pin_error("the device did not ask for a PIN"));
+    }
+    let positions = prompt.request_pin().await?;
+    let context = match device.device_type() {
+        #[cfg(feature = "trezor")]
+        DeviceType::Trezor => crate::management::trezor_pin_context(
+            bhwi::trezor::HostPin::new(positions).map_err(|err| pin_error(&err.to_string()))?,
+        ),
+        #[cfg(feature = "keepkey")]
+        DeviceType::KeepKey => crate::management::keepkey_pin_context(
+            bhwi::keepkey::HostPin::new(positions).map_err(|err| pin_error(&err.to_string()))?,
+        ),
+        _ => return Err(pin_error("this device does not take a PIN from the host")),
+    };
+    if !device.device().send_pin(Some(context)).await? {
+        return Err(pin_error("the device rejected the PIN"));
     }
     Ok(())
 }
@@ -668,6 +834,49 @@ impl Device {
         self.is_emulated
     }
 
+    /// Creates a wallet on the device and clears the cached fingerprint and information.
+    pub async fn setup_device(
+        &mut self,
+        options: SetupOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, HWIDeviceError> {
+        let result = self.device.setup_device(options, context).await;
+        self.clear_state();
+        result
+    }
+
+    /// Restores a wallet on the device and clears the cached fingerprint and information.
+    pub async fn restore_device(
+        &mut self,
+        options: RestoreOptions,
+        context: Option<DeviceContext>,
+    ) -> Result<bool, HWIDeviceError> {
+        let result = self.device.restore_device(options, context).await;
+        self.clear_state();
+        result
+    }
+
+    /// Wipes the device and clears the cached fingerprint and information.
+    pub async fn wipe_device(&mut self) -> Result<bool, HWIDeviceError> {
+        let result = self.device.wipe_device().await;
+        self.clear_state();
+        result
+    }
+
+    /// Turns passphrase protection on or off and clears the cached fingerprint and information.
+    pub async fn toggle_passphrase(&mut self) -> Result<bool, HWIDeviceError> {
+        let result = self.device.toggle_passphrase().await;
+        self.clear_state();
+        result
+    }
+
+    /// A lifecycle command can change the seed or the device settings, even
+    /// when it fails, so what was read before it no longer holds.
+    fn clear_state(&mut self) {
+        self.fingerprint = None;
+        self.info = None;
+    }
+
     /// Returns the last successfully queried fingerprint, without performing I/O.
     pub fn cached_fingerprint(&self) -> Option<Fingerprint> {
         self.fingerprint
@@ -744,10 +953,12 @@ mod tests {
         WalletRegistration,
     };
 
-    /// Answers only what `select` asks: unlock and the master fingerprint.
+    /// Answers only what `select` asks: unlock, the master fingerprint and, when
+    /// `pin_locked` is set, the PIN state.
     struct Wallet {
         fingerprint: Fingerprint,
         refuses_unlock: bool,
+        pin_locked: Option<Rc<std::cell::Cell<bool>>>,
     }
 
     #[async_trait(?Send)]
@@ -776,10 +987,13 @@ mod tests {
             unimplemented!()
         }
         async fn prompt_pin(&mut self) -> Result<bool, HWIDeviceError> {
-            unimplemented!()
+            Ok(self.pin_locked.as_ref().is_some_and(|locked| locked.get()))
         }
         async fn send_pin(&mut self, _: Option<DeviceContext>) -> Result<bool, HWIDeviceError> {
-            unimplemented!()
+            if let Some(locked) = &self.pin_locked {
+                locked.set(false);
+            }
+            Ok(true)
         }
         async fn unlock(&mut self, _: Network) -> Result<(), HWIDeviceError> {
             if self.refuses_unlock {
@@ -790,7 +1004,10 @@ mod tests {
             Ok(())
         }
         async fn get_info(&mut self) -> Result<Info, HWIDeviceError> {
-            unimplemented!()
+            Ok(Info {
+                needs_pin_sent: self.pin_locked.as_ref().map(|locked| locked.get()),
+                ..Info::default()
+            })
         }
         async fn get_master_fingerprint(&mut self) -> Result<Fingerprint, HWIDeviceError> {
             Ok(self.fingerprint)
@@ -876,6 +1093,7 @@ mod tests {
             let wallet = Wallet {
                 fingerprint: Fingerprint::from(if refuses_unlock { REFUSING } else { UNLOCKED }),
                 refuses_unlock,
+                pin_locked: None,
             };
             Ok(Device::new(
                 &candidate.name,
@@ -932,6 +1150,75 @@ mod tests {
             Some(unlocked)
         );
         assert_eq!(skipped.len(), 1);
+    }
+
+    /// One Trezor that still needs its PIN.
+    #[cfg(feature = "trezor")]
+    struct LockedTrezor(Rc<std::cell::Cell<bool>>);
+
+    #[cfg(feature = "trezor")]
+    #[async_trait(?Send)]
+    impl DeviceSource for LockedTrezor {
+        type Error = Unplugged;
+
+        async fn list(&self, _: &DeviceSelector) -> Result<Vec<DeviceCandidate>, Self::Error> {
+            Ok(vec![DeviceCandidate {
+                device_type: DeviceType::Trezor,
+                name: "trezor".to_owned(),
+                model: "trezor_one".to_owned(),
+                path: "locked".to_owned(),
+                is_emulated: true,
+            }])
+        }
+
+        async fn open(
+            &self,
+            candidate: &DeviceCandidate,
+            _: &DeviceSelector,
+            _: Option<&PairingCodePrompt>,
+            _: Option<&HostInteractionFactory>,
+        ) -> Result<Device, Self::Error> {
+            let wallet = Wallet {
+                fingerprint: Fingerprint::from(UNLOCKED),
+                refuses_unlock: false,
+                pin_locked: Some(self.0.clone()),
+            };
+            Ok(Device::new(
+                &candidate.name,
+                candidate.device_type,
+                &candidate.path,
+                &candidate.model,
+                Box::new(wallet),
+                candidate.is_emulated,
+            ))
+        }
+    }
+
+    #[cfg(feature = "trezor")]
+    struct Keypad;
+
+    #[cfg(feature = "trezor")]
+    #[async_trait(?Send)]
+    impl PinPrompt for Keypad {
+        async fn request_pin(&self) -> Result<String, HWIDeviceError> {
+            Ok("1".to_owned())
+        }
+    }
+
+    #[cfg(feature = "trezor")]
+    #[test]
+    fn a_pin_prompt_unlocks_a_trezor_chosen_without_a_fingerprint() {
+        for prompted in [true, false] {
+            let locked = Rc::new(std::cell::Cell::new(true));
+            let mut manager =
+                DeviceManager::new(LockedTrezor(locked.clone()), DeviceSelector::default());
+            if prompted {
+                manager = manager.with_pin_prompt(Rc::new(Keypad));
+            }
+            let (device, _) = block_on(manager.select()).expect("the Trezor is chosen");
+            assert!(device.is_some());
+            assert_eq!(locked.get(), !prompted);
+        }
     }
 
     #[test]
@@ -1192,6 +1479,20 @@ mod tests {
         ));
         let converted = crate::HWIDeviceError::from(boxed);
         assert_eq!(converted.kind(), Some(ErrorKind::UserCancelled));
+    }
+
+    #[test]
+    fn only_seed_from_host_devices_are_manageable() {
+        for device_type in DeviceType::ALL {
+            assert_eq!(
+                supports_device_management(device_type),
+                matches!(
+                    device_type,
+                    DeviceType::BitBox02 | DeviceType::KeepKey | DeviceType::Trezor
+                ),
+                "{device_type}"
+            );
+        }
     }
 
     #[test]

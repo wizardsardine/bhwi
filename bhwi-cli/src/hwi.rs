@@ -1412,21 +1412,13 @@ async fn setup_device(
         ));
     }
 
-    let context = match device.device_type() {
+    let context: anyhow::Result<bhwi::common::DeviceContext> = match device.device_type() {
         #[cfg(feature = "keepkey")]
         DeviceType::KeepKey => keepkey_setup_context(),
         #[cfg(feature = "trezor")]
         DeviceType::Trezor => trezor_setup_context(),
         #[cfg(feature = "bitbox")]
-        DeviceType::BitBox02 => match bitbox_setup_context(device.is_emulated()) {
-            Ok(context) => context,
-            Err(err) => {
-                return HwiResponse::Error(HwiError::new(
-                    HwiErrorCode::DeviceFailure,
-                    err.to_string(),
-                ));
-            }
-        },
+        DeviceType::BitBox02 => bitbox_setup_context(device.is_emulated()),
         #[allow(unreachable_patterns)]
         device_type => {
             return HwiResponse::Error(HwiError::new(
@@ -1435,8 +1427,13 @@ async fn setup_device(
             ));
         }
     };
+    let context = match context {
+        Ok(context) => context,
+        Err(err) => {
+            return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, err.to_string()));
+        }
+    };
     match device
-        .device()
         .setup_device(
             SetupOptions {
                 label,
@@ -1475,7 +1472,7 @@ async fn wipe_device(selector: HwiSelector) -> HwiResponse {
         ));
     }
 
-    match device.device().wipe_device().await {
+    match device.wipe_device().await {
         Ok(success) => HwiResponse::Success(HwiSuccessResponse { success }),
         Err(err) => HwiResponse::Error(classify_device_error(&err)),
     }
@@ -1572,7 +1569,6 @@ async fn restore_device(
         }
     };
     match device
-        .device()
         .restore_device(RestoreOptions { label, word_count }, context)
         .await
     {
@@ -1615,7 +1611,7 @@ async fn toggle_passphrase_device(selector: HwiSelector) -> HwiResponse {
         ));
     }
 
-    match device.device().toggle_passphrase().await {
+    match device.toggle_passphrase().await {
         Ok(success) => {
             if success && needs_pin_sent {
                 eprintln!("Confirm the action by entering your PIN");
