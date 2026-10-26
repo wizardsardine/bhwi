@@ -16,12 +16,8 @@ use bhwi_async::display_address::{
     singlesig_display_address_from_descriptor,
 };
 #[cfg(feature = "ledger")]
-use bhwi_async::psbt::{merge_psbt_signatures, strip_legacy_witness_utxos};
-#[cfg(feature = "ledger")]
-use bhwi_async::signing::ledger::{
-    LedgerAddressType, LedgerSigningError, ledger_multisig_display_address, ledger_signing_contexts,
-};
-use bhwi_async::signing::message_signature;
+use bhwi_async::signing::ledger::{LedgerSigningError, ledger_multisig_display_address};
+use bhwi_async::signing::{SignError, SignedPsbt, message_signature, sign_psbt};
 use bhwi_async::{DeviceBackup, DisplayAddress, RestoreOptions, SetupOptions};
 use bitcoin::{
     Network, NetworkKind,
@@ -1932,64 +1928,29 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
         }
     };
 
-    let original = parsed.to_string();
-    #[cfg(feature = "ledger")]
-    if device.device_type() == DeviceType::Ledger {
-        let contexts = match ledger_signing_contexts(&mut device, &parsed, network).await {
-            Ok(contexts) if contexts.is_empty() => {
-                return HwiResponse::SignTx(HwiSignTxResponse {
-                    psbt: original,
-                    signed: false,
-                });
-            }
-            Ok(contexts) => contexts,
-            Err(LedgerSigningError::BadArgument(err)) => {
-                return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err));
-            }
-            Err(LedgerSigningError::Device(err)) => {
-                return HwiResponse::Error(classify_device_error_for(DeviceType::Ledger, &err));
-            }
-            Err(err @ (LedgerSigningError::MissingHmac | LedgerSigningError::HmacLength(_))) => {
-                return HwiResponse::Error(HwiError::new(
-                    HwiErrorCode::DeviceConnectionError,
-                    err.to_string(),
-                ));
-            }
-        };
-
-        let mut signed_psbt = parsed;
-        for signing in contexts {
-            let mut signing_psbt = signed_psbt.clone();
-            if signing.address_type == LedgerAddressType::Legacy {
-                strip_legacy_witness_utxos(&mut signing_psbt);
-            }
-            let result = match device
-                .device()
-                .sign_tx(signing_psbt, Some(signing.context))
-                .await
-            {
-                Ok(psbt) => psbt,
-                Err(err) => {
-                    return HwiResponse::Error(classify_device_error_for(DeviceType::Ledger, &err));
-                }
-            };
-            merge_psbt_signatures(&mut signed_psbt, result);
-        }
-        let signed = signed_psbt.to_string();
-        return HwiResponse::SignTx(HwiSignTxResponse {
-            signed: signed != original,
-            psbt: signed,
-        });
-    }
-
     let device_type = device.device_type();
-    match device.device().sign_tx(parsed, None).await {
-        Ok(signed_psbt) => {
-            let signed = signed_psbt.to_string();
-            HwiResponse::SignTx(HwiSignTxResponse {
-                signed: signed != original,
-                psbt: signed,
-            })
+    match sign_psbt(&mut device, parsed, network).await {
+        Ok(SignedPsbt { psbt, signed }) => HwiResponse::SignTx(HwiSignTxResponse {
+            psbt: psbt.to_string(),
+            signed,
+        }),
+        #[cfg(feature = "ledger")]
+        Err(SignError::Ledger(LedgerSigningError::BadArgument(err))) => {
+            HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err))
+        }
+        #[cfg(feature = "ledger")]
+        Err(SignError::Ledger(LedgerSigningError::Device(err))) => {
+            HwiResponse::Error(classify_device_error_for(device_type, &err))
+        }
+        #[cfg(feature = "ledger")]
+        Err(SignError::Ledger(
+            err @ (LedgerSigningError::MissingHmac | LedgerSigningError::HmacLength(_)),
+        )) => HwiResponse::Error(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            err.to_string(),
+        )),
+        Err(SignError::Device(err)) => {
+            HwiResponse::Error(classify_device_error_for(device_type, &err))
         }
         Err(err) => HwiResponse::Error(classify_device_error_for(device_type, &err)),
     }
