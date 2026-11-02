@@ -977,7 +977,7 @@ mod tests {
         async fn respond(
             &mut self,
             request: &HostRequest,
-        ) -> Result<HostResponse, bhwi::common::Error> {
+        ) -> Result<HostResponse, bhwi_async::HWIDeviceError> {
             match request {
                 HostRequest::PinMatrix { kind } => self.counts.pin_kinds.borrow_mut().push(*kind),
                 HostRequest::RecoveryCharacter { .. } => self
@@ -985,7 +985,7 @@ mod tests {
                     .recovery_requests
                     .set(self.counts.recovery_requests.get() + 1),
             }
-            self.inner.host_response(request).await
+            self.inner.respond(request).await
         }
     }
 

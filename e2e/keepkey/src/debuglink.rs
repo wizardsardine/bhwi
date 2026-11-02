@@ -5,7 +5,7 @@ use bhwi::{
     common::{self, HostRequest, HostResponse},
     keepkey::{api, proto::DebugLinkState},
 };
-use bhwi_async::HostInteraction;
+use bhwi_async::{HWIDeviceError, HostInteraction};
 use prost::Message;
 use tokio::net::UdpSocket;
 
@@ -387,8 +387,10 @@ impl KeepKeyHostInteraction {
 
 #[async_trait(?Send)]
 impl HostInteraction for KeepKeyHostInteraction {
-    async fn respond(&mut self, request: &HostRequest) -> Result<HostResponse, common::Error> {
-        self.host_response(request).await
+    async fn respond(&mut self, request: &HostRequest) -> Result<HostResponse, HWIDeviceError> {
+        self.host_response(request)
+            .await
+            .map_err(HWIDeviceError::new)
     }
 }
 
