@@ -137,10 +137,12 @@ pub trait HttpClient {
 #[async_trait(?Send)]
 pub trait HostInteraction {
     /// Returns input for `request`, or an error such as cancellation.
+    ///
+    /// The error reaches the caller as [`Error::Host`] with its source intact.
     async fn respond(
         &mut self,
         request: &common::HostRequest,
-    ) -> Result<common::HostResponse, common::Error>;
+    ) -> Result<common::HostResponse, HWIDeviceError>;
 }
 
 /// Asynchronous wallet operations with a backend-specific error type.
@@ -392,12 +394,20 @@ pub enum Error<E, F> {
         error: F,
     },
 
-    /// An interpreter or host-interaction failure.
+    /// An interpreter failure.
     #[error("{0}")]
     Interpreter(
         /// The command or input error.
         #[from]
         common::Error,
+    ),
+
+    /// A [`HostInteraction`] failure.
+    #[error("{0}")]
+    Host(
+        /// The host's own error.
+        #[source]
+        HWIDeviceError,
     ),
 }
 
@@ -407,6 +417,7 @@ impl<E, F> Error<E, F> {
         match self {
             Self::Transport { kind, .. } | Self::HttpClient { kind, .. } => *kind,
             Self::Interpreter(error) => error.kind(),
+            Self::Host(error) => error.kind().unwrap_or(ErrorKind::Other),
         }
     }
 }
@@ -878,7 +889,7 @@ where
                 let interaction = host_interaction.as_deref_mut().ok_or_else(|| {
                     common::Error::new(ErrorKind::Unsupported, "host interaction required")
                 })?;
-                let response = interaction.respond(request).await?;
+                let response = interaction.respond(request).await.map_err(Error::Host)?;
                 transmit = intpr.exchange(response.into_bytes_for(request)?)?;
             }
             common::Recipient::Device => {
@@ -957,7 +968,7 @@ mod tests {
         async fn respond(
             &mut self,
             request: &common::HostRequest,
-        ) -> Result<common::HostResponse, common::Error> {
+        ) -> Result<common::HostResponse, HWIDeviceError> {
             assert_eq!(
                 request,
                 &common::HostRequest::PinMatrix {
@@ -1137,6 +1148,48 @@ mod tests {
         assert!(matches!(response, common::Response::DeviceAction(true)));
         assert_eq!(device.transport.calls, 1);
         assert_eq!(host_calls.get(), 1);
+    }
+
+    struct RefusingHost;
+
+    #[async_trait(?Send)]
+    impl HostInteraction for RefusingHost {
+        async fn respond(
+            &mut self,
+            _: &common::HostRequest,
+        ) -> Result<common::HostResponse, HWIDeviceError> {
+            Err(HWIDeviceError::with_kind(
+                std::io::Error::other("no window to show the keypad"),
+                ErrorKind::HostUnavailable,
+            ))
+        }
+    }
+
+    #[test]
+    fn a_host_refusal_keeps_its_own_error() {
+        let (mut device, _) = scripted_device_with_sequence(None, true);
+        device.host_interaction = Some(Box::new(RefusingHost));
+
+        let error = match block_on(run_command_inner(
+            &mut device,
+            common::Command::GetVersion,
+            false,
+        )) {
+            Err(error) => error,
+            Ok(_) => panic!("a refused host prompt succeeds"),
+        };
+
+        assert_eq!(error.kind(), ErrorKind::HostUnavailable);
+        let mut source = StdError::source(&error);
+        let original = loop {
+            let current = source.expect("the host's own error is in the chain");
+            if let Some(original) = current.downcast_ref::<std::io::Error>() {
+                break original;
+            }
+            source = current.source();
+        };
+        assert_eq!(original.to_string(), "no window to show the keypad");
+        assert_eq!(device.transport.calls, 0);
     }
 
     #[test]

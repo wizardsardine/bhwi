@@ -169,7 +169,12 @@ impl SpecterDevice {
     }
 
     async fn open_tcp(candidate: &DeviceCandidate, network: Network) -> NativeResult<Device> {
-        let address = tcp_address(&candidate.path).unwrap_or(&candidate.path);
+        let address = tcp_address(&candidate.path).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a TCP address", candidate.path),
+            )
+        })?;
         let stream = connect_tcp(address).await?;
         Ok(Device::new(
             &candidate.name,
@@ -185,16 +190,16 @@ impl SpecterDevice {
     }
 }
 
-fn tcp_address(path: &str) -> Option<&str> {
-    path.strip_prefix("tcp:")
-        .or_else(|| path.parse::<SocketAddr>().ok().map(|_| path))
+/// Only an IP address and port, so each endpoint has one canonical path to reserve.
+fn tcp_address(path: &str) -> Option<SocketAddr> {
+    path.strip_prefix("tcp:").unwrap_or(path).parse().ok()
 }
 
-fn selected_tcp_address(selector: &DeviceSelector) -> Option<&str> {
+fn selected_tcp_address(selector: &DeviceSelector) -> Option<SocketAddr> {
     selector.device_path.as_deref().and_then(tcp_address)
 }
 
-async fn connect_tcp(address: &str) -> io::Result<TcpStream> {
+async fn connect_tcp(address: SocketAddr) -> io::Result<TcpStream> {
     timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
         .await
         .map_err(|_| {
@@ -288,13 +293,26 @@ mod tests {
 
     #[test]
     fn accepts_only_explicit_tcp_selectors() {
-        assert_eq!(tcp_address("tcp:127.0.0.1:8789"), Some("127.0.0.1:8789"));
-        assert_eq!(tcp_address("127.0.0.1:8789"), Some("127.0.0.1:8789"));
+        let simulator = "127.0.0.1:8789".parse().ok();
+        assert_eq!(tcp_address("tcp:127.0.0.1:8789"), simulator);
+        assert_eq!(tcp_address("127.0.0.1:8789"), simulator);
         assert_eq!(tcp_address("/dev/ttyACM0"), None);
-        assert_eq!(
-            tcp_address(DEFAULT_SPECTER_SIMULATOR_ADDRESS),
-            Some("127.0.0.1:8789")
-        );
+        assert_eq!(tcp_address("tcp:localhost:8789"), None);
+        assert_eq!(tcp_address(DEFAULT_SPECTER_SIMULATOR_ADDRESS), simulator);
+    }
+
+    #[tokio::test]
+    async fn each_spelling_of_a_tcp_endpoint_lists_one_path() {
+        for spelling in ["tcp:[::1]:8789", "tcp:[0:0:0:0:0:0:0:1]:8789", "[::1]:8789"] {
+            let selector = DeviceSelector {
+                device_type: Some(DeviceType::Specter),
+                device_path: Some(spelling.into()),
+                ..DeviceSelector::default()
+            };
+            let candidates = SpecterDevice::list(&selector).await.unwrap();
+            assert_eq!(candidates.len(), 1, "{spelling}");
+            assert_eq!(candidates[0].path, "tcp:[::1]:8789", "{spelling}");
+        }
     }
 
     #[tokio::test]

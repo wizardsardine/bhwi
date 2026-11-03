@@ -5,23 +5,22 @@
 #[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 use anyhow::Context;
 use anyhow::Result;
-#[cfg(feature = "bitbox")]
-use bhwi::bitbox::{SetupEntropy, SetupMode};
 use bhwi::common::DeviceContext;
 #[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
+use bhwi_async::management::HostEntropy;
+#[cfg(any(feature = "bitbox", feature = "keepkey", feature = "trezor"))]
 use chrono::Local;
-use rand_core::{OsRng, RngCore};
 
 /// Creates Trezor setup context with 32 bytes of OS-generated entropy.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the operating system cannot supply random entropy.
+/// Returns an error if the operating system cannot supply random entropy.
 #[cfg(feature = "trezor")]
-pub fn trezor_setup_context() -> DeviceContext {
-    let mut host_entropy = [0; 32];
-    OsRng.fill_bytes(&mut host_entropy);
-    bhwi_async::management::trezor_setup_context(host_entropy)
+pub fn trezor_setup_context() -> Result<DeviceContext> {
+    Ok(bhwi_async::management::trezor_setup_context(
+        HostEntropy::from_os()?,
+    ))
 }
 
 /// Creates Trezor PIN context from nonempty ASCII-digit keypad positions.
@@ -51,14 +50,14 @@ pub fn trezor_restore_context() -> Result<DeviceContext> {
 
 /// Creates KeepKey setup context with 32 bytes of OS-generated entropy.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the operating system cannot supply random entropy.
+/// Returns an error if the operating system cannot supply random entropy.
 #[cfg(feature = "keepkey")]
-pub fn keepkey_setup_context() -> DeviceContext {
-    let mut host_entropy = [0; 32];
-    OsRng.fill_bytes(&mut host_entropy);
-    bhwi_async::management::keepkey_setup_context(host_entropy)
+pub fn keepkey_setup_context() -> Result<DeviceContext> {
+    Ok(bhwi_async::management::keepkey_setup_context(
+        HostEntropy::from_os()?,
+    ))
 }
 
 /// Creates KeepKey PIN context from nonempty ASCII-digit keypad positions.
@@ -98,23 +97,12 @@ fn u2f_counter_from(timestamp: i64) -> Result<u32> {
 ///
 /// # Errors
 ///
-/// Returns an error if the timestamp does not fit in `u32`.
-///
-/// # Panics
-///
-/// Panics if a physical device is selected and the operating system cannot supply entropy.
+/// Returns an error if the timestamp does not fit in `u32`, or if the operating
+/// system cannot supply random entropy.
 #[cfg(feature = "bitbox")]
 pub fn bitbox_setup_context(is_emulated: bool) -> Result<DeviceContext> {
     let (timestamp, timezone_offset) = timestamp_and_timezone_offset()?;
-    let mode = if is_emulated {
-        SetupMode::RestoreFromMnemonic
-    } else {
-        let mut entropy = [0; 32];
-        OsRng.fill_bytes(&mut entropy);
-        SetupMode::NewWallet {
-            entropy: SetupEntropy::new(entropy),
-        }
-    };
+    let mode = bhwi_async::management::bitbox_setup_mode(is_emulated, HostEntropy::from_os()?);
     Ok(bhwi_async::management::bitbox_setup_context(
         mode,
         timestamp,
@@ -153,7 +141,7 @@ fn timestamp_and_timezone_offset_from(timestamp: i64, timezone_offset: i32) -> R
 #[cfg(all(test, feature = "bitbox"))]
 mod tests {
     use super::*;
-    use bhwi::bitbox::ManagementContext;
+    use bhwi::bitbox::{ManagementContext, SetupMode};
 
     #[test]
     fn simulator_setup_uses_mnemonic_restore_without_entropy() {
@@ -198,7 +186,7 @@ mod tests {
     #[cfg(feature = "keepkey")]
     fn keepkey_contexts_use_keepkey_management_variants() {
         assert!(matches!(
-            keepkey_setup_context(),
+            keepkey_setup_context().unwrap(),
             DeviceContext::KeepKeyManagement(bhwi::keepkey::ManagementContext::Setup { .. })
         ));
         assert!(matches!(

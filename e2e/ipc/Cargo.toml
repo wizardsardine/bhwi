@@ -1,0 +1,27 @@
+[package]
+name = "bhwi-e2e-ipc"
+version = "0.1.0"
+edition = "2024"
+authors.workspace = true
+license-file.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+bhwi = { workspace = true, features = ["keepkey"] }
+bhwi-ipc = { path = "../../bhwi-ipc", default-features = false, features = [
+    "bitbox",
+    "coldcard",
+    "jade",
+    "keepkey",
+    "ledger",
+    "specter",
+    "trezor",
+] }
+bitcoin = { workspace = true, features = ["base64", "secp-recovery"] }
+capnp.workspace = true
+capnp-rpc.workspace = true
+futures.workspace = true
+miniscript.workspace = true
+prost = "=0.13.5"
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
+tokio-util = { workspace = true, features = ["compat"] }
