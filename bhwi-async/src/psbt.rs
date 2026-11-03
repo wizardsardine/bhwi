@@ -1,5 +1,9 @@
 use bhwi::bitcoin::psbt::Psbt;
 
+mod versioned;
+
+pub use versioned::{VersionedPsbt, VersionedPsbtError};
+
 /// Removes witness UTXOs for inputs whose full previous transaction shows a non-witness script.
 ///
 /// Inputs without a matching previous output are left unchanged.

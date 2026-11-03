@@ -28,4 +28,6 @@ thiserror.workspace = true
 byteorder = "1.5"
 
 [dev-dependencies]
+bitcoin = { workspace = true, features = ["base64"] }
 futures.workspace = true
+serde_json.workspace = true

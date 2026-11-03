@@ -290,9 +290,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bhwi",
+ "bitcoin",
  "byteorder",
  "futures",
  "serde_cbor",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
