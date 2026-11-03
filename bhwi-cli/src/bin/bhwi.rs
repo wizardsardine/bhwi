@@ -3,6 +3,7 @@ use anyhow::Result;
 use bhwi::ledger::{LedgerWalletPolicy, Version};
 #[cfg(any(feature = "trezor", feature = "keepkey"))]
 use bhwi::passphrase::HostPassphrase;
+use bhwi_async::psbt::VersionedPsbt;
 use bhwi_async::{
     DeviceBackup, DeviceContext, HWIDeviceError, RestoreOptions, SetupOptions, WalletRegistration,
 };
@@ -26,14 +27,12 @@ use bhwi_cli::{
 use bhwi_cli::{address::AddressOutput, get_descriptors::DescriptorOutput};
 
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use bitcoin::base64::prelude::{BASE64_STANDARD, Engine as _};
 use bitcoin::{
     Network,
     address::AddressType,
     bip32::{DerivationPath, Fingerprint},
-    psbt::Psbt,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use miniscript::descriptor::{DescriptorType, WalletPolicy};
@@ -694,16 +693,21 @@ async fn run() -> Result<()> {
             output,
         }) => {
             let psbt_text = std::fs::read_to_string(psbt)?;
-            let psbt = Psbt::from_str(psbt_text.trim())?;
+            let psbt_to_sign =
+                VersionedPsbt::deserialize(&BASE64_STANDARD.decode(psbt_text.trim())?)?;
             let hmac = hmac.as_deref().map(parse_hmac).transpose()?;
             if let Some(mut d) = select_device(&dev_man).await? {
                 let context = signing_context(d.device_type(), name, descriptor, hmac)?;
-                let signed = d.device().sign_tx(psbt, context).await?;
-                let signed = signed.to_string();
+                let signed_psbt_from_device = d
+                    .device()
+                    .sign_tx(psbt_to_sign.as_psbt_v0().clone(), context)
+                    .await?;
+                let signed_psbt = psbt_to_sign.restore_version(signed_psbt_from_device)?;
+                let signed_psbt_text = BASE64_STANDARD.encode(signed_psbt.serialize());
                 if let Some(output) = output {
-                    std::fs::write(output, signed)?;
+                    std::fs::write(output, signed_psbt_text)?;
                 } else {
-                    println!("{signed}");
+                    println!("{signed_psbt_text}");
                 }
             }
         }
@@ -784,6 +788,8 @@ fn parse_hmac(hmac: &str) -> Result<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use clap::{CommandFactory, Parser, error::ErrorKind};
 
     use super::*;
