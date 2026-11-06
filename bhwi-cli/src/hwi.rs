@@ -6,7 +6,6 @@
 //! `--stdinpass` prompts for the password on the controlling terminal when available,
 //! falling back to a stderr prompt and stdin input if terminal password reading fails.
 
-use bhwi::bitcoin::psbt::Psbt;
 #[cfg(feature = "keepkey")]
 use bhwi::keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED};
 #[cfg(any(feature = "trezor", feature = "keepkey"))]
@@ -15,6 +14,7 @@ use bhwi_async::display_address::{
     DisplayAddressError, multisig_display_address_from_descriptor,
     singlesig_display_address_from_descriptor,
 };
+use bhwi_async::psbt::VersionedPsbt;
 #[cfg(feature = "ledger")]
 use bhwi_async::psbt::{merge_psbt_signatures, strip_legacy_witness_utxos};
 #[cfg(feature = "ledger")]
@@ -1929,17 +1929,16 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
 
     // Upstream parses the PSBT only once a client exists, then reports an
     // invalid transaction rather than a generic bad argument.
-    let parsed = match Psbt::from_str(psbt.trim()) {
+    let psbt_to_sign = match decode_psbt(psbt.trim()) {
         Ok(psbt) => psbt,
-        Err(err) => {
-            return HwiResponse::Error(HwiError::new(HwiErrorCode::InvalidTx, err.to_string()));
-        }
+        Err(err) => return HwiResponse::Error(HwiError::new(HwiErrorCode::InvalidTx, err)),
     };
 
-    let original = parsed.to_string();
+    let original = BASE64_STANDARD.encode(psbt_to_sign.serialize());
     #[cfg(feature = "ledger")]
     if device.device_type() == DeviceType::Ledger {
-        let contexts = match ledger_signing_contexts(&mut device, &parsed, network).await {
+        let psbt_v0_to_sign = psbt_to_sign.as_psbt_v0();
+        let contexts = match ledger_signing_contexts(&mut device, psbt_v0_to_sign, network).await {
             Ok(contexts) if contexts.is_empty() => {
                 return HwiResponse::SignTx(HwiSignTxResponse {
                     psbt: original,
@@ -1961,7 +1960,7 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
             }
         };
 
-        let mut signed_psbt = parsed;
+        let mut signed_psbt = psbt_v0_to_sign.clone();
         for signing in contexts {
             let mut signing_psbt = signed_psbt.clone();
             if signing.address_type == LedgerAddressType::Legacy {
@@ -1979,23 +1978,43 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
             };
             merge_psbt_signatures(&mut signed_psbt, result);
         }
-        let signed = signed_psbt.to_string();
-        return HwiResponse::SignTx(HwiSignTxResponse {
-            signed: signed != original,
-            psbt: signed,
-        });
+        return signtx_response(&psbt_to_sign, &original, signed_psbt);
     }
 
     let device_type = device.device_type();
-    match device.device().sign_tx(parsed, None).await {
-        Ok(signed_psbt) => {
-            let signed = signed_psbt.to_string();
-            HwiResponse::SignTx(HwiSignTxResponse {
-                signed: signed != original,
-                psbt: signed,
-            })
+    match device
+        .device()
+        .sign_tx(psbt_to_sign.as_psbt_v0().clone(), None)
+        .await
+    {
+        Ok(signed_psbt_from_device) => {
+            signtx_response(&psbt_to_sign, &original, signed_psbt_from_device)
         }
         Err(err) => HwiResponse::Error(classify_device_error_for(device_type, &err)),
+    }
+}
+
+fn decode_psbt(psbt: &str) -> Result<VersionedPsbt, String> {
+    let bytes = BASE64_STANDARD
+        .decode(psbt)
+        .map_err(|err| format!("invalid PSBT base64: {err}"))?;
+    VersionedPsbt::deserialize(&bytes).map_err(|err| err.to_string())
+}
+
+fn signtx_response(
+    psbt_to_sign: &VersionedPsbt,
+    original_text: &str,
+    signed_psbt_from_device: bhwi::bitcoin::psbt::Psbt,
+) -> HwiResponse {
+    match psbt_to_sign.restore_version(signed_psbt_from_device) {
+        Ok(signed_psbt) => {
+            let signed_psbt_text = BASE64_STANDARD.encode(signed_psbt.serialize());
+            HwiResponse::SignTx(HwiSignTxResponse {
+                signed: signed_psbt_text != original_text,
+                psbt: signed_psbt_text,
+            })
+        }
+        Err(err) => HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, err.to_string())),
     }
 }
 
@@ -3213,6 +3232,29 @@ mod tests {
         ));
         assert_eq!(device.code, HwiErrorCode::DeviceConnectionError.code());
         assert_eq!(device.error, "boom");
+    }
+
+    #[test]
+    fn signtx_answers_a_psbtv2_in_version_2() {
+        let v2 = "cHNidP8BAgQCAAAAAQQBAQEFAQIB+wQCAAAAAAEOIAsK2SFBnByHGXNdctxzn56p4GONH+TB7vD5lECEgV/IAQ8EAAAAAAABAwgACK8vAAAAAAEEFgAUxDD2TEdW2jENvRoIVXLvKZkmJywAAQMIi73rCwAAAAABBBYAFE3Rk6yWSlasG54cyoRU/i9HT4UTAA==";
+        let psbt_to_sign = decode_psbt(v2).unwrap();
+        let mut changed_by_device = psbt_to_sign.as_psbt_v0().clone();
+        changed_by_device.inputs[0].sighash_type = Some(bitcoin::EcdsaSighashType::All.into());
+        for (signed_psbt_from_device, expect_signed) in [
+            (psbt_to_sign.as_psbt_v0().clone(), false),
+            (changed_by_device, true),
+        ] {
+            let HwiResponse::SignTx(response) =
+                signtx_response(&psbt_to_sign, v2, signed_psbt_from_device)
+            else {
+                panic!("expected a signtx response");
+            };
+            assert_eq!(response.signed, expect_signed);
+            assert_eq!(decode_psbt(&response.psbt).unwrap().version(), 2);
+            if !expect_signed {
+                assert_eq!(response.psbt, v2);
+            }
+        }
     }
 
     #[test]

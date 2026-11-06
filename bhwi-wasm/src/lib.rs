@@ -28,7 +28,7 @@ use bhwi::trezor::{
 use bhwi::{coldcard::COLDCARD_DEVICE_ID, ledger::LEDGER_DEVICE_ID};
 use bhwi_async::{
     DeviceContext, DisplayAddress, HWI as AsyncHWI, Jade, KeepKey, Ledger, Specter, Trezor,
-    WalletRegistration, bitbox::BitBox, coldcard::Coldcard,
+    WalletRegistration, bitbox::BitBox, coldcard::Coldcard, psbt::VersionedPsbt,
     transport::bitbox::hid::BitBoxTransportHID, transport::coldcard::hid::ColdcardTransportHID,
     transport::ledger::hid::LedgerTransportHID, transport::specter::SpecterTransport,
     transport::trezor::TrezorTransport,
@@ -840,8 +840,12 @@ impl Client {
         wallet_descriptor: Option<String>,
         wallet_hmac_hex: Option<String>,
     ) -> Result<String, JsValue> {
-        let psbt = Psbt::from_str(psbt.trim())
-            .map_err(|e| JsValue::from_str(&format!("Invalid PSBT: {e}")))?;
+        let psbt_to_sign = BASE64_STANDARD
+            .decode(psbt.trim())
+            .map_err(|e| JsValue::from_str(&format!("invalid PSBT base64: {e}")))
+            .and_then(|bytes| {
+                VersionedPsbt::deserialize(&bytes).map_err(|e| JsValue::from_str(&e.to_string()))
+            })?;
         // Ledger signs registered policies with name+descriptor+hmac; BitBox re-supplies the
         // policy descriptor for multisig signing; Coldcard/Jade resolve everything on-device.
         let context = match &self.device {
@@ -892,11 +896,16 @@ impl Client {
             _ => None,
         };
         match &mut self.device {
-            Some(d) => d
-                .as_mut()
-                .sign_tx(psbt, context)
-                .await
-                .map(|signed| signed.to_string()),
+            Some(d) => {
+                let signed_psbt_from_device = d
+                    .as_mut()
+                    .sign_tx(psbt_to_sign.as_psbt_v0().clone(), context)
+                    .await?;
+                psbt_to_sign
+                    .restore_version(signed_psbt_from_device)
+                    .map(|signed_psbt| BASE64_STANDARD.encode(signed_psbt.serialize()))
+                    .map_err(|e| JsValue::from_str(&e.to_string()))
+            }
             None => Err(JsValue::from_str("Device not connected")),
         }
     }
