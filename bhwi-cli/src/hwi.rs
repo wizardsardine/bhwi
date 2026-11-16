@@ -6,7 +6,6 @@
 //! `--stdinpass` prompts for the password on the controlling terminal when available,
 //! falling back to a stderr prompt and stdin input if terminal password reading fails.
 
-use bhwi::bitcoin::psbt::Psbt;
 #[cfg(feature = "keepkey")]
 use bhwi::keepkey::{DEFAULT_KEEPKEY_EMULATOR, KEEPKEY_LOCKED};
 #[cfg(any(feature = "trezor", feature = "keepkey"))]
@@ -58,6 +57,7 @@ use crate::{
     python_hwi_device_manager, reports_device_info,
 };
 
+mod psbt;
 type HwiResult<T> = std::result::Result<T, HwiError>;
 
 /// The Clap parser for Python HWI-compatible global options and subcommands.
@@ -1929,17 +1929,20 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
 
     // Upstream parses the PSBT only once a client exists, then reports an
     // invalid transaction rather than a generic bad argument.
-    let parsed = match Psbt::from_str(psbt.trim()) {
+    let parsed = match psbt::SigningPsbt::parse(psbt.trim()) {
         Ok(psbt) => psbt,
         Err(err) => {
             return HwiResponse::Error(HwiError::new(HwiErrorCode::InvalidTx, err.to_string()));
         }
     };
 
-    let original = parsed.to_string();
+    let original = match parsed.finish(&parsed.backend) {
+        Ok(original) => original,
+        Err(err) => return HwiResponse::Error(HwiError::new(HwiErrorCode::InvalidTx, err)),
+    };
     #[cfg(feature = "ledger")]
     if device.device_type() == DeviceType::Ledger {
-        let contexts = match ledger_signing_contexts(&mut device, &parsed, network).await {
+        let contexts = match ledger_signing_contexts(&mut device, &parsed.backend, network).await {
             Ok(contexts) if contexts.is_empty() => {
                 return HwiResponse::SignTx(HwiSignTxResponse {
                     psbt: original,
@@ -1961,7 +1964,7 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
             }
         };
 
-        let mut signed_psbt = parsed;
+        let mut signed_psbt = parsed.backend.clone();
         for signing in contexts {
             let mut signing_psbt = signed_psbt.clone();
             if signing.address_type == LedgerAddressType::Legacy {
@@ -1979,7 +1982,10 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
             };
             merge_psbt_signatures(&mut signed_psbt, result);
         }
-        let signed = signed_psbt.to_string();
+        let signed = match parsed.finish(&signed_psbt) {
+            Ok(signed) => signed,
+            Err(err) => return HwiResponse::Error(HwiError::new(HwiErrorCode::InvalidTx, err)),
+        };
         return HwiResponse::SignTx(HwiSignTxResponse {
             signed: signed != original,
             psbt: signed,
@@ -1987,9 +1993,12 @@ async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
     }
 
     let device_type = device.device_type();
-    match device.device().sign_tx(parsed, None).await {
+    match device.device().sign_tx(parsed.backend.clone(), None).await {
         Ok(signed_psbt) => {
-            let signed = signed_psbt.to_string();
+            let signed = match parsed.finish(&signed_psbt) {
+                Ok(signed) => signed,
+                Err(err) => return HwiResponse::Error(HwiError::new(HwiErrorCode::InvalidTx, err)),
+            };
             HwiResponse::SignTx(HwiSignTxResponse {
                 signed: signed != original,
                 psbt: signed,

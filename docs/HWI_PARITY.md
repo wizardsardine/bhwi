@@ -19,10 +19,13 @@ commands and devices where parity is claimed.
 - `signmessage` payloads are verified cryptographically on both sides: the
   BIP-137 signature must recover the public key the reference device reports at
   the requested derivation path over `signed_msg_hash(message)`.
-- `signtx` results are verified against the recomputed sighash (BIP143 for
-  segwit v0, legacy otherwise) for the expected device key, and the reference
-  and candidate PSBTs are then compared field for field with only the signature
-  values excluded. Per-input signature key sets must still match exactly.
+- `signtx` results are verified against the recomputed legacy, BIP143, or BIP341
+  sighash for the expected device key. Reference and candidate PSBTs are then
+  compared field for field with only signature values excluded; per-input
+  signature key sets must still match exactly. PSBTv2 results are decoded from
+  their maps, checked for version and transaction/metadata preservation, then
+  normalized to the signing transaction for cryptographic verification rather
+  than passed directly to a PSBTv0-only parser.
 - Emulator CI (`.github/workflows/emulators.yml`) runs differential parity and
   a matching unmodified upstream gate for all six supported families:
   BitBox02, Coldcard, Ledger, Jade, KeepKey, and Trezor. The Trezor matrix has
@@ -167,6 +170,50 @@ unambiguously from PSBT metadata:
   `wsh(sortedmulti)` policies with complete account-level global xpubs; and
 - PSBTs containing inputs from more than one supported policy.
 
+`tests::candidate_signtx_matches_reference` runs each Ledger fixture and the
+BitBox02 native SegWit single-key fixture as both PSBTv0 and PSBTv2 against
+pinned Python HWI 3.2.0 and the candidate. The differential v2 fixtures use
+transaction version 1 and locktime 0, with explicit sequences, omitted required-height
+locktime fields, and proprietary global, input, and output metadata. Both results must
+retain the original PSBT version and metadata, add the expected signatures, and
+pass cryptographic verification; reference/candidate comparison also requires
+matching signature key sets.
+These differential fixtures fix transaction-modifiable flags to zero. BIP370's
+Signer role requires new signatures to clear the input-modifiable bit unless
+`ANYONECANPAY` is used, clear the output-modifiable bit unless `SIGHASH_NONE`
+is used, and set the `SIGHASH_SINGLE` bit for `SINGLE`. The candidate applies
+these updates; pinned HWI's Ledger backend leaves the original flags untouched.
+Mutable flags therefore are not claimed as field-for-field reference parity.
+
+The [published HWI 3.2.0 parser](https://github.com/bitcoin-core/HWI/blob/3.2.0/hwilib/psbt.py)
+calls `cache_unsigned_tx_pieces()` after deserialization. Its `self.tx is not None`
+guard accepts the empty `CTransaction` placeholder for PSBTv2, so
+`setup_from_tx()` overwrites the parsed transaction version and fallback locktime
+with 1 and 0. This is fixed by the PSBT commit in upstream
+[#836](https://github.com/bitcoin-core/HWI/pull/836).
+Separately, `get_unsigned_tx()` assigns the computed locktime to
+`self.nLockTime` instead of `tx.nLockTime`, leaving the reconstructed transaction's
+locktime at 0; [#839](https://github.com/bitcoin-core/HWI/pull/839) fixes that
+and other PSBT parsing issues. Neither correction is in the pinned release.
+We do not reproduce these bugs or claim differential coverage for transaction
+version 2 or nonzero locktime.
+
+`tests::candidate_signtx_psbt_v2_version_two_required_locktime` instead signs
+genuine PSBTv2 transactions with transaction version 2 and required height 42
+on the candidate alone, for all the same Ledger fixtures and the BitBox02
+native SegWit fixture. The fallback locktime is 0, so the required height must
+determine the signing transaction's locktime. It uses the existing emulator
+approval flows and the same PSBT version/metadata checks and cryptographic
+signature verifier, without invoking the broken reference parser.
+
+
+The HWI signing boundary preserves the caller's PSBT version, resolves BIP370
+required-height/required-time locktimes before signing, and merges signatures
+without replacing the original maps or existing signatures. Deterministic
+boundary tests cover version conversion, locktime selection and rejection,
+and signature merging independently of an emulator. The coverage descriptions
+here do not assert that any particular test invocation has been executed.
+
 The adapter validates derivation paths and script commitments before asking the
 device to sign. It rejects ambiguous or unsupported owned inputs, including
 unsorted multisig, arbitrary witness miniscript, and taproot script paths, with
@@ -260,6 +307,8 @@ requires host word entry and remains unsupported.
 KeepKey parity runs against emulator UDP `127.0.0.1:11044`; confirmation and
 state automation uses the debug link on `127.0.0.1:11045`. Start `keepkey` and
 `keepkey-init` before `hwi-parity-keepkey`.
+For transaction signing, the harness sends debug approvals only for the
+candidate; Python HWI's debug client supplies its own reference approvals.
 
 The differential suite covers enumerate, global arguments, xpubs, six
 non-Taproot descriptor/keypool forms, legacy and SegWit transaction signing,
