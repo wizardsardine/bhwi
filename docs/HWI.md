@@ -28,6 +28,21 @@ errors exit `0`, and argparse-style usage errors exit `2` with
 `{"error": "...", "code": -2}` on stdout and usage text on stderr. See
 [HWI_PARITY.md](HWI_PARITY.md#exit-status-contract).
 
+CLI fingerprints remain raw, case-sensitive strings until device selection:
+empty values select nothing, malformed nonempty values cannot match (`-3`), and
+enumeration and host udev installation ignore them. Account and keypool range
+arguments accept signed decimal integers without a machine-word parsing bound,
+including negative Unicode decimal digits from Python 3.12's Unicode 15 repertoire;
+invalid integer syntax remains a usage error. Device selection precedes checked
+derivation conversion, and an explicit keypool path ignores the account entirely.
+Keypool endpoints are returned unchanged, including negative or reversed ranges.
+Chain choices are case-insensitive `main`, `test`, `regtest`, `signet`, and
+`testnet4`; repeated scalar options use their last value, with each occurrence
+still syntax-checked. Focused CLI regressions cover no-device error precedence;
+differential keypool cases cover negative and oversized ignored accounts and
+unsupported Taproot errors with a selected emulator. Keypool capability checks,
+like derivation validation, follow device selection.
+
 ## Feature Parity
 
 |Command           |Ledger|Jade |Coldcard|Trezor|KeepKey|BitBox02|Notes                                                                 |

@@ -40,7 +40,7 @@ hex = { workspace = true, features = ["serde"] }
 miniscript = { workspace = true, features = ["serde"] }
 rand_core = { workspace = true, features = ["getrandom"] }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync", "time"] }
 
 clap = { workspace = true }
