@@ -71,6 +71,31 @@ P2SH, wrapped P2WSH-P2SH, and native P2WSH plus a deliberately reverse-ordered
 native `multi`; pinned HWI's Ledger suite marks multisig display unsupported and
 skips it.
 
+### PSBT Signing Boundary
+
+HWI `signtx` accepts PSBTv0 and PSBTv2 and returns the same version it received.
+The version-preserving boundary reconstructs the signing transaction using
+BIP370 locktime requirements and merges only new signatures into the original
+maps, preserving existing signatures, unknown fields, and proprietary metadata.
+New signatures also update PSBTv2 transaction-modifiable flags as required by
+BIP370; mutable-flag behavior is not field-for-field Ledger reference parity.
+Deterministic boundary tests cover conversion, locktime selection, and signature
+merging. Differential emulator cases exercise both versions for Ledger's
+supported single-key, classic multisig, and mixed-policy signing fixtures and
+BitBox02's native SegWit single-key fixture, checking version and metadata
+preservation and cryptographic signatures against pinned Python HWI 3.2.0.
+The v2 differential fixtures use transaction version 1 and locktime 0 because
+the stable upstream parser overwrites v2's transaction version/fallback locktime
+and incorrectly reconstructs nonzero locktimes (upstream fixes
+[#836](https://github.com/bitcoin-core/HWI/pull/836) and
+[#839](https://github.com/bitcoin-core/HWI/pull/839), absent from 3.2.0).
+Separate candidate-only emulator signing cases cover transaction version 2 and
+required height 42 with zero fallback for those same Ledger/BitBox02 fixtures,
+using the same metadata checks and cryptographic verifier; this is not
+reference differential coverage. These describe test coverage, not a record of
+a particular test run. See [the parity scope](HWI_PARITY.md#ledger-signing-and-display-policy-scope)
+for the exact stable parser limitations.
+
 ### Management Evidence
 
 - **BitBox02:** differential coverage compares initialized-state management

@@ -388,6 +388,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     use std::{
+        collections::BTreeMap,
         fs,
         io::{BufRead, BufReader, Read, Write},
         net::UdpSocket,
@@ -419,6 +420,7 @@ mod tests {
         base64::prelude::{BASE64_STANDARD, Engine as _},
         bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub},
         blockdata::{opcodes::all::OP_CHECKMULTISIG, script::Builder},
+        consensus::{deserialize_partial, serialize},
         key::TapTweak,
         psbt::{Input, Output as PsbtOutput, Psbt},
         secp256k1::{Message, Secp256k1},
@@ -837,19 +839,23 @@ mod tests {
         if device_type == "ledger" {
             for wrapper in LedgerSinglesigWrapper::ALL {
                 let case = build_singlesig_signtx_case(&device_type, wrapper)?;
-                assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case).with_context(
-                    || format!("signtx Ledger {wrapper:?} singlesig parity failed"),
-                )?;
+                assert_signtx_versions_parity(&device_type, case).with_context(|| {
+                    format!("signtx Ledger {wrapper:?} singlesig parity failed")
+                })?;
             }
             for wrapper in MultisigWrapper::ALL {
                 let case = build_strict_bip48_multisig_signtx_case(&device_type, wrapper)?;
-                assert_signtx_parity(signtx_args(&device_type, &case.psbt), &case)
+                assert_signtx_versions_parity(&device_type, case)
                     .with_context(|| format!("signtx Ledger {wrapper:?} multisig parity failed"))?;
             }
 
             let mixed = build_ledger_mixed_policy_signtx_case(&device_type)?;
-            assert_signtx_parity(signtx_args(&device_type, &mixed.psbt), &mixed)
+            assert_signtx_versions_parity(&device_type, mixed)
                 .context("signtx Ledger mixed-policy parity failed")?;
+        } else if device_type == "bitbox02" {
+            let case = build_singlesig_signtx_case(&device_type, LedgerSinglesigWrapper::Wit)?;
+            assert_signtx_versions_parity(&device_type, case)
+                .context("signtx BitBox02 native SegWit parity failed")?;
         } else if device_type == "keepkey" {
             for wrapper in [
                 LedgerSinglesigWrapper::Legacy,
@@ -885,6 +891,37 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_signtx_psbt_v2_version_two_required_locktime() -> Result<()> {
+        if env::var("HWI_BIN").is_err() {
+            return Ok(());
+        }
+        let Some(device_type) = expected_device_type_from_env()? else {
+            return Ok(());
+        };
+        if device_type == "ledger" {
+            for wrapper in LedgerSinglesigWrapper::ALL {
+                let case = build_singlesig_signtx_case(&device_type, wrapper)?;
+                assert_candidate_signtx_v2(&device_type, case).with_context(|| {
+                    format!("signtx Ledger {wrapper:?} singlesig PSBTv2 failed")
+                })?;
+            }
+            for wrapper in MultisigWrapper::ALL {
+                let case = build_strict_bip48_multisig_signtx_case(&device_type, wrapper)?;
+                assert_candidate_signtx_v2(&device_type, case)
+                    .with_context(|| format!("signtx Ledger {wrapper:?} multisig PSBTv2 failed"))?;
+            }
+            let case = build_ledger_mixed_policy_signtx_case(&device_type)?;
+            assert_candidate_signtx_v2(&device_type, case)
+                .context("signtx Ledger mixed-policy PSBTv2 failed")?;
+        } else if device_type == "bitbox02" {
+            let case = build_singlesig_signtx_case(&device_type, LedgerSinglesigWrapper::Wit)?;
+            assert_candidate_signtx_v2(&device_type, case)
+                .context("signtx BitBox02 native SegWit PSBTv2 failed")?;
+        }
         Ok(())
     }
 
@@ -2360,6 +2397,160 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         }
     }
 
+    fn assert_signtx_versions_parity(device_type: &str, mut case: SigntxCase) -> Result<()> {
+        assert_signtx_parity(signtx_args(device_type, &case.psbt), &case)
+            .context("PSBTv0 signing parity")?;
+        // ponytail: pinned HWI 3.2.0 overwrites v2's tx version and loses locktime.
+        // Keep differential fixtures unaffected; exercise version 2 / height 42 separately.
+        case.original.unsigned_tx.version = TxVersion::ONE;
+        case.original.unsigned_tx.lock_time = LockTime::ZERO;
+        case.psbt = psbt_v2_fixture(&case.original)?;
+        assert_signtx_parity(signtx_args(device_type, &case.psbt), &case)
+            .context("PSBTv2 signing parity")
+    }
+
+    fn assert_candidate_signtx_v2(device_type: &str, mut case: SigntxCase) -> Result<()> {
+        case.original.unsigned_tx.version = TxVersion::TWO;
+        case.original.unsigned_tx.lock_time = LockTime::from_height(42)?;
+        case.psbt = psbt_v2_fixture(&case.original)?;
+        let args = signtx_args(device_type, &case.psbt);
+        let approval = prepare_signtx_run(&args, &case, false)?;
+        let candidate = HwiBinary::candidate()?.run(args)?;
+        drop(approval);
+        assert_success("candidate", &candidate)?;
+        assert_signtx_shape("candidate", &candidate.json)?;
+        assert_signed_psbt("candidate", &candidate.json, &case)?;
+        Ok(())
+    }
+
+    type PsbtMap = BTreeMap<Vec<u8>, Vec<u8>>;
+
+    fn psbt_maps(encoded: &str, inputs: usize, outputs: usize) -> Result<Vec<PsbtMap>> {
+        let bytes = BASE64_STANDARD
+            .decode(encoded)
+            .context("invalid PSBT base64")?;
+        let mut remaining = bytes
+            .strip_prefix(b"psbt\xff")
+            .context("invalid PSBT magic")?;
+        let mut maps = Vec::new();
+        for _ in 0..1 + inputs + outputs {
+            let mut map = PsbtMap::new();
+            loop {
+                let key = psbt_map_bytes(&mut remaining)?;
+                if key.is_empty() {
+                    break;
+                }
+                let value = psbt_map_bytes(&mut remaining)?;
+                if map.insert(key, value).is_some() {
+                    bail!("duplicate PSBT map key");
+                }
+            }
+            maps.push(map);
+        }
+        if !remaining.is_empty() {
+            bail!("unexpected trailing PSBT maps");
+        }
+        Ok(maps)
+    }
+
+    fn psbt_map_bytes(remaining: &mut &[u8]) -> Result<Vec<u8>> {
+        let (length, consumed) = deserialize_partial::<bitcoin::VarInt>(remaining)?;
+        let length = usize::try_from(length.0)?;
+        *remaining = &remaining[consumed..];
+        let bytes = remaining
+            .get(..length)
+            .context("truncated PSBT map")?
+            .to_vec();
+        *remaining = &remaining[length..];
+        Ok(bytes)
+    }
+
+    fn encode_psbt_maps(maps: &[PsbtMap]) -> String {
+        let mut bytes = b"psbt\xff".to_vec();
+        for map in maps {
+            for (key, value) in map {
+                bytes.extend(serialize(&bitcoin::VarInt(key.len() as u64)));
+                bytes.extend(key);
+                bytes.extend(serialize(&bitcoin::VarInt(value.len() as u64)));
+                bytes.extend(value);
+            }
+            bytes.push(0);
+        }
+        BASE64_STANDARD.encode(bytes)
+    }
+
+    fn psbt_v2_fixture(original: &Psbt) -> Result<String> {
+        let tx = &original.unsigned_tx;
+        let mut maps = psbt_maps(&original.to_string(), tx.input.len(), tx.output.len())?;
+        let global = &mut maps[0];
+        global.remove(&vec![0x00]);
+        global.insert(vec![0xfb], 2u32.to_le_bytes().to_vec());
+        global.insert(vec![0x02], serialize(&tx.version));
+        // A nonzero required height must win over this zero fallback.
+        global.insert(vec![0x03], serialize(&LockTime::ZERO));
+        global.insert(
+            vec![0x04],
+            serialize(&bitcoin::VarInt(tx.input.len() as u64)),
+        );
+        global.insert(
+            vec![0x05],
+            serialize(&bitcoin::VarInt(tx.output.len() as u64)),
+        );
+        global.insert(vec![0x06], vec![0]);
+        global.insert(vec![0xfc, 4, b'b', b'h', b'w', b'i', 0], vec![1, 2, 3]);
+        for (index, input) in tx.input.iter().enumerate() {
+            let map = &mut maps[1 + index];
+            map.insert(vec![0x0e], serialize(&input.previous_output.txid));
+            map.insert(vec![0x0f], serialize(&input.previous_output.vout));
+            map.insert(vec![0x10], serialize(&input.sequence));
+            if tx.lock_time != LockTime::ZERO {
+                map.insert(vec![0x12], serialize(&tx.lock_time));
+            }
+            map.insert(vec![0xfc, 4, b'b', b'h', b'w', b'i', 1], vec![4, 5]);
+        }
+        for (index, output) in tx.output.iter().enumerate() {
+            let map = &mut maps[1 + tx.input.len() + index];
+            map.insert(vec![0x03], output.value.to_sat().to_le_bytes().to_vec());
+            map.insert(vec![0x04], output.script_pubkey.as_bytes().to_vec());
+            map.insert(vec![0xfc, 4, b'b', b'h', b'w', b'i', 2], vec![6, 7]);
+        }
+        Ok(encode_psbt_maps(&maps))
+    }
+
+    fn decode_signed_psbt(encoded: &str, case: &SigntxCase) -> Result<Psbt> {
+        let inputs = case.original.inputs.len();
+        let outputs = case.original.outputs.len();
+        let original = psbt_maps(&case.psbt, inputs, outputs)?;
+        let mut signed = psbt_maps(encoded, inputs, outputs)?;
+        if signed[0].get(&vec![0xfb]) != original[0].get(&vec![0xfb]) {
+            bail!("signing changed the PSBT version");
+        }
+        if original[0].get(&vec![0xfb]).map(Vec::as_slice) != Some(2u32.to_le_bytes().as_slice()) {
+            return Psbt::from_str(encoded).context("invalid signed PSBT");
+        }
+        let mut metadata = signed.clone();
+        for (map, original) in metadata[1..1 + inputs]
+            .iter_mut()
+            .zip(&original[1..1 + inputs])
+        {
+            map.retain(|key, _| {
+                !matches!(key[0], 0x02 | 0x13 | 0x14) || original.contains_key(key)
+            });
+        }
+        if metadata != original {
+            bail!("signing changed PSBTv2 transaction fields or metadata");
+        }
+        signed[0].retain(|key, _| !matches!(key[0], 0x02..=0x06 | 0xfb));
+        signed[0].insert(vec![0x00], serialize(&case.original.unsigned_tx));
+        for map in &mut signed[1..1 + inputs] {
+            map.retain(|key, _| !matches!(key[0], 0x0e..=0x12));
+        }
+        for map in &mut signed[1 + inputs..] {
+            map.retain(|key, _| !matches!(key[0], 0x03 | 0x04));
+        }
+        Psbt::from_str(&encode_psbt_maps(&signed)).context("invalid signed PSBTv2 metadata")
+    }
+
     fn assert_signtx_parity(args: Vec<String>, case: &SigntxCase) -> Result<()> {
         let approval = prepare_signtx_run(&args, case, true)?;
         let reference = HwiBinary::reference()?.run(args.clone())?;
@@ -2637,7 +2828,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             bail!("{label} hwi signtx did not report signed=true");
         }
         let signed_psbt = assert_string_json_field(label, json, "psbt")?;
-        let signed_psbt = Psbt::from_str(signed_psbt)
+        let signed_psbt = decode_signed_psbt(signed_psbt, case)
             .with_context(|| format!("{label} hwi signtx returned invalid PSBT"))?;
         if signed_psbt.unsigned_tx != case.original.unsigned_tx {
             bail!("{label} hwi signtx changed the unsigned transaction");
@@ -4204,7 +4395,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 Ok(None)
             }
             "trezor" if !reference => Ok(Some(spawn_trezor_approval())),
-            "keepkey" => Ok(Some(spawn_debug_approval(
+            "keepkey" if !reference => Ok(Some(spawn_debug_approval(
                 KEEPKEY_DEBUGLINK_ADDR,
                 DebugButton::Yes,
                 Instant::now() + command_timeout(),
