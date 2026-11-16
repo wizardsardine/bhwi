@@ -17,12 +17,15 @@ commands and devices where parity is claimed.
 - The suite asserts parity for the implemented HWI command set with the
   intended emulator family active.
 - `signmessage` payloads are verified cryptographically on both sides: the
-  BIP-137 signature must recover the public key the reference device reports at
-  the requested derivation path over `signed_msg_hash(message)`.
-- `signtx` results are verified against the recomputed sighash (BIP143 for
-  segwit v0, legacy otherwise) for the expected device key, and the reference
-  and candidate PSBTs are then compared field for field with only the signature
-  values excluded. Per-input signature key sets must still match exactly.
+  BIP-137 signature must recover the public key, including its compression flag,
+  at the requested derivation path over `signed_msg_hash(message)`. Address
+  classes must match the reference; recovery IDs may vary with signature scalars.
+- `signtx` results are verified against the original input's requested/default
+  sighash type and recomputed sighash (BIP341 for Taproot, BIP143 for segwit v0,
+  legacy otherwise) for the expected device key. Reference and candidate PSBTs
+  are compared field for field with only partial ECDSA/Taproot signature values
+  excluded. Final scriptSig and witness fields, and per-input signature key sets,
+  must still match exactly.
 - Emulator CI (`.github/workflows/emulators.yml`) runs differential parity and
   a matching unmodified upstream gate for all six supported families:
   BitBox02, Coldcard, Ledger, Jade, KeepKey, and Trezor. The Trezor matrix has
@@ -217,8 +220,11 @@ Python reference, whose BitBox02 CLI backend has no management methods.
 
 Known divergence: BitBox02 produces nondeterministic signatures, so the
 `signmessage` suite skips byte-exact JSON equality for `bitbox02` only. Both
-sides must still recover the same public key from their own signature, so the
-weaker comparison is limited to the signature encoding itself.
+sides must still recover the same public key with the expected compression
+flag and matching BIP137 address class; only signature scalars and their
+recovery IDs may differ. Pinned HWI forwards BitBox02's compressed-P2PKH
+header (`31 + recovery_id`), even for the BIP49 signing path, rather than
+deriving an address class from that path.
 
 The simulator deliberately stops replying after a successful factory reset.
 CI therefore treats only a read-side disconnect after the reset request as
@@ -260,6 +266,8 @@ requires host word entry and remains unsupported.
 KeepKey parity runs against emulator UDP `127.0.0.1:11044`; confirmation and
 state automation uses the debug link on `127.0.0.1:11045`. Start `keepkey` and
 `keepkey-init` before `hwi-parity-keepkey`.
+For transaction signing, the harness sends debug approvals only for the
+candidate; Python HWI's debug client supplies its own reference approvals.
 
 The differential suite covers enumerate, global arguments, xpubs, six
 non-Taproot descriptor/keypool forms, legacy and SegWit transaction signing,
@@ -267,8 +275,11 @@ including fully derived sorted 2-of-2 KeepKey multisig across legacy P2SH,
 wrapped P2WSH-P2SH, and native P2WSH, message signing, supported single- and
 multisig display, validation errors, and initialized-device management
 behavior. `tests::candidate_keepkey_management_matches_reference` compares
-management errors, passphrase toggling, and passphrase-dependent enumeration
-without leaving the shared simulator changed. Candidate refusal tests require
+management errors (including PIN commands on the initialized shared device),
+passphrase toggling, and passphrase-dependent enumeration without leaving the
+shared simulator changed. Successful PIN prompting, incorrect-PIN handling, and
+unlocking are candidate-only lifecycle evidence, not differential observations.
+Candidate refusal tests require
 code `-14` and a usable following session; Python HWI's debug client
 auto-approves and cannot provide the same refusal observation.
 
