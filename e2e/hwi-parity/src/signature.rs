@@ -8,14 +8,32 @@ use bitcoin::{
 };
 
 pub fn verify_message_signature(pubkey: &PublicKey, message: &str, payload: &[u8]) -> Result<()> {
-    let signature = MessageSignature::from_slice(payload)
+    let class = message_signature_class(payload)?;
+    let mut normalized = [0; 65];
+    normalized.copy_from_slice(payload);
+    normalized[0] = 27 + ((payload[0] - 27) % 4) + if class == 0 { 0 } else { 4 };
+    let signature = MessageSignature::from_slice(&normalized)
         .context("signmessage payload was not a 65-byte recoverable signature")?;
     let secp = Secp256k1::verification_only();
     let recovered = signature
         .recover_pubkey(&secp, signed_msg_hash(message))
         .context("signmessage payload did not recover a public key")?;
-    if recovered.inner != pubkey.inner {
+    if recovered != *pubkey {
         bail!("signmessage payload recovered a public key the device did not sign with");
+    }
+    Ok(())
+}
+
+fn message_signature_class(payload: &[u8]) -> Result<u8> {
+    if payload.len() != 65 || !(27..=42).contains(&payload[0]) {
+        bail!("signmessage payload has an invalid length or BIP137 header");
+    }
+    Ok((payload[0] - 27) / 4)
+}
+
+pub(crate) fn assert_message_signature_parity(reference: &[u8], candidate: &[u8]) -> Result<()> {
+    if message_signature_class(reference)? != message_signature_class(candidate)? {
+        bail!("reference and candidate message signatures use different address classes");
     }
     Ok(())
 }
@@ -105,8 +123,6 @@ pub fn strip_signatures(psbt: &mut Psbt) {
         input.partial_sigs.clear();
         input.tap_key_sig = None;
         input.tap_script_sigs.clear();
-        input.final_script_sig = None;
-        input.final_script_witness = None;
     }
 }
 
@@ -300,6 +316,38 @@ mod tests {
     }
 
     #[test]
+    fn message_signature_parity_preserves_header_semantics() {
+        let (private_key, pubkey) = key(7);
+        let reference = message_payload(&private_key, MESSAGE);
+        let digest = Message::from_digest(signed_msg_hash(MESSAGE).to_byte_array());
+        let candidate = MessageSignature::new(
+            Secp256k1::new().sign_ecdsa_recoverable_with_noncedata(
+                &digest,
+                &private_key,
+                &[42; 32],
+            ),
+            true,
+        )
+        .serialize();
+        assert_ne!(reference[1..], candidate[1..]);
+        verify_message_signature(&pubkey, MESSAGE, &candidate).expect("alternate nonce verifies");
+        assert_message_signature_parity(&reference, &candidate).expect("same address class");
+
+        let mut changed = candidate;
+        changed[0] -= 4;
+        assert!(verify_message_signature(&pubkey, MESSAGE, &changed).is_err());
+        assert!(assert_message_signature_parity(&reference, &changed).is_err());
+        for offset in [4, 8] {
+            changed[0] = candidate[0] + offset;
+            verify_message_signature(&pubkey, MESSAGE, &changed).expect("BIP137 compressed key");
+            assert!(assert_message_signature_parity(&reference, &changed).is_err());
+            assert_message_signature_parity(&changed, &changed).expect("matching BIP137 class");
+        }
+        changed[0] = 43;
+        assert!(verify_message_signature(&pubkey, MESSAGE, &changed).is_err());
+    }
+
+    #[test]
     fn valid_psbt_signature_verifies() {
         let (_, pubkey, psbt) = signed_psbt();
         verify_psbt_signature(&psbt, 0, &pubkey).expect("signature should verify");
@@ -392,6 +440,29 @@ mod tests {
             .expect("witness utxo")
             .value = Amount::from_sat(49_999);
         assert!(assert_psbt_parity(&reference, &candidate).is_err());
+    }
+
+    #[test]
+    fn psbt_parity_preserves_final_fields_with_valid_partial_signatures() {
+        let (_, pubkey, mut reference) = signed_psbt();
+        for finalized in [false, true] {
+            if finalized {
+                reference.inputs[0].final_script_sig = Some(ScriptBuf::from_bytes(vec![0x51]));
+                reference.inputs[0].final_script_witness = Some(Witness::from_slice(&[&[1u8][..]]));
+            }
+            verify_psbt_signature(&reference, 0, &pubkey).expect("reference signature verifies");
+            assert_psbt_parity(&reference, &reference).expect("identical final fields");
+            let mut candidate = reference.clone();
+            candidate.inputs[0].final_script_sig = Some(ScriptBuf::from_bytes(vec![0x52]));
+            verify_psbt_signature(&candidate, 0, &pubkey)
+                .expect("partial signature still verifies");
+            assert!(assert_psbt_parity(&reference, &candidate).is_err());
+            let mut candidate = reference.clone();
+            candidate.inputs[0].final_script_witness = Some(Witness::from_slice(&[&[2u8][..]]));
+            verify_psbt_signature(&candidate, 0, &pubkey)
+                .expect("partial signature still verifies");
+            assert!(assert_psbt_parity(&reference, &candidate).is_err());
+        }
     }
 
     #[test]

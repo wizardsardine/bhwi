@@ -2287,7 +2287,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         signature::verify_message_signature(&case.pubkey, case.message, &candidate_payload)
             .context("candidate hwi signmessage signature failed cryptographic verification")?;
 
-        // BitBox02 signatures are nondeterministic, so both sides only have to verify.
+        signature::assert_message_signature_parity(&reference_payload, &candidate_payload)?;
         if device_type.as_deref() == Some("bitbox02") {
             return Ok(());
         }
@@ -2698,6 +2698,15 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                     )
                 })?;
                 if case.verify_signatures {
+                    let sighash_type = case.original.inputs[expected.input_index]
+                        .taproot_hash_ty()
+                        .context("original input declared an invalid taproot sighash type")?;
+                    if signature.sighash_type != sighash_type {
+                        bail!(
+                            "{label} hwi signtx used an unexpected taproot sighash type on input {}",
+                            expected.input_index
+                        );
+                    }
                     let prevouts = case
                         .original
                         .inputs
@@ -2709,7 +2718,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                         .taproot_key_spend_signature_hash(
                             expected.input_index,
                             &Prevouts::All(&prevouts),
-                            signature.sighash_type,
+                            sighash_type,
                         )?;
                     let internal_key = expected.pubkey.inner.x_only_public_key().0;
                     let tweaked = internal_key
@@ -2728,6 +2737,69 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                             )
                         })?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn taproot_signature_requires_original_requested_sighash() -> Result<()> {
+        use bitcoin::{secp256k1::Keypair, sighash::TapSighashType, taproot};
+
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_seckey_slice(&secp, &[7; 32])?;
+        let pubkey = PublicKey::new(keypair.public_key());
+        let script = singlesig_script(
+            LedgerSinglesigWrapper::Tap,
+            pubkey,
+            &Secp256k1::verification_only(),
+        );
+        let mut original = spending_psbt(script.clone(), script.clone());
+        original.inputs[0].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: script,
+        });
+        let expected = ExpectedSignature {
+            input_index: 0,
+            pubkey,
+            kind: ExpectedSignatureKind::TapKey,
+        };
+        for requested in [None, Some(TapSighashType::All)] {
+            original.inputs[0].sighash_type = requested.map(Into::into);
+            let case = SigntxCase {
+                psbt: original.to_string(),
+                original: original.clone(),
+                expected_signatures: vec![expected],
+                ledger_registers_wallet: false,
+                verify_signatures: true,
+            };
+            for actual in [TapSighashType::Default, TapSighashType::All] {
+                let prevouts = [original.spend_utxo(0)?.clone()];
+                let sighash = SighashCache::new(&original.unsigned_tx)
+                    .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), actual)?;
+                let message = Message::from(sighash);
+                let tweaked = keypair.tap_tweak(&secp, None);
+                let signature = secp.sign_schnorr_no_aux_rand(&message, &tweaked.to_keypair());
+                secp.verify_schnorr(
+                    &signature,
+                    &message,
+                    &tweaked.public_parts().0.to_x_only_public_key(),
+                )?;
+                let mut signed = original.clone();
+                signed.inputs[0].tap_key_sig = Some(taproot::Signature {
+                    signature,
+                    sighash_type: actual,
+                });
+                signed.inputs[0].sighash_type = Some(actual.into());
+                let result = assert_signed_psbt(
+                    "synthetic",
+                    &serde_json::json!({ "psbt": signed.to_string(), "signed": true }),
+                    &case,
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    actual == requested.unwrap_or(TapSighashType::Default)
+                );
             }
         }
         Ok(())
@@ -4204,7 +4276,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 Ok(None)
             }
             "trezor" if !reference => Ok(Some(spawn_trezor_approval())),
-            "keepkey" => Ok(Some(spawn_debug_approval(
+            "keepkey" if !reference => Ok(Some(spawn_debug_approval(
                 KEEPKEY_DEBUGLINK_ADDR,
                 DebugButton::Yes,
                 Instant::now() + command_timeout(),
