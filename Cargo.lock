@@ -387,6 +387,7 @@ dependencies = [
  "bhwi-e2e-keepkey",
  "bhwi-e2e-trezor",
  "bitcoin",
+ "miniscript",
  "serde_json",
  "tokio",
 ]

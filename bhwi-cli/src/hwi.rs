@@ -2074,14 +2074,6 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
             if device.device_type() == DeviceType::Jade && addr_type == HwiAddressType::Tap {
                 return HwiResponse::Error(HwiError::new(HwiErrorCode::DeviceFailure, "tap"));
             }
-            if device.device_type() == DeviceType::Ledger
-                && !is_standard_path(&path, addr_type, selector.network)
-            {
-                return HwiResponse::Error(HwiError::new(
-                    HwiErrorCode::BadArgument,
-                    "Ledger requires BIP 44 standard paths",
-                ));
-            }
             Ok((
                 DisplayAddress::ByPath {
                     path,
@@ -2092,7 +2084,11 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
             ))
         }
         HwiDisplayAddressRequest::Descriptor { descriptor } => {
-            match singlesig_display_address_from_descriptor(&mut device, &descriptor)
+            let singlesig_descriptor = match hwi_singlesig_display_descriptor(&descriptor) {
+                Ok(descriptor) => descriptor,
+                Err(err) => return HwiResponse::Error(err),
+            };
+            match singlesig_display_address_from_descriptor(&mut device, &singlesig_descriptor)
                 .await
                 .map_err(display_address_error)
             {
@@ -2152,6 +2148,11 @@ async fn display_address(selector: HwiSelector, request: HwiDisplayAddressReques
         Ok(display) => display,
         Err(error) => return HwiResponse::Error(error),
     };
+    if device.device_type() == DeviceType::Ledger
+        && let Err(err) = validate_ledger_display_address(&display, selector.network)
+    {
+        return HwiResponse::Error(err);
+    }
 
     let probes_multisig_paths = matches!(display, DisplayAddress::ByMultisig(_))
         && matches!(
@@ -2538,6 +2539,60 @@ fn is_standard_path(path: &DerivationPath, addr_type: HwiAddressType, network: N
                 index: bip44_chain(network),
             }
         && matches!(change, ChildNumber::Normal { index: 0 | 1 })
+}
+
+fn validate_ledger_display_address(
+    address: &DisplayAddress,
+    network: Network,
+) -> Result<(), HwiError> {
+    if let DisplayAddress::ByPath {
+        path,
+        address_format,
+        ..
+    } = address
+    {
+        let addr_type = match address_format {
+            Some(bitcoin::address::AddressType::P2pkh) => HwiAddressType::Legacy,
+            Some(bitcoin::address::AddressType::P2sh) => HwiAddressType::ShWit,
+            Some(bitcoin::address::AddressType::P2wpkh) => HwiAddressType::Wit,
+            Some(bitcoin::address::AddressType::P2tr) => HwiAddressType::Tap,
+            _ => {
+                return Err(HwiError::new(
+                    HwiErrorCode::BadArgument,
+                    "Ledger requires BIP 44 standard paths",
+                ));
+            }
+        };
+        if !is_standard_path(path, addr_type, network) {
+            return Err(HwiError::new(
+                HwiErrorCode::BadArgument,
+                "Ledger requires BIP 44 standard paths",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn hwi_singlesig_display_descriptor(
+    descriptor: &str,
+) -> Result<std::borrow::Cow<'_, str>, HwiError> {
+    let descriptor = checksum::verify_checksum(descriptor)
+        .map_err(|err| HwiError::new(HwiErrorCode::DeviceFailure, err.to_string()))?;
+    for (prefix, suffix) in [
+        ("pkh(", ")"),
+        ("wpkh(", ")"),
+        ("sh(wpkh(", "))"),
+        ("tr(", ")"),
+    ] {
+        if let Some(key) = descriptor
+            .strip_prefix(prefix)
+            .and_then(|value| value.strip_suffix(suffix))
+            .and_then(|value| value.strip_suffix("/*"))
+        {
+            return Ok(std::borrow::Cow::Owned(format!("{prefix}{key}/0{suffix}")));
+        }
+    }
+    Ok(std::borrow::Cow::Borrowed(descriptor))
 }
 
 fn descriptor_type_for(addr_type: HwiAddressType) -> DescriptorType {
@@ -3213,6 +3268,98 @@ mod tests {
         ));
         assert_eq!(device.code, HwiErrorCode::DeviceConnectionError.code());
         assert_eq!(device.error, "boom");
+    }
+
+    #[test]
+    fn hwi_singlesig_display_ranges_select_zero_and_validate_original_checksum() {
+        let key = "[f5acc2fd/84h/1h/0h]tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT";
+        for (prefix, suffix) in [
+            ("pkh(", ")"),
+            ("wpkh(", ")"),
+            ("sh(wpkh(", "))"),
+            ("tr(", ")"),
+        ] {
+            for branch in [0, 1] {
+                let ranged = format!("{prefix}{key}/{branch}/*{suffix}");
+                let concrete = format!("{prefix}{key}/{branch}/0{suffix}");
+                assert_eq!(
+                    hwi_singlesig_display_descriptor(&ranged).unwrap(),
+                    hwi_singlesig_display_descriptor(&concrete).unwrap()
+                );
+                let mut engine = checksum::Engine::new();
+                engine.input(&ranged).unwrap();
+                let checksummed = format!("{ranged}#{}", engine.checksum());
+                assert_eq!(
+                    hwi_singlesig_display_descriptor(&checksummed).unwrap(),
+                    concrete
+                );
+                let err =
+                    hwi_singlesig_display_descriptor(&format!("{ranged}#00000000")).unwrap_err();
+                assert_eq!(err.code, HwiErrorCode::DeviceFailure.code());
+                let explicit = format!("{prefix}{key}/{branch}/7{suffix}");
+                assert_eq!(
+                    hwi_singlesig_display_descriptor(&explicit).unwrap(),
+                    explicit
+                );
+            }
+        }
+        for descriptor in [
+            format!("wsh(sortedmulti(1,{key}/0/*))"),
+            format!("wpkh({key}/*/0)"),
+            format!("wpkh({key}/0/*h)"),
+        ] {
+            assert_eq!(
+                hwi_singlesig_display_descriptor(&descriptor).unwrap(),
+                descriptor
+            );
+        }
+    }
+
+    #[test]
+    fn ledger_display_validation_preserves_address_type_network_and_full_path() {
+        for (addr_type, purpose) in [
+            (HwiAddressType::Legacy, 44),
+            (HwiAddressType::ShWit, 49),
+            (HwiAddressType::Wit, 84),
+            (HwiAddressType::Tap, 86),
+        ] {
+            for (network, coin) in [(Network::Bitcoin, 0), (Network::Testnet, 1)] {
+                for branch in [0, 1] {
+                    let address = DisplayAddress::ByPath {
+                        path: format!("m/{purpose}h/{coin}h/0h/{branch}/7")
+                            .parse()
+                            .unwrap(),
+                        display: true,
+                        address_format: Some(address_type_for(addr_type)),
+                    };
+                    validate_ledger_display_address(&address, network).unwrap();
+                }
+            }
+        }
+        for (path, addr_type, network) in [
+            ("m/84h/1h/0h/0/0", HwiAddressType::Legacy, Network::Testnet),
+            ("m/84h/1h/0h/0/0", HwiAddressType::ShWit, Network::Testnet),
+            ("m/84h/1h/0h/0/0", HwiAddressType::Tap, Network::Testnet),
+            ("m/84h/0h/0h/0/0", HwiAddressType::Wit, Network::Testnet),
+            ("m/84h/1h/0h/0/0", HwiAddressType::Wit, Network::Bitcoin),
+            ("m/84h/1h/0h/2/0", HwiAddressType::Wit, Network::Testnet),
+            ("m/84h/1h/0h/0h/0", HwiAddressType::Wit, Network::Testnet),
+            ("m/84h/1h/0h/0/0h", HwiAddressType::Wit, Network::Testnet),
+            ("m/84h/1h/0h/0", HwiAddressType::Wit, Network::Testnet),
+            ("m/84h/1h/0h/0/0/0", HwiAddressType::Wit, Network::Testnet),
+            ("m/84/1h/0h/0/0", HwiAddressType::Wit, Network::Testnet),
+            ("m/84h/1/0h/0/0", HwiAddressType::Wit, Network::Testnet),
+            ("m/84h/1h/0/0/0", HwiAddressType::Wit, Network::Testnet),
+        ] {
+            let address = DisplayAddress::ByPath {
+                path: path.parse().unwrap(),
+                display: true,
+                address_format: Some(address_type_for(addr_type)),
+            };
+            let err = validate_ledger_display_address(&address, network).unwrap_err();
+            assert_eq!(err.code, HwiErrorCode::BadArgument.code());
+            assert_eq!(err.error, "Ledger requires BIP 44 standard paths");
+        }
     }
 
     #[test]

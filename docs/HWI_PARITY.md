@@ -77,6 +77,13 @@ device matches. With a device attached an invalid path is `-7` (except BitBox
 an unknown `-t` with `-d` (and no fingerprint) is `-4` from the `get_client`
 path. `enumerate` ignores an unrecognized `-t`, like upstream.
 
+For `displayaddress --desc`, checksum verification failures report code `-13`,
+matching upstream descriptor parsing exceptions. Missing origins and device
+ownership mismatches remain bad arguments (`-7`).
+Ledger's wrong-network descriptor case approves the reference's unusual-path
+public-key export warning before asserting its standard-path rejection (`-7`).
+The harness installs explicit automation for expected-error cases as well.
+
 ## Final acceptance gate
 
 Parity is accepted only when the unmodified Bitcoin Core HWI 3.2.0 device
@@ -187,6 +194,24 @@ wrapped SegWit `sh(wsh(...))`, and native SegWit `wsh(...)` descriptors. Each
 invocation registers the inferred policy, uses the returned HMAC, and displays
 the address immediately; it does not rely on a persistent registry.
 
+Singlesig `hwi displayaddress --desc` resolves only a terminal `/*` to `/0`,
+after validating any checksum on the original descriptor. Concrete suffixes
+are preserved, ownership checks still apply, and native descriptor APIs retain
+their existing behavior. Ledger applies the direct-path standardness checks
+to descriptor paths too: wrapper/purpose agreement, network coin type, exactly
+three hardened account components and two unhardened suffix components, and
+change branch zero or one.
+
+The differential case table includes `wpkh` and `sh(wpkh)` terminal wildcards
+and concrete `/1/7` suffixes, each with no checksum, a valid checksum, and an
+invalid checksum. It includes the same `pkh` cases except on BitBox02, which
+does not support legacy display. Checksummed wildcard ownership errors cover
+both a foreign fingerprint and a foreign account xpub carrying the device's
+fingerprint. Ledger error cases cover owned purpose-84 keys in `pkh` and
+`sh(wpkh)` wrappers, branch `/2/0`, hardened `/0/0h`, short `/0` and long
+`/0/0/0` suffixes, and an actually exported owned `84h/0h/0h` account xpub
+under the test network. These are coverage definitions, not execution evidence.
+
 The project-owned `tests::candidate_displayaddress_matches_reference`
 differential test covers sorted 2-of-2 policies for all three wrappers and a
 reverse-ordered native SegWit `multi` policy. Pinned HWI's Ledger tests mark
@@ -260,6 +285,8 @@ requires host word entry and remains unsupported.
 KeepKey parity runs against emulator UDP `127.0.0.1:11044`; confirmation and
 state automation uses the debug link on `127.0.0.1:11045`. Start `keepkey` and
 `keepkey-init` before `hwi-parity-keepkey`.
+For transaction signing, the harness sends debug approvals only for the
+candidate; Python HWI's debug client supplies its own reference approvals.
 
 The differential suite covers enumerate, global arguments, xpubs, six
 non-Taproot descriptor/keypool forms, legacy and SegWit transaction signing,

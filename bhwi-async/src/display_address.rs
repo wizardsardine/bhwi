@@ -445,6 +445,16 @@ mod tests {
     }
 
     #[test]
+    fn native_singlesig_display_descriptor_remains_concrete_only() {
+        let descriptor = "wpkh([f5acc2fd/84h/1h/0h]tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT/0/*)";
+
+        assert!(matches!(
+            parse_singlesig_display_descriptor(descriptor),
+            Err(DisplayAddressError::Bip32(_))
+        ));
+    }
+
+    #[test]
     fn display_descriptor_requires_origin() {
         let err = parse_singlesig_display_descriptor("wpkh(tpubDD8d3xExampleKeyMaterial/0/7)")
             .expect_err("missing origin");

@@ -3752,6 +3752,28 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             )),
         ];
 
+        for descriptor in [
+            format!("wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/0/*)"),
+            format!("sh(wpkh([{fingerprint}/49h/1h/0h]{sh_wit_xpub}/0/*))"),
+            format!("wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/1/7)"),
+            format!("sh(wpkh([{fingerprint}/49h/1h/0h]{sh_wit_xpub}/1/7))"),
+        ] {
+            cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &descriptor,
+            )));
+            let mut checksum = miniscript::descriptor::checksum::Engine::new();
+            checksum.input(&descriptor)?;
+            cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                device_type,
+                &format!("{descriptor}#{}", checksum.checksum()),
+            )));
+            cases.push(DisplayAddressCase::error(displayaddress_desc_args(
+                device_type,
+                &format!("{descriptor}#xxxxxxxx"),
+            )));
+        }
+
         if device_type != "bitbox02" {
             let legacy_xpub = reference_xpub(device_type, "m/44'/1'/0'")?.to_string();
             cases.insert(
@@ -3766,6 +3788,23 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 device_type,
                 &format!("pkh([{fingerprint}/44h/1h/0h]{legacy_xpub}/0/0)"),
             )));
+            for suffix in ["0/*", "1/7"] {
+                let descriptor = format!("pkh([{fingerprint}/44h/1h/0h]{legacy_xpub}/{suffix})");
+                cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                    device_type,
+                    &descriptor,
+                )));
+                let mut checksum = miniscript::descriptor::checksum::Engine::new();
+                checksum.input(&descriptor)?;
+                cases.push(DisplayAddressCase::success(displayaddress_desc_args(
+                    device_type,
+                    &format!("{descriptor}#{}", checksum.checksum()),
+                )));
+                cases.push(DisplayAddressCase::error(displayaddress_desc_args(
+                    device_type,
+                    &format!("{descriptor}#xxxxxxxx"),
+                )));
+            }
         }
 
         cases.push(DisplayAddressCase::new(
@@ -3784,10 +3823,45 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
             device_type,
             &format!("wpkh([{fingerprint}/84h/1h/0h]not_an_xpub/0/0)"),
         )));
+        for descriptor in [
+            format!("wpkh([00000000/84h/1h/0h]{wit_xpub_string}/0/*)"),
+            format!(
+                "wpkh([{fingerprint}/84h/1h/0h]{}/0/*)",
+                Xpub::from_priv(
+                    &Secp256k1::new(),
+                    &Xpriv::new_master(Network::Testnet, &[42_u8; 32])?.derive_priv(
+                        &Secp256k1::new(),
+                        &DerivationPath::from_str("m/84h/1h/0h")?
+                    )?,
+                )
+            ),
+        ] {
+            let mut checksum = miniscript::descriptor::checksum::Engine::new();
+            checksum.input(&descriptor)?;
+            cases.push(DisplayAddressCase::error(displayaddress_desc_args(
+                device_type,
+                &format!("{descriptor}#{}", checksum.checksum()),
+            )));
+        }
         if device_type == "keepkey" {
             cases.extend(keepkey_multisig_display_cases(device_type, &fingerprint)?);
         }
         if device_type == "ledger" {
+            let mainnet_origin_xpub = reference_xpub(device_type, "m/84'/0'/0'")?;
+            for descriptor in [
+                format!("pkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/0/0)"),
+                format!("sh(wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/0/0))"),
+                format!("wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/2/0)"),
+                format!("wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/0/0h)"),
+                format!("wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/0)"),
+                format!("wpkh([{fingerprint}/84h/1h/0h]{wit_xpub_string}/0/0/0)"),
+                format!("wpkh([{fingerprint}/84h/0h/0h]{mainnet_origin_xpub}/0/0)"),
+            ] {
+                cases.push(DisplayAddressCase::error(displayaddress_desc_args(
+                    device_type,
+                    &descriptor,
+                )));
+            }
             cases.extend(ledger_multisig_display_cases(device_type)?);
         }
         if device_type == "trezor" {
@@ -4101,6 +4175,9 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
         if matches!(case.expect, ExpectedResult::Success) {
             return prepare_displayaddress_run(&case.args, reference);
         }
+        if arg_value(&case.args, "--device-type") == Some("ledger") {
+            set_ledger_automation(true)?;
+        }
         Ok(None)
     }
 
@@ -4204,7 +4281,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 Ok(None)
             }
             "trezor" if !reference => Ok(Some(spawn_trezor_approval())),
-            "keepkey" => Ok(Some(spawn_debug_approval(
+            "keepkey" if !reference => Ok(Some(spawn_debug_approval(
                 KEEPKEY_DEBUGLINK_ADDR,
                 DebugButton::Yes,
                 Instant::now() + command_timeout(),
