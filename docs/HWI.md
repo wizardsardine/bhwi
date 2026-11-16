@@ -28,6 +28,14 @@ errors exit `0`, and argparse-style usage errors exit `2` with
 `{"error": "...", "code": -2}` on stdout and usage text on stderr. See
 [HWI_PARITY.md](HWI_PARITY.md#exit-status-contract).
 
+For singlesig `hwi displayaddress --desc`, a terminal `/*` selects index zero;
+concrete indices remain unchanged. Any supplied checksum is checked against
+the original descriptor before wildcard normalization, and device ownership
+is still required. Native descriptor APIs are unchanged. Ledger singlesig
+descriptors must satisfy the same standard-path rules as `--path`: matching
+wrapper and purpose, network coin type, three hardened account components,
+and exactly two unhardened suffix components with branch zero or one.
+
 ## Feature Parity
 
 |Command           |Ledger|Jade |Coldcard|Trezor|KeepKey|BitBox02|Notes                                                                 |

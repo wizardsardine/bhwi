@@ -60,6 +60,9 @@ on-demand workflow.
 CI uses:
 
 - Determinate Systems Nix installer
+- Linux HID subsystem initialization (`sudo modprobe hid` when
+  `/sys/class/hidraw` is absent), checked on every runner before device
+  discovery, including emulator-only runs.
 - `actions/cache` for mutable emulator build caches under
   `$XDG_CACHE_HOME/bhwi`. The KeepKey cache key includes runner OS and
   architecture, the exact `flake.lock` hash, and the build-input hash; its sole

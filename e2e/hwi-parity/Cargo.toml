@@ -14,3 +14,6 @@ serde_json.workspace = true
 bhwi-e2e-trezor = { path = "../trezor" }
 bhwi-e2e-keepkey = { path = "../keepkey" }
 tokio = { workspace = true, features = ["net", "rt", "time"] }
+
+[dev-dependencies]
+miniscript.workspace = true
