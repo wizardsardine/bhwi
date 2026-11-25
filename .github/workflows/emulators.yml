@@ -21,6 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize HID subsystem
+        run: |
+          if [ ! -d /sys/class/hidraw ]; then sudo modprobe hid; fi
+          test -d /sys/class/hidraw
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Show flake outputs
         run: nix flake show --allow-import-from-derivation
@@ -41,6 +45,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize HID subsystem
+        run: |
+          if [ ! -d /sys/class/hidraw ]; then sudo modprobe hid; fi
+          test -d /sys/class/hidraw
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Start BitBox02 simulator
         run: |
@@ -204,6 +212,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize HID subsystem
+        run: |
+          if [ ! -d /sys/class/hidraw ]; then sudo modprobe hid; fi
+          test -d /sys/class/hidraw
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: actions/cache@v4
         with:
@@ -272,6 +284,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize HID subsystem
+        run: |
+          if [ ! -d /sys/class/hidraw ]; then sudo modprobe hid; fi
+          test -d /sys/class/hidraw
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: actions/cache@v4
         with:
@@ -489,6 +505,10 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize HID subsystem
+        run: |
+          if [ ! -d /sys/class/hidraw ]; then sudo modprobe hid; fi
+          test -d /sys/class/hidraw
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: actions/cache@v4
         with:
@@ -597,6 +617,10 @@ jobs:
             upstream_app: hwi-upstream-trezor-t
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize HID subsystem
+        run: |
+          if [ ! -d /sys/class/hidraw ]; then sudo modprobe hid; fi
+          test -d /sys/class/hidraw
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: actions/cache@v4
         with:
@@ -743,6 +767,10 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize HID subsystem
+        run: |
+          if [ ! -d /sys/class/hidraw ]; then sudo modprobe hid; fi
+          test -d /sys/class/hidraw
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Start Specter-DIY simulator
         run: |
@@ -871,6 +899,10 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize HID subsystem
+        run: |
+          if [ ! -d /sys/class/hidraw ]; then sudo modprobe hid; fi
+          test -d /sys/class/hidraw
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: actions/cache@v4
         with:

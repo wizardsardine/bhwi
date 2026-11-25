@@ -61,7 +61,12 @@ type HwiResult<T> = std::result::Result<T, HwiError>;
 /// Use [`parse_args`] to obtain an executable [`HwiRequest`], or [`run_cli`] for
 /// stdin handling and compatible stdout, stderr, and exit-status behavior.
 #[derive(Debug, Clone, Parser)]
-#[command(author, version, about = "Python HWI compatible interface")]
+#[command(
+    author,
+    version,
+    about = "Python HWI compatible interface",
+    args_override_self = true
+)]
 pub struct HwiCli {
     #[command(subcommand)]
     command: HwiCliCommand,
@@ -70,10 +75,10 @@ pub struct HwiCli {
     #[arg(long = "device-path", short = 'd')]
     device_path: Option<String>,
     #[arg(long, short = 'f')]
-    fingerprint: Option<Fingerprint>,
+    fingerprint: Option<String>,
     #[arg(long, short = 'p')]
     password: Option<String>,
-    #[arg(long, default_value = "main")]
+    #[arg(long, default_value = "main", value_parser = parse_chain_arg)]
     chain: String,
     #[arg(long)]
     debug: bool,
@@ -100,8 +105,8 @@ pub enum HwiCliCommand {
         #[arg(long = "addr-type", value_enum, default_value = "wit")]
         addr_type: HwiAddressType,
         /// The account number, defaulting to zero.
-        #[arg(long, default_value_t = 0)]
-        account: u32,
+        #[arg(long, default_value = "0", value_parser = parse_integer, allow_negative_numbers = true)]
+        account: serde_json::Number,
     },
     /// Signs a base64-encoded PSBT.
     Signtx {
@@ -140,15 +145,17 @@ pub enum HwiCliCommand {
     /// Retrieves receive and change descriptors for an account.
     Getdescriptors {
         /// The account number, defaulting to zero.
-        #[arg(long, default_value_t = 0)]
-        account: u32,
+        #[arg(long, default_value = "0", value_parser = parse_integer, allow_negative_numbers = true)]
+        account: serde_json::Number,
     },
     /// Retrieves ranged descriptors for Bitcoin Core keypool import.
     Getkeypool {
         /// The inclusive first child index.
-        start: u32,
+        #[arg(value_parser = parse_integer, allow_negative_numbers = true)]
+        start: serde_json::Number,
         /// The inclusive last child index.
-        end: u32,
+        #[arg(value_parser = parse_integer, allow_negative_numbers = true)]
+        end: serde_json::Number,
         /// A compatibility flag; keypool import is enabled unless `nokeypool` is set.
         #[arg(long, action = ArgAction::SetTrue, conflicts_with = "nokeypool")]
         keypool: bool,
@@ -165,8 +172,8 @@ pub enum HwiCliCommand {
         #[arg(long, action = ArgAction::SetTrue)]
         all: bool,
         /// The account number, ignored when `path` is supplied.
-        #[arg(long, default_value_t = 0)]
-        account: u32,
+        #[arg(long, default_value = "0", value_parser = parse_integer, allow_negative_numbers = true)]
+        account: serde_json::Number,
         /// An explicit derivation path starting with `m/` and ending in `/*`.
         #[arg(long)]
         path: Option<String>,
@@ -241,7 +248,7 @@ pub struct HwiSelector {
     /// The Bitcoin network used for device operations and account paths.
     pub network: Network,
     /// The master fingerprint to match after opening a device, if supplied.
-    pub fingerprint: Option<Fingerprint>,
+    pub fingerprint: Option<String>,
     /// The raw HWI device-family or model name, resolved during device lookup.
     pub device_type: Option<String>,
     /// An explicit native transport path, if supplied.
@@ -261,7 +268,7 @@ impl HwiSelector {
         // crate in the build can widen past this one's.
         let selector = DeviceSelector {
             network: self.network,
-            fingerprint: self.fingerprint,
+            fingerprint: self.fingerprint.as_deref().and_then(|raw| raw.parse().ok()),
             device_type,
             device_path: self.device_path.clone(),
             include_emulators: self.include_emulators,
@@ -301,6 +308,15 @@ fn hwi_device_manager(selector: &HwiSelector) -> Result<DeviceManager, HwiError>
         return Err(HwiError::new(
             HwiErrorCode::NoDeviceType,
             "You must specify a device type or fingerprint for all commands except enumerate",
+        ));
+    }
+    if selector.fingerprint.as_deref().is_some_and(|raw| {
+        raw.parse::<Fingerprint>().is_err()
+            || raw.chars().any(|character| character.is_ascii_uppercase())
+    }) {
+        return Err(HwiError::new(
+            HwiErrorCode::DeviceConnectionError,
+            "Could not find device with specified fingerprint or type",
         ));
     }
     let device_type = match selector.device_type.as_deref() {
@@ -387,7 +403,7 @@ pub enum HwiCommand {
         /// The address type used to select the account's derivation purpose.
         addr_type: HwiAddressType,
         /// The BIP44-style account number.
-        account: u32,
+        account: serde_json::Number,
     },
     /// Signs a PSBT, preparing Ledger policy contexts when required.
     SignTx {
@@ -416,20 +432,20 @@ pub enum HwiCommand {
     /// Retrieves receive and change descriptors for supported address types.
     GetDescriptors {
         /// The BIP44-style account number.
-        account: u32,
+        account: serde_json::Number,
     },
     /// Retrieves ranged Bitcoin Core descriptor-import records.
     GetKeypool {
         /// The inclusive first child index.
-        start: u32,
-        /// The inclusive last child index, which must not precede `start`.
-        end: u32,
+        start: serde_json::Number,
+        /// The inclusive last child index, returned unchanged even for a reversed range.
+        end: serde_json::Number,
         /// Whether to select only change; otherwise both branches are returned without `path`.
         internal: bool,
         /// The value for both `keypool` and `active` in the returned records.
         keypool: bool,
         /// The BIP44-style account number, ignored when `path` is supplied.
-        account: u32,
+        account: serde_json::Number,
         /// The address type to use unless `all` is true.
         addr_type: HwiAddressType,
         /// Whether to return every address type supported by the selected device.
@@ -825,7 +841,7 @@ pub struct HwiGetKeypoolEntry {
     /// The wildcard descriptor with checksum and `h`-notation hardened paths.
     pub desc: String,
     /// The inclusive first and last child indices; `desc` remains ranged.
-    pub range: [u32; 2],
+    pub range: [serde_json::Number; 2],
     /// The import timestamp marker, set to `"now"` in generated responses.
     pub timestamp: &'static str,
     /// Whether this describes the internal change branch.
@@ -853,7 +869,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = HwiCli::try_parse_from(args)
+    let cli = HwiCli::try_parse_from(integer_cli_args(args.into_iter().map(Into::into).collect()))
         .map_err(|err| HwiError::new(HwiErrorCode::BadArgument, err.to_string()))?;
     request_from_cli(cli)
 }
@@ -867,8 +883,7 @@ where
 /// Device lookup generally precedes operation-argument validation. Commands
 /// requiring a device report `-1` without a type or fingerprint. Unknown types
 /// report `-4` with an explicit path and no fingerprint, otherwise `-3`;
-/// enumeration ignores unknown type filters. Keypool bounds and some unsupported
-/// address modes are checked before device lookup.
+/// enumeration ignores fingerprint and unknown type filters.
 pub async fn process_request(request: HwiRequest) -> HwiResponse {
     match request.command {
         HwiCommand::Enumerate => enumerate(request.selector).await,
@@ -1022,7 +1037,7 @@ fn exit_status(outcome: &CliOutcome) -> u8 {
 
 fn cli_outcome(args: Vec<OsString>) -> CliOutcome {
     let prog = program_name(&args);
-    let mut cli = match HwiCli::try_parse_from(args) {
+    let mut cli = match HwiCli::try_parse_from(integer_cli_args(args)) {
         Ok(cli) => cli,
         Err(err) => return clap_outcome(&prog, err),
     };
@@ -1634,12 +1649,7 @@ async fn device_for_pin_command(
     action: HwiUnsupportedDeviceAction,
     contact_device: bool,
 ) -> Result<crate::Device, HwiError> {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return Err(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
+    let manager = hwi_device_manager(&selector)?;
     // Reading a fingerprint means unlocking first, which is what the PIN is for.
     if !contact_device && selector.fingerprint.is_some() {
         return Err(HwiError::new(
@@ -1648,7 +1658,6 @@ async fn device_for_pin_command(
         ));
     }
 
-    let manager = hwi_device_manager(&selector)?;
     let found = if contact_device {
         manager.get_device_with_fingerprint().await
     } else {
@@ -1901,15 +1910,26 @@ fn format_hwi_backup_filename<Tz: chrono::TimeZone>(time: chrono::DateTime<Tz>) 
 async fn get_master_xpub(
     selector: HwiSelector,
     addr_type: HwiAddressType,
-    account: u32,
+    account: serde_json::Number,
 ) -> HwiResponse {
+    let (_manager, mut device) = match find_hwi_device(&selector).await {
+        Ok(found) => found,
+        Err(err) => return HwiResponse::Error(err),
+    };
+    let account = match derivation_account(&account) {
+        Ok(account) => account,
+        Err(err) => return HwiResponse::Error(err),
+    };
     let path = match master_xpub_path(addr_type, selector.network, account) {
         Ok(path) => path,
         Err(err) => {
             return HwiResponse::Error(HwiError::new(HwiErrorCode::BadArgument, err.to_string()));
         }
     };
-    get_xpub(selector, format!("m/{path}"), false).await
+    match device.device().get_extended_pubkey(path, false).await {
+        Ok(xpub) => HwiResponse::GetXpub(get_xpub_response(xpub, false)),
+        Err(err) => HwiResponse::Error(classify_anyhow_device_error(&anyhow::Error::new(err))),
+    }
 }
 
 async fn sign_tx(selector: HwiSelector, psbt: String) -> HwiResponse {
@@ -2276,7 +2296,7 @@ async fn get_xpub(selector: HwiSelector, path: String, expert: bool) -> HwiRespo
     }
 }
 
-async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
+async fn get_descriptors(selector: HwiSelector, account: serde_json::Number) -> HwiResponse {
     let (manager, mut device) = match find_hwi_device(&selector).await {
         Ok(found) => found,
         Err(err) => return HwiResponse::Error(err),
@@ -2287,6 +2307,10 @@ async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
         Err(err) => {
             return HwiResponse::Error(classify_device_error(&err));
         }
+    };
+    let account = match derivation_account(&account) {
+        Ok(account) => account,
+        Err(err) => return HwiResponse::Error(err),
     };
     let device_type = device.device_type();
     let model = device.model().to_owned();
@@ -2333,41 +2357,17 @@ async fn get_descriptors(selector: HwiSelector, account: u32) -> HwiResponse {
 }
 
 struct HwiGetKeypoolRequest {
-    start: u32,
-    end: u32,
+    start: serde_json::Number,
+    end: serde_json::Number,
     internal: bool,
     keypool: bool,
-    account: u32,
+    account: serde_json::Number,
     addr_type: HwiAddressType,
     all: bool,
     path: Option<String>,
 }
 
 async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> HwiResponse {
-    if selector.device_type.is_none() && selector.fingerprint.is_none() {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::NoDeviceType,
-            "You must specify a device type or fingerprint for all commands except enumerate",
-        ));
-    }
-    if request.start > request.end {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::BadArgument,
-            "keypool start index must be less than or equal to end index",
-        ));
-    }
-    if !request.all
-        && request.addr_type == HwiAddressType::Tap
-        && selector.device_type.as_deref().is_some_and(|raw| {
-            raw.eq_ignore_ascii_case("keepkey") || raw.eq_ignore_ascii_case("keepkey_simulator")
-        })
-    {
-        return HwiResponse::Error(HwiError::new(
-            HwiErrorCode::UnsupportedCommand,
-            "Device does not support Taproot",
-        ));
-    }
-
     let (manager, mut device) = match find_hwi_device(&selector).await {
         Ok(found) => found,
         Err(err) => return HwiResponse::Error(err),
@@ -2398,6 +2398,14 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
     } else {
         vec![request.internal]
     };
+    let account = if request.path.is_some() {
+        0
+    } else {
+        match derivation_account(&request.account) {
+            Ok(account) => account,
+            Err(err) => return HwiResponse::Error(err),
+        }
+    };
 
     let mut entries = Vec::new();
     for addr_type in addr_types {
@@ -2416,7 +2424,7 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
                 },
                 None => GetDescriptorOptions::with_account(
                     fingerprint,
-                    request.account,
+                    account,
                     internal,
                     descriptor_type,
                     network,
@@ -2439,7 +2447,7 @@ async fn get_keypool(selector: HwiSelector, request: HwiGetKeypoolRequest) -> Hw
             };
             entries.push(HwiGetKeypoolEntry {
                 desc,
-                range: [request.start, request.end],
+                range: [request.start.clone(), request.end.clone()],
                 timestamp: "now",
                 internal,
                 keypool: request.keypool,
@@ -3116,7 +3124,7 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
     Ok(HwiRequest {
         selector: HwiSelector {
             network,
-            fingerprint: args.fingerprint,
+            fingerprint: args.fingerprint.filter(|raw| !raw.is_empty()),
             device_type,
             device_path,
             include_emulators,
@@ -3128,17 +3136,142 @@ fn request_from_cli(args: HwiCli) -> HwiResult<HwiRequest> {
     })
 }
 
+fn parse_chain_arg(value: &str) -> Result<String, String> {
+    parse_chain(value)
+        .map(|_| value.to_owned())
+        .map_err(|err| err.error)
+}
+
 fn parse_chain(value: &str) -> HwiResult<Network> {
-    match value {
-        "main" | "mainnet" => Ok(Network::Bitcoin),
-        "test" | "testnet" => Ok(Network::Testnet),
-        _ => Network::from_str(value).map_err(|_| {
-            HwiError::new(
-                HwiErrorCode::MissingArguments,
-                format!("argument --chain: invalid choice: '{value}'"),
-            )
-        }),
+    match value.to_ascii_lowercase().as_str() {
+        "main" => Ok(Network::Bitcoin),
+        "test" => Ok(Network::Testnet),
+        "regtest" => Ok(Network::Regtest),
+        "signet" => Ok(Network::Signet),
+        "testnet4" => Ok(Network::Testnet4),
+        _ => Err(HwiError::new(
+            HwiErrorCode::MissingArguments,
+            format!("argument --chain: invalid choice: '{value}'"),
+        )),
     }
+}
+
+fn integer_cli_args(mut args: Vec<OsString>) -> Vec<OsString> {
+    let mut command = None;
+    let mut next_value = None;
+    let mut position = 0;
+    let mut positional_only = false;
+    for arg in args.iter_mut().skip(1) {
+        let Some(raw) = arg.to_str() else { continue };
+        let negative_integer = raw.strip_prefix('-').is_some_and(|digits| {
+            let digits = digits.strip_suffix('\n').unwrap_or(digits);
+            !digits.is_empty() && digits.chars().all(char::is_numeric)
+        });
+        let numeric = if let Some(numeric) = next_value.take() {
+            numeric
+        } else if command.is_none() {
+            match raw {
+                "getmasterxpub" | "getdescriptors" | "getkeypool" => {
+                    command = Some(raw == "getkeypool");
+                }
+                "--device-type" | "--device-path" | "--fingerprint" | "--password" | "--chain" => {
+                    next_value = Some(false);
+                }
+                _ if raw.starts_with("--") => {}
+                _ if raw.starts_with('-') => {
+                    let mut chars = raw[1..].chars();
+                    while let Some(character) = chars.next() {
+                        if matches!(character, 't' | 'd' | 'f' | 'p') {
+                            if chars.as_str().is_empty() {
+                                next_value = Some(false);
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+            false
+        } else if !positional_only && raw == "--" {
+            positional_only = true;
+            false
+        } else if !positional_only && matches!(raw, "--account" | "--path" | "--addr-type") {
+            next_value = Some(raw == "--account");
+            false
+        } else if command == Some(true)
+            && position < 2
+            && (positional_only || !raw.starts_with('-') || raw.contains(' ') || negative_integer)
+        {
+            position += 1;
+            true
+        } else {
+            false
+        };
+        if numeric
+            && raw.starts_with('-')
+            && (raw.contains(' ') || negative_integer)
+            && (!raw.is_ascii() || raw.contains(' ') || raw.ends_with('\n'))
+            && let Ok(integer) = parse_integer(raw)
+        {
+            *arg = integer.to_string().into();
+        }
+    }
+    args
+}
+
+fn parse_integer(value: &str) -> Result<serde_json::Number, String> {
+    let value = value.trim();
+    let (negative, digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return Err(format!("invalid int value: '{value}'"));
+    }
+    let mut decimal = String::with_capacity(digits.len());
+    for character in digits.chars().filter(|character| *character != '_') {
+        let codepoint = character as u32;
+        let digit = [
+            0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6,
+            0xd66, 0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0,
+            0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0,
+            0xaa50, 0xabf0, 0xff10, 0x104a0, 0x10d30, 0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0,
+            0x11450, 0x114d0, 0x11650, 0x116c0, 0x11730, 0x118e0, 0x11950, 0x11c50, 0x11d50,
+            0x11da0, 0x11f50, 0x16a60, 0x16ac0, 0x16b50, 0x1d7ce, 0x1d7d8, 0x1d7e2, 0x1d7ec,
+            0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e950, 0x1fbf0,
+        ]
+        .into_iter()
+        .find_map(|zero| codepoint.checked_sub(zero).filter(|digit| *digit < 10));
+        let Some(digit) = digit else {
+            return Err(format!("invalid int value: '{value}'"));
+        };
+        decimal.push((b'0' + digit as u8) as char);
+    }
+    let digits = decimal.as_str();
+    let digits = digits.trim_start_matches('0');
+    let canonical = if digits.is_empty() {
+        "0".to_owned()
+    } else if negative {
+        format!("-{digits}")
+    } else {
+        digits.to_owned()
+    };
+    canonical
+        .parse()
+        .map_err(|_| format!("invalid int value: '{value}'"))
+}
+
+fn derivation_account(account: &serde_json::Number) -> HwiResult<u32> {
+    account
+        .as_u64()
+        .and_then(|account| u32::try_from(account).ok())
+        .map(|account| account & !(1 << 31))
+        .ok_or_else(|| HwiError::new(HwiErrorCode::BadArgument, "Invalid BIP32 account index"))
 }
 
 fn option_fingerprint<S>(value: &Option<Fingerprint>, ser: S) -> Result<S::Ok, S::Error>
@@ -3154,6 +3287,244 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn negative_unicode_integers_keep_argparse_token_boundaries() {
+        for args in [
+            vec!["hwi", "getkeypool", "-١", "0"],
+            vec!["hwi", "getkeypool", "0", "-١"],
+            vec!["hwi", "getmasterxpub", "--account", "-١"],
+            vec!["hwi", "getdescriptors", "--account", "-١"],
+            vec!["hwi", "getkeypool", "--account", "-١", "0", "1"],
+            vec!["hwi", "getdescriptors", "--account", "-١ "],
+            vec!["hwi", "getdescriptors", "--account", " -١"],
+            vec!["hwi", "getdescriptors", "--account", "-1 "],
+            vec!["hwi", "getkeypool", "-١ ", "0"],
+            vec!["hwi", "getkeypool", " -١", "0"],
+            vec!["hwi", "getkeypool", "-1 ", "0"],
+            vec!["hwi", "getkeypool", "-١_٢ ", "0"],
+            vec!["hwi", "getdescriptors", "--account", "-1\n"],
+            vec!["hwi", "getdescriptors", "--account", "-١\n"],
+            vec!["hwi", "getkeypool", "-1\n", "0"],
+            vec!["hwi", "getkeypool", "-١\n", "0"],
+        ] {
+            let outcome = outcome_of(&args);
+            assert_eq!(exit_status(&outcome), 0);
+            let CliOutcome::Request(request) = outcome else {
+                panic!("expected integer request")
+            };
+            let HwiResponse::Error(error) = futures::executor::block_on(process_request(*request))
+            else {
+                panic!("expected missing selector");
+            };
+            assert_eq!(error.code, -1);
+        }
+        let help = outcome_of(&["hwi", "getkeypool", "--help"]);
+        assert!(matches!(help, CliOutcome::Help(_)));
+        assert_eq!(exit_status(&help), 0);
+        for args in [
+            vec!["hwi", "getdescriptors", "--account"],
+            vec!["hwi", "getkeypool", "--account"],
+            vec!["hwi", "getkeypool", "--path"],
+            vec!["hwi", "getdescriptors", "--account", "--expert"],
+            vec!["hwi", "getdescriptors", "--account", "-١ x"],
+            vec!["hwi", "getdescriptors", "--account", " - ١"],
+            vec!["hwi", "getkeypool", "-١ x", "0"],
+            vec!["hwi", "getkeypool", " - ١", "0"],
+            vec!["hwi", "getdescriptors", "--account", "-1\n\n"],
+            vec!["hwi", "getdescriptors", "--account", "-١\t"],
+            vec!["hwi", "getkeypool", "-١\n\n", "0"],
+            vec!["hwi", "getkeypool", "-1\t", "0"],
+        ] {
+            assert!(matches!(outcome_of(&args), CliOutcome::Usage(_)));
+            assert_eq!(exit_status(&outcome_of(&args)), 2);
+        }
+        let request =
+            parse_args(["hwi", "--password=-١", "signmessage", "--", "-١", "-١"]).unwrap();
+        assert_eq!(
+            request.command,
+            HwiCommand::SignMessage {
+                message: "-١".to_owned(),
+                path: "-١".to_owned(),
+            }
+        );
+        for digit in ["\u{10d40}", "\u{11bf0}", "\u{116d0}", "\u{1e5f1}"] {
+            assert!(parse_integer(digit).is_err());
+            for args in [
+                vec!["hwi", "getdescriptors", "--account", digit],
+                vec!["hwi", "getkeypool", digit, "0"],
+            ] {
+                assert!(matches!(outcome_of(&args), CliOutcome::Usage(_)));
+                assert_eq!(exit_status(&outcome_of(&args)), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn fingerprint_strings_follow_upstream_selection_precedence() {
+        for raw in ["not-hex", "0", "F5ACC2FD"] {
+            let request = parse_args(["hwi", "-f", raw, "-t", "ledger", "getxpub", "m/0h"])
+                .expect("raw fingerprint is not a usage error");
+            let HwiResponse::Error(error) = futures::executor::block_on(process_request(request))
+            else {
+                panic!("expected selection error");
+            };
+            assert_eq!(error.code, -3, "{raw}");
+            assert!(parse_args(["hwi", "-f", raw, "enumerate"]).is_ok());
+            #[cfg(target_os = "linux")]
+            assert!(parse_args(["hwi", "-f", raw, "installudevrules"]).is_ok());
+        }
+        let request = parse_args(["hwi", "-f", "", "getxpub", "m/0h"]).unwrap();
+        let HwiResponse::Error(error) = futures::executor::block_on(process_request(request))
+        else {
+            panic!("expected missing selector");
+        };
+        assert_eq!(error.code, -1);
+        let request = parse_args(["hwi", "-f", "f5acc2fd", "getxpub", "m/0h"]).unwrap();
+        assert_eq!(request.selector.fingerprint.as_deref(), Some("f5acc2fd"));
+        assert!(hwi_device_manager(&request.selector).is_ok());
+    }
+
+    #[test]
+    fn integer_syntax_is_separate_from_device_and_operation_validation() {
+        for integer in [
+            "-1",
+            "4294967296",
+            "184467440737095516160000",
+            " +001_024 ",
+            "١٢",
+        ] {
+            for command in ["getmasterxpub", "getdescriptors"] {
+                for (selector, expected) in [(None, -1), (Some("notadevice"), -3)] {
+                    let mut args = vec!["hwi"];
+                    if let Some(selector) = selector {
+                        args.extend(["-t", selector]);
+                    }
+                    args.extend([command, "--account", integer]);
+                    let outcome = outcome_of(&args);
+                    assert_eq!(exit_status(&outcome), 0);
+                    let CliOutcome::Request(request) = outcome else {
+                        panic!("integer must parse: {args:?}");
+                    };
+                    let HwiResponse::Error(error) =
+                        futures::executor::block_on(process_request(*request))
+                    else {
+                        panic!("expected selection failure");
+                    };
+                    assert_eq!(error.code, expected, "{args:?}");
+                }
+            }
+        }
+        for (start, end) in [("-1", "0"), ("10", "0"), ("0", "184467440737095516160000")] {
+            for (selector, expected) in [(None, -1), (Some("notadevice"), -3)] {
+                let mut args = vec!["hwi"];
+                if let Some(selector) = selector {
+                    args.extend(["-t", selector]);
+                }
+                args.extend(["getkeypool", start, end]);
+                let request = parse_args(args).unwrap();
+                let HwiResponse::Error(error) =
+                    futures::executor::block_on(process_request(request))
+                else {
+                    panic!("expected missing device");
+                };
+                assert_eq!(error.code, expected);
+            }
+        }
+        for integer in ["", "1.0", "1e3", "0x10", "1__0", "_1", "1_", "+"] {
+            let outcome = outcome_of(&["hwi", "getdescriptors", "--account", integer]);
+            assert_eq!(exit_status(&outcome), 2, "{integer}");
+            assert!(matches!(outcome, CliOutcome::Usage(_)));
+            for args in [
+                vec!["hwi", "getkeypool", integer, "0"],
+                vec!["hwi", "getkeypool", "0", integer],
+                vec![
+                    "hwi",
+                    "getkeypool",
+                    "--path",
+                    "m/84h/1h/0h/0/*",
+                    "--account",
+                    integer,
+                    "0",
+                    "1",
+                ],
+            ] {
+                assert_eq!(exit_status(&outcome_of(&args)), 2, "{args:?}");
+            }
+        }
+        assert_eq!(parse_integer(" +001_024 ").unwrap().to_string(), "1024");
+        assert_eq!(parse_integer("١٢").unwrap().to_string(), "12");
+        assert_eq!(
+            derivation_account(&4294967295u64.into()).unwrap(),
+            2147483647
+        );
+        assert!(derivation_account(&parse_integer("-1").unwrap()).is_err());
+        assert!(derivation_account(&parse_integer("184467440737095516160000").unwrap()).is_err());
+    }
+
+    #[test]
+    fn keypool_range_serialization_preserves_signed_large_and_reversed_integers() {
+        for (start, end) in [("-1", "0"), ("10", "0"), ("0", "184467440737095516160000")] {
+            let response = HwiGetKeypoolEntry {
+                desc: "wpkh(...)#synthetic".to_owned(),
+                range: [parse_integer(start).unwrap(), parse_integer(end).unwrap()],
+                timestamp: "now",
+                internal: false,
+                keypool: true,
+                active: true,
+                watchonly: true,
+            };
+            let json = serde_json::to_value(response).unwrap();
+            assert_eq!(json["range"].to_string(), format!("[{start},{end}]"));
+        }
+    }
+
+    #[test]
+    fn chain_choices_and_repeated_scalars_match_argparse() {
+        for chain in ["main", "test", "regtest", "signet", "testnet4", "TEST"] {
+            assert!(parse_args(["hwi", "--chain", chain, "enumerate"]).is_ok());
+        }
+        for chain in ["mainnet", "testnet", "bogus"] {
+            assert_eq!(
+                exit_status(&outcome_of(&["hwi", "--chain", chain, "enumerate"])),
+                2
+            );
+            assert_eq!(
+                exit_status(&outcome_of(&[
+                    "hwi",
+                    "--chain",
+                    chain,
+                    "--chain",
+                    "test",
+                    "enumerate",
+                ])),
+                2
+            );
+        }
+        let request = parse_args([
+            "hwi",
+            "--chain",
+            "main",
+            "--chain",
+            "test",
+            "-t",
+            "ledger",
+            "-t",
+            "notadevice",
+            "getdescriptors",
+            "--account",
+            "1",
+            "--account",
+            "2",
+        ])
+        .unwrap();
+        assert_eq!(request.selector.network, Network::Testnet);
+        assert_eq!(request.selector.device_type.as_deref(), Some("notadevice"));
+        assert_eq!(
+            request.command,
+            HwiCommand::GetDescriptors { account: 2.into() }
+        );
+    }
+
     use super::*;
     use chrono::{FixedOffset, TimeZone};
 
@@ -3485,7 +3856,7 @@ mod tests {
             request.command,
             HwiCommand::GetMasterXpub {
                 addr_type: HwiAddressType::Wit,
-                account: 0,
+                account: 0.into(),
             }
         );
     }
@@ -3508,7 +3879,7 @@ mod tests {
             request.command,
             HwiCommand::GetMasterXpub {
                 addr_type: HwiAddressType::ShWit,
-                account: 7,
+                account: 7.into(),
             }
         );
     }
@@ -3628,7 +3999,10 @@ mod tests {
 
         assert_eq!(request.selector.network, Network::Testnet);
         assert_eq!(request.selector.device_type.as_deref(), Some("ledger"));
-        assert_eq!(request.command, HwiCommand::GetDescriptors { account: 3 });
+        assert_eq!(
+            request.command,
+            HwiCommand::GetDescriptors { account: 3.into() }
+        );
     }
 
     #[test]
@@ -3652,11 +4026,11 @@ mod tests {
         assert_eq!(
             request.command,
             HwiCommand::GetKeypool {
-                start: 0,
-                end: 10,
+                start: 0.into(),
+                end: 10.into(),
                 internal: false,
                 keypool: true,
-                account: 0,
+                account: 0.into(),
                 addr_type: HwiAddressType::Wit,
                 all: false,
                 path: None,
@@ -3688,11 +4062,11 @@ mod tests {
         assert_eq!(
             request.command,
             HwiCommand::GetKeypool {
-                start: 5,
-                end: 8,
+                start: 5.into(),
+                end: 8.into(),
                 internal: true,
                 keypool: false,
-                account: 2,
+                account: 2.into(),
                 addr_type: HwiAddressType::Wit,
                 all: true,
                 path: Some("m/84h/1h/0h/1/*".to_owned()),
@@ -3720,11 +4094,11 @@ mod tests {
         assert_eq!(
             request.command,
             HwiCommand::GetKeypool {
-                start: 5,
-                end: 8,
+                start: 5.into(),
+                end: 8.into(),
                 internal: false,
                 keypool: true,
-                account: 0,
+                account: 0.into(),
                 addr_type: HwiAddressType::ShWit,
                 all: false,
                 path: None,
@@ -3798,27 +4172,6 @@ mod tests {
             error.error,
             "This device does not support displaying Taproot addresses"
         );
-    }
-
-    #[tokio::test]
-    async fn keepkey_taproot_keypool_is_rejected_before_device_lookup() {
-        let request = parse_args([
-            "hwi",
-            "-t",
-            "keepkey",
-            "getkeypool",
-            "0",
-            "1",
-            "--addr-type",
-            "tap",
-        ])
-        .unwrap();
-        let response = process_request(request).await;
-        let HwiResponse::Error(error) = response else {
-            panic!("expected HWI error");
-        };
-        assert_eq!(error.code, HwiErrorCode::UnsupportedCommand.code());
-        assert_eq!(error.error, "Device does not support Taproot");
     }
 
     #[tokio::test]
@@ -4097,12 +4450,9 @@ mod tests {
 
     #[test]
     fn invalid_chain_choice_is_a_usage_error() {
-        let usage = usage_of(&["hwi", "--chain", "foo", "enumerate"]);
-
-        assert_eq!(
-            usage.message,
-            "hwi: error: argument --chain: invalid choice: 'foo'"
-        );
+        let args = ["hwi", "--chain", "foo", "enumerate"];
+        assert!(matches!(outcome_of(&args), CliOutcome::Usage(_)));
+        assert_eq!(exit_status(&outcome_of(&args)), 2);
     }
 
     #[test]
@@ -4729,7 +5079,7 @@ mod tests {
     fn getkeypool_serializes_importdescriptors_shape() {
         let json = serde_json::to_value(HwiResponse::GetKeypool(vec![HwiGetKeypoolEntry {
             desc: "wpkh(...)#keypool".to_owned(),
-            range: [0, 10],
+            range: [0.into(), 10.into()],
             timestamp: "now",
             internal: false,
             keypool: true,

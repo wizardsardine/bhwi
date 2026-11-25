@@ -260,6 +260,8 @@ requires host word entry and remains unsupported.
 KeepKey parity runs against emulator UDP `127.0.0.1:11044`; confirmation and
 state automation uses the debug link on `127.0.0.1:11045`. Start `keepkey` and
 `keepkey-init` before `hwi-parity-keepkey`.
+For transaction signing, the harness sends debug approvals only for the
+candidate; Python HWI's debug client supplies its own reference approvals.
 
 The differential suite covers enumerate, global arguments, xpubs, six
 non-Taproot descriptor/keypool forms, legacy and SegWit transaction signing,

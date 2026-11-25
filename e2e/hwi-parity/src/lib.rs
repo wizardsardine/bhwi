@@ -4204,7 +4204,7 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 Ok(None)
             }
             "trezor" if !reference => Ok(Some(spawn_trezor_approval())),
-            "keepkey" => Ok(Some(spawn_debug_approval(
+            "keepkey" if !reference => Ok(Some(spawn_debug_approval(
                 KEEPKEY_DEBUGLINK_ADDR,
                 DebugButton::Yes,
                 Instant::now() + command_timeout(),
@@ -4822,6 +4822,25 @@ TrezorClientDebugLink.__init__ = _init_with_pin_sequence
                 expect: ExpectedResult::Success,
             },
         ];
+        for account in ["-1", "4294967296", "184467440737095516160000"] {
+            cases.push(CommandCase {
+                args: args([
+                    "--emulators",
+                    "--chain",
+                    "test",
+                    "--device-type",
+                    device_type,
+                    "getkeypool",
+                    "--account",
+                    account,
+                    "--path",
+                    "m/84h/1h/0h/0/*",
+                    "0",
+                    "1",
+                ]),
+                expect: ExpectedResult::Success,
+            });
+        }
 
         cases.push(CommandCase {
             args: args([
