@@ -59,8 +59,8 @@ like derivation validation, follow device selection.
 |`wipe`            |`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`[x]`   |Successful and error behavior is covered by the surface-specific management evidence below.|
 |`restore`         |`n/a` |`n/a`|`n/a`   |`[~]` |`[~]`  |`[x]`   |BitBox02 has native CLI and candidate `hwi` fresh-image coverage. Model T is covered on three surfaces; Model One host word entry is unsupported. KeepKey's character-cipher flow has no working pinned-HWI reference.|
 |`backup`          |`n/a` |`n/a`|`[x]`   |`n/a` |`n/a`  |`[x]`   |Coldcard file backup and BitBox02 mnemonic-export backup are covered. |
-|`promptpin`       |`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`n/a`   |Trezor-class host PIN behavior is covered by upstream and KeepKey lifecycle evidence.|
-|`sendpin`         |`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`n/a`   |Trezor-class host PIN behavior is covered by upstream and KeepKey lifecycle evidence.|
+|`promptpin`       |`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`n/a`   |KeepKey differential coverage compares initialized-device errors; successful PIN handling is candidate-only lifecycle and upstream evidence.|
+|`sendpin`         |`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`n/a`   |KeepKey differential coverage compares initialized-device errors; successful PIN handling is candidate-only lifecycle and upstream evidence.|
 |`togglepassphrase`|`n/a` |`n/a`|`n/a`   |`[x]` |`[x]`  |`[x]`   |Differential, lifecycle, and upstream evidence is detailed below.     |
 |`installudevrules`|`n/a` |`n/a`|`n/a`   |`n/a` |`n/a`  |`n/a`   |Host-side Python HWI command covered by the shared udev installer. Registered on Linux only.|
 
@@ -99,7 +99,9 @@ skips it.
   fresh-profile Model T checks exercise the direct device API, native `bhwi`
   CLI, and candidate `hwi`; Model One host word entry remains unsupported.
 - **KeepKey:** differential coverage compares management errors, passphrase
-  toggling, and PIN/passphrase behavior. Direct device, native `bhwi` CLI, and
+  toggling, and initialized-device PIN errors/passphrase behavior. Successful
+  PIN prompting and unlocking are candidate-only lifecycle evidence. Direct
+  device, native `bhwi` CLI, and
   candidate `hwi` lifecycles each use a fresh emulator image for setup, wipe,
   and firmware character-cipher restore. The unmodified upstream gate supplies
   additional evidence, but pinned HWI has no working restore flow, so restore
