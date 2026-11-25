@@ -12,11 +12,12 @@ use bhwi::bitcoin::{
 };
 use bhwi::common::{DeviceContext, DisplayAddress, MultisigAddressType, MultisigDisplayAddress};
 use bhwi::ledger::{LedgerWalletPolicy, Version, singlesig_wallet_policy};
-use bhwi::miniscript::descriptor::{DescriptorPublicKey, WalletPolicy, Wildcard};
+use bhwi::miniscript::descriptor::{DescriptorPublicKey, DescriptorType, WalletPolicy, Wildcard};
 
 use crate::HWIDeviceError;
 use crate::device::Device;
 use crate::display_address::multisig_display_address_from_descriptor;
+use crate::psbt::strip_legacy_witness_utxos;
 
 /// A script family used to order Ledger signing passes.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -48,6 +49,31 @@ impl LedgerAddressType {
             Self::Wit => 84,
             Self::Tap => 86,
         }
+    }
+
+    pub(crate) fn of_policy(policy: &WalletPolicy) -> Option<Self> {
+        let descriptor = policy.clone().into_descriptor().ok()?;
+        Some(match descriptor.desc_type() {
+            DescriptorType::Tr => Self::Tap,
+            DescriptorType::Wpkh | DescriptorType::Wsh | DescriptorType::WshSortedMulti => {
+                Self::Wit
+            }
+            DescriptorType::ShWpkh | DescriptorType::ShWsh | DescriptorType::ShWshSortedMulti => {
+                Self::ShWit
+            }
+            DescriptorType::Bare
+            | DescriptorType::Pkh
+            | DescriptorType::Sh
+            | DescriptorType::ShSortedMulti => Self::Legacy,
+        })
+    }
+}
+
+/// A Ledger rejects a legacy input that carries a `witness_utxo`, and needs one
+/// on every SegWit input, including a P2SH-wrapped one.
+pub(crate) fn strip_for_legacy_policy(psbt: &mut Psbt, policy: &LedgerWalletPolicy) {
+    if LedgerAddressType::of_policy(&policy.policy) == Some(LedgerAddressType::Legacy) {
+        strip_legacy_witness_utxos(psbt);
     }
 }
 
@@ -1084,6 +1110,44 @@ mod tests {
                 LedgerAddressType::Wit => assert!(policy.starts_with("wsh(sortedmulti(2,")),
                 LedgerAddressType::Tap => unreachable!(),
             }
+        }
+    }
+
+    #[test]
+    fn a_registered_policy_keeps_witness_utxos_unless_it_is_legacy() {
+        for (address_type, keeps) in [
+            (LedgerAddressType::ShWit, true),
+            (LedgerAddressType::Legacy, false),
+        ] {
+            let (mut psbt, fingerprint) = sample_multisig_psbt(address_type, true);
+            let previous = Transaction {
+                version: TxVersion::TWO,
+                lock_time: LockTime::ZERO,
+                input: Vec::new(),
+                output: vec![psbt.inputs[0].witness_utxo.clone().unwrap()],
+            };
+            psbt.unsigned_tx.input[0].previous_output = OutPoint::new(previous.compute_txid(), 0);
+            psbt.inputs[0].non_witness_utxo = Some(previous);
+            let LedgerSigningPlan::Registered { policy, .. } =
+                ledger_signing_plans(&psbt, fingerprint, Network::Testnet)
+                    .unwrap()
+                    .remove(0)
+            else {
+                panic!("registered policy");
+            };
+            let policy = LedgerWalletPolicy::new(
+                String::new(),
+                Version::V2,
+                WalletPolicy::from_str(&policy).unwrap(),
+            );
+
+            strip_for_legacy_policy(&mut psbt, &policy);
+
+            assert_eq!(
+                psbt.inputs[0].witness_utxo.is_some(),
+                keeps,
+                "{address_type:?}"
+            );
         }
     }
 

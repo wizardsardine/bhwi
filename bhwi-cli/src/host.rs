@@ -8,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use bhwi::common::{self, HostRequest, HostResponse, PinMatrixRequestKind};
-use bhwi_async::{HostInteraction, device::HostInteractionFactory};
+use bhwi_async::{HWIDeviceError, HostInteraction, device::HostInteractionFactory};
 
 use crate::hwi::PIN_MATRIX_DESCRIPTION;
 
@@ -29,7 +29,7 @@ struct CliHostInteraction;
 
 #[async_trait(?Send)]
 impl HostInteraction for CliHostInteraction {
-    async fn respond(&mut self, request: &HostRequest) -> Result<HostResponse, common::Error> {
+    async fn respond(&mut self, request: &HostRequest) -> Result<HostResponse, HWIDeviceError> {
         let terminal = io::stdin().is_terminal();
         read_host_response(
             request,
@@ -53,6 +53,7 @@ impl HostInteraction for CliHostInteraction {
                 io::stderr().flush()
             },
         )
+        .map_err(HWIDeviceError::new)
     }
 }
 struct HiddenOutput {
